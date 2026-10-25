@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    start)
+        [ ! -x "/data/opt/soloist/start.sh" ] || /data/opt/soloist/start.sh &
+        ;;
+    stop)
+        [ ! -x "/data/opt/soloist/stop.sh" ] || /data/opt/soloist/stop.sh
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac

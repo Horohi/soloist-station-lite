@@ -1,0 +1,877 @@
+#include <stdint.h>
+
+/* Minimal Linux system call wrappers for AArch64 (ARM64) */
+
+static inline long sys_read(int fd, void *buf, unsigned long count) {
+    register long x8 __asm__("x8") = 63;
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)buf;
+    register long x2 __asm__("x2") = count;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+
+static inline long sys_write(int fd, const void *buf, unsigned long count) {
+    register long x8 __asm__("x8") = 64;
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)buf;
+    register long x2 __asm__("x2") = count;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+
+static inline int sys_open(const char *filename, int flags, int mode) {
+    register long x8 __asm__("x8") = 56; // openat
+    register long x0 __asm__("x0") = -100; // AT_FDCWD
+    register long x1 __asm__("x1") = (long)filename;
+    register long x2 __asm__("x2") = flags;
+    register long x3 __asm__("x3") = mode;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_close(int fd) {
+    register long x8 __asm__("x8") = 57;
+    register long x0 __asm__("x0") = fd;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_socket(int domain, int type, int protocol) {
+    register long x8 __asm__("x8") = 198;
+    register long x0 __asm__("x0") = domain;
+    register long x1 __asm__("x1") = type;
+    register long x2 __asm__("x2") = protocol;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+}
+
+struct sockaddr_in {
+    uint16_t sin_family;
+    uint16_t sin_port;
+    uint32_t sin_addr;
+    uint8_t sin_zero[8];
+};
+
+static inline int sys_connect(int sockfd, const struct sockaddr_in *addr, unsigned int addrlen) {
+    register long x8 __asm__("x8") = 203;
+    register long x0 __asm__("x0") = sockfd;
+    register long x1 __asm__("x1") = (long)addr;
+    register long x2 __asm__("x2") = addrlen;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+}
+
+struct pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+
+struct timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
+static inline int sys_ppoll(struct pollfd *fds, unsigned int nfds, const struct timespec *tmo, const void *sigmask, unsigned long sigsetsize) {
+    register long x8 __asm__("x8") = 73;
+    register long x0 __asm__("x0") = (long)fds;
+    register long x1 __asm__("x1") = nfds;
+    register long x2 __asm__("x2") = (long)tmo;
+    register long x3 __asm__("x3") = (long)sigmask;
+    register long x4 __asm__("x4") = sigsetsize;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+    return (int)x0;
+}
+
+static inline long sys_clone(unsigned long flags, void *child_stack) {
+    register long x8 __asm__("x8") = 220; // clone
+    register long x0 __asm__("x0") = flags;
+    register long x1 __asm__("x1") = (long)child_stack;
+    register long x2 __asm__("x2") = 0;
+    register long x3 __asm__("x3") = 0;
+    register long x4 __asm__("x4") = 0;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+    return x0;
+}
+
+static inline int sys_execve(const char *filename, const char *const argv[], const char *const envp[]) {
+    register long x8 __asm__("x8") = 221;
+    register long x0 __asm__("x0") = (long)filename;
+    register long x1 __asm__("x1") = (long)argv;
+    register long x2 __asm__("x2") = (long)envp;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+}
+
+static inline void sys_exit(int code) {
+    register long x8 __asm__("x8") = 93;
+    register long x0 __asm__("x0") = code;
+    __asm__ volatile("svc #0" : : "r"(x0), "r"(x8) : "memory");
+    while (1) {}
+}
+
+static inline long sys_wait4(int pid, int *status, int options, void *rusage) {
+    register long x8 __asm__("x8") = 260;
+    register long x0 __asm__("x0") = pid;
+    register long x1 __asm__("x1") = (long)status;
+    register long x2 __asm__("x2") = options;
+    register long x3 __asm__("x3") = (long)rusage;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return x0;
+}
+
+static inline int sys_clock_gettime(int clk_id, struct timespec *tp) {
+    register long x8 __asm__("x8") = 113;
+    register long x0 __asm__("x0") = clk_id;
+    register long x1 __asm__("x1") = (long)tp;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_nanosleep(const struct timespec *req, struct timespec *rem) {
+    register long x8 __asm__("x8") = 101;
+    register long x0 __asm__("x0") = (long)req;
+    register long x1 __asm__("x1") = (long)rem;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+    return (int)x0;
+}
+
+static inline void sys_msleep(long ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000;
+    sys_nanosleep(&ts, 0);
+}
+
+static unsigned long str_len(const char *s) {
+    unsigned long len = 0;
+    while (s && s[len]) len++;
+    return len;
+}
+
+static void log_msg(const char *s) {
+    sys_write(1, s, str_len(s));
+}
+
+static int64_t now_ms(void) {
+    struct timespec ts;
+    if (sys_clock_gettime(1 /* CLOCK_MONOTONIC */, &ts) == 0) {
+        return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
+    }
+    return 0;
+}
+
+static void send_cancel_alice(int quasar_fd) {
+    if (quasar_fd < 0) return;
+    // QuasarMessage: field 210 (remoting) -> Remoting: field 7 ("AliceCapability"), field 8 (alice_capability_method)
+    static const unsigned char cancel_frame_stop[28] = {
+        0x18, 0x00, 0x00, 0x00, // length = 24
+        0x92, 0x0d, 0x15,       // field 210, length 21
+        0x3a, 0x0f, 'A', 'l', 'i', 'c', 'e', 'C', 'a', 'p', 'a', 'b', 'i', 'l', 'i', 't', 'y',
+        0x42, 0x02, 0x08, 0x03  // method = STOP_CONVERSATION (3)
+    };
+    static const unsigned char cancel_frame_queue[28] = {
+        0x18, 0x00, 0x00, 0x00, // length = 24
+        0x92, 0x0d, 0x15,       // field 210, length 21
+        0x3a, 0x0f, 'A', 'l', 'i', 'c', 'e', 'C', 'a', 'b', 'i', 'l', 'i', 't', 'y',
+        0x42, 0x02, 0x08, 0x06  // method = CANCEL_DIALOG_AND_CLEAR_QUEUE (6)
+    };
+    static const unsigned char cancel_frame_tts[28] = {
+        0x18, 0x00, 0x00, 0x00, // length = 24
+        0x92, 0x0d, 0x15,       // field 210, length 21
+        0x3a, 0x0f, 'A', 'l', 'i', 'c', 'e', 'C', 'a', 'b', 'i', 'l', 'i', 't', 'y',
+        0x42, 0x02, 0x08, 0x0e  // method = STOP_TTS (14)
+    };
+    sys_write(quasar_fd, cancel_frame_stop, sizeof(cancel_frame_stop));
+    sys_write(quasar_fd, cancel_frame_queue, sizeof(cancel_frame_queue));
+    sys_write(quasar_fd, cancel_frame_tts, sizeof(cancel_frame_tts));
+    log_msg("[bridge] Sent cancel_alice (stop+queue+tts) to Quasar\n");
+}
+
+static int is_yam_mode = 0;
+
+static const char *get_soloist_bin(void) {
+    return is_yam_mode ? "./bin/soloist" : "/data/opt/soloist/bin/soloist";
+}
+
+static const char *get_toggle_sh(void) {
+    return is_yam_mode ? "./scripts/toggle.sh" : "/data/opt/soloist/scripts/toggle.sh";
+}
+
+static const char *get_search_sh(void) {
+    return is_yam_mode ? "./scripts/search_and_play.sh" : "/data/opt/soloist/scripts/search_and_play.sh";
+}
+
+static const char *get_censor_path(void) {
+    return is_yam_mode ? "./data/censorship" : "/data/opt/soloist/data/censorship";
+}
+
+static void run_soloist_cmd(const char *cmd) {
+    long pid = sys_clone(17 /* SIGCHLD */, 0);
+    if (pid == 0) {
+        if (cmd && cmd[0] == 'p' && cmd[1] == 'l') { // "play"
+            sys_msleep(500); // 500ms delay to let Alice release ALSA dmix
+        }
+        const char *bin = get_soloist_bin();
+        const char *argv[] = {
+            bin,
+            "ctl",
+            "-w",
+            "127.0.0.1:9090",
+            cmd,
+            0
+        };
+        const char *envp[] = {
+            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+            0
+        };
+        sys_execve(bin, argv, envp);
+        sys_exit(1);
+    }
+}
+
+static void run_soloist_cmd2(const char *cmd, const char *arg) {
+    long pid = sys_clone(17 /* SIGCHLD */, 0);
+    if (pid == 0) {
+        const char *bin = get_soloist_bin();
+        const char *argv[] = {
+            bin,
+            "ctl",
+            "-w",
+            "127.0.0.1:9090",
+            cmd,
+            arg,
+            0
+        };
+        const char *envp[] = {
+            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+            0
+        };
+        sys_execve(bin, argv, envp);
+        sys_exit(1);
+    }
+}
+
+static void run_toggle(void) {
+    long pid = sys_clone(17 /* SIGCHLD */, 0);
+    if (pid == 0) {
+        const char *sh = get_toggle_sh();
+        const char *argv[] = {
+            "/bin/sh",
+            sh,
+            0
+        };
+        const char *envp[] = {
+            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+            0
+        };
+        sys_execve("/bin/sh", argv, envp);
+        sys_exit(1);
+    }
+}
+
+static void run_search_and_play(const char *query) {
+    long pid = sys_clone(17 /* SIGCHLD */, 0);
+    if (pid == 0) {
+        const char *sh = get_search_sh();
+        const char *argv[] = {
+            "/bin/sh",
+            sh,
+            query,
+            0
+        };
+        const char *envp[] = {
+            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+            0
+        };
+        sys_execve("/bin/sh", argv, envp);
+        sys_exit(1);
+    }
+}
+
+/* Protobuf parser helpers */
+
+static uint64_t parse_varint(const uint8_t *data, unsigned long len, unsigned long *offset) {
+    uint64_t res = 0;
+    int shift = 0;
+    while (*offset < len && shift < 64) {
+        uint8_t b = data[(*offset)++];
+        res |= (uint64_t)(b & 0x7f) << shift;
+        if (!(b & 0x80)) break;
+        shift += 7;
+    }
+    return res;
+}
+
+static int find_field(const uint8_t *data, unsigned long len, uint32_t field_num, int expected_wire, const uint8_t **val_ptr, unsigned long *val_len, uint64_t *varint_val) {
+    unsigned long offset = 0;
+    while (offset < len) {
+        uint64_t tag = parse_varint(data, len, &offset);
+        uint32_t fnum = (uint32_t)(tag >> 3);
+        int wire = (int)(tag & 7);
+        if (fnum == 0) return 0;
+        if (wire == 0) {
+            uint64_t v = parse_varint(data, len, &offset);
+            if (fnum == field_num && expected_wire == 0) {
+                if (varint_val) *varint_val = v;
+                return 1;
+            }
+        } else if (wire == 2) {
+            uint64_t flen = parse_varint(data, len, &offset);
+            if (offset + flen > len) return 0;
+            if (fnum == field_num && expected_wire == 2) {
+                if (val_ptr) *val_ptr = &data[offset];
+                if (val_len) *val_len = flen;
+                return 1;
+            }
+            offset += flen;
+        } else if (wire == 1) {
+            offset += 8;
+        } else if (wire == 5) {
+            offset += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static void to_lower_ru(char *dst, const char *src, unsigned long max) {
+    unsigned long si = 0, di = 0;
+    while (src[si] && di + 4 < max) {
+        uint8_t c1 = (uint8_t)src[si];
+        if (c1 < 0x80) {
+            if (c1 >= 'A' && c1 <= 'Z') dst[di++] = c1 + 32;
+            else dst[di++] = c1;
+            si++;
+        } else if (c1 == 0xd0) {
+            uint8_t c2 = (uint8_t)src[si + 1];
+            if (c2 == 0x81) { // Ё -> ё
+                dst[di++] = 0xd1;
+                dst[di++] = 0x91;
+            } else if (c2 >= 0x90 && c2 <= 0x9f) { // А-П -> а-п
+                dst[di++] = 0xd0;
+                dst[di++] = c2 + 0x20;
+            } else if (c2 >= 0xa0 && c2 <= 0xaf) { // Р-Я -> р-я
+                dst[di++] = 0xd1;
+                dst[di++] = c2 - 0x20;
+            } else {
+                dst[di++] = c1;
+                dst[di++] = c2;
+            }
+            si += 2;
+        } else if (c1 == 0xd1) {
+            dst[di++] = c1;
+            dst[di++] = src[si + 1];
+            si += 2;
+        } else {
+            dst[di++] = c1;
+            si++;
+        }
+    }
+    dst[di] = 0;
+}
+
+static int str_contains(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return 0;
+    unsigned long hlen = str_len(haystack);
+    unsigned long nlen = str_len(needle);
+    if (nlen == 0) return 1;
+    if (hlen < nlen) return 0;
+    for (unsigned long i = 0; i <= hlen - nlen; i++) {
+        unsigned long j = 0;
+        while (j < nlen && haystack[i + j] == needle[j]) j++;
+        if (j == nlen) return 1;
+    }
+    return 0;
+}
+
+static int str_equal(const char *a, const char *b) {
+    unsigned long i = 0;
+    while (a[i] && b[i]) {
+        if (a[i] != b[i]) return 0;
+        i++;
+    }
+    return a[i] == b[i];
+}
+
+static int mem_equal(const void *a, const void *b, unsigned long n) {
+    const uint8_t *p1 = (const uint8_t *)a;
+    const uint8_t *p2 = (const uint8_t *)b;
+    for (unsigned long i = 0; i < n; i++) {
+        if (p1[i] != p2[i]) return 0;
+    }
+    return 1;
+}
+
+static int spotify_is_active = 0;
+
+static void handle_voice_recognition(int quasar_fd, const char *text, unsigned long text_len) {
+    char lower_buf[512];
+    char raw_buf[512];
+    if (text_len >= sizeof(raw_buf)) text_len = sizeof(raw_buf) - 1;
+    for (unsigned long i = 0; i < text_len; i++) raw_buf[i] = text[i];
+    raw_buf[text_len] = 0;
+
+    to_lower_ru(lower_buf, raw_buf, sizeof(lower_buf));
+
+    log_msg("[bridge] Voice command triggered: \"");
+    log_msg(lower_buf);
+    log_msg("\"\n");
+
+    // Check PAUSE / STOP keywords (Instant Action)
+    if (str_contains(lower_buf, "пауз") ||
+        str_contains(lower_buf, "стоп") ||
+        str_contains(lower_buf, "хватит") ||
+        str_contains(lower_buf, "замолчи") ||
+        str_contains(lower_buf, "останови") ||
+        str_contains(lower_buf, "выключи музыку") ||
+        str_contains(lower_buf, "отключи музыку")) {
+        log_msg("[bridge] Action: PAUSE\n");
+        send_cancel_alice(quasar_fd);
+        spotify_is_active = 0;
+        run_soloist_cmd("pause");
+        return;
+    }
+
+    // Check NEXT TRACK keywords (Instant Action)
+    if (str_contains(lower_buf, "дальше") ||
+        str_contains(lower_buf, "следующ") ||
+        str_contains(lower_buf, "переключи") ||
+        str_contains(lower_buf, "пропусти")) {
+        log_msg("[bridge] Action: NEXT TRACK\n");
+        send_cancel_alice(quasar_fd);
+        spotify_is_active = 1;
+        run_soloist_cmd("next");
+        return;
+    }
+
+    // Check PREVIOUS TRACK keywords (Instant Action)
+    if (str_contains(lower_buf, "назад") ||
+        str_contains(lower_buf, "предыдущ") ||
+        str_contains(lower_buf, "прошл")) {
+        log_msg("[bridge] Action: PREVIOUS TRACK\n");
+        send_cancel_alice(quasar_fd);
+        spotify_is_active = 1;
+        run_soloist_cmd("prev");
+        return;
+    }
+
+    // Check SHUFFLE keywords (Instant Action)
+    if (str_contains(lower_buf, "перемешай") ||
+        str_contains(lower_buf, "случайный порядок") ||
+        str_contains(lower_buf, "случайном порядке") ||
+        str_contains(lower_buf, "включи перемешивание")) {
+        log_msg("[bridge] Action: SHUFFLE ON\n");
+        send_cancel_alice(quasar_fd);
+        run_soloist_cmd2("shuffle", "on");
+        return;
+    }
+    if (str_contains(lower_buf, "по порядку") ||
+        str_contains(lower_buf, "выключи перемешивание") ||
+        str_contains(lower_buf, "отключи перемешивание")) {
+        log_msg("[bridge] Action: SHUFFLE OFF\n");
+        send_cancel_alice(quasar_fd);
+        run_soloist_cmd2("shuffle", "off");
+        return;
+    }
+
+    // Check REPEAT keywords (Instant Action)
+    if (str_contains(lower_buf, "зацикли") ||
+        str_contains(lower_buf, "повторяй") ||
+        str_contains(lower_buf, "включи повтор")) {
+        log_msg("[bridge] Action: REPEAT ON\n");
+        send_cancel_alice(quasar_fd);
+        run_soloist_cmd2("repeat", "context");
+        return;
+    }
+    if (str_contains(lower_buf, "не повторяй") ||
+        str_contains(lower_buf, "выключи повтор") ||
+        str_contains(lower_buf, "отключи повтор")) {
+        log_msg("[bridge] Action: REPEAT OFF\n");
+        send_cancel_alice(quasar_fd);
+        run_soloist_cmd2("repeat", "off");
+        return;
+    }
+
+    // Resume checks (Fast Action)
+    if (str_contains(lower_buf, "продолж") ||
+        str_contains(lower_buf, "играй") ||
+        str_contains(lower_buf, "возобнов") ||
+        str_contains(lower_buf, "заиграй") ||
+        str_contains(lower_buf, "вруби музыку") ||
+        (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
+        log_msg("[bridge] Action: RESUME\n");
+        send_cancel_alice(quasar_fd);
+        spotify_is_active = 1;
+        run_search_and_play("включи музыку");
+        return;
+    }
+
+    // Censorship toggle
+    if (str_contains(lower_buf, "цензур") ||
+        str_contains(lower_buf, "без мата") ||
+        str_contains(lower_buf, "с матом") ||
+        str_contains(lower_buf, "детский режим") ||
+        str_contains(lower_buf, "взрослый режим")) {
+        send_cancel_alice(quasar_fd);
+        if (str_contains(lower_buf, "выключ") ||
+            str_contains(lower_buf, "отключ") ||
+            str_contains(lower_buf, "с матом") ||
+            str_contains(lower_buf, "взрослый режим")) {
+            log_msg("[bridge] Action: CENSORSHIP OFF\n");
+            register long x8 __asm__("x8") = 35; // unlinkat
+            register long x0 __asm__("x0") = -100; // AT_FDCWD
+            register long x1 __asm__("x1") = (long)get_censor_path();
+            register long x2 __asm__("x2") = 0;
+            __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+        } else {
+            log_msg("[bridge] Action: CENSORSHIP ON\n");
+            int fd = sys_open(get_censor_path(), 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
+            if (fd >= 0) {
+                sys_write(fd, "1\n", 2);
+                sys_close(fd);
+            }
+        }
+        return;
+    }
+
+    // Check PLAY / SEARCH / TRACK keywords (Search Action)
+    if (str_contains(lower_buf, "включи") ||
+        str_contains(lower_buf, "поставь") ||
+        str_contains(lower_buf, "сыграй") ||
+        str_contains(lower_buf, "запусти") ||
+        str_contains(lower_buf, "найди") ||
+        str_contains(lower_buf, "вруби") ||
+        str_contains(lower_buf, "слушать")) {
+
+        // Ignore household smart home commands
+        if (str_contains(lower_buf, "свет") ||
+            str_contains(lower_buf, "ламп") ||
+            str_contains(lower_buf, "люстр") ||
+            str_contains(lower_buf, "розетк") ||
+            str_contains(lower_buf, "ночник") ||
+            str_contains(lower_buf, "подсветк") ||
+            str_contains(lower_buf, "бра") ||
+            str_contains(lower_buf, "торшер") ||
+            str_contains(lower_buf, "гирлянд") ||
+            str_contains(lower_buf, "чайник") ||
+            str_contains(lower_buf, "пылесос") ||
+            str_contains(lower_buf, "кондиционер") ||
+            str_contains(lower_buf, "телевизор") ||
+            str_contains(lower_buf, "тв") ||
+            str_contains(lower_buf, "таймер") ||
+            str_contains(lower_buf, "будильник") ||
+            str_contains(lower_buf, "блютуз") ||
+            str_contains(lower_buf, "bluetooth")) {
+            log_msg("[bridge] Household smart command, ignoring\n");
+            return;
+        }
+
+        send_cancel_alice(quasar_fd);
+        spotify_is_active = 1;
+
+        log_msg("[bridge] Action: SEARCH & PLAY query='");
+        log_msg(lower_buf);
+        log_msg("'\n");
+        run_search_and_play(lower_buf);
+        return;
+    }
+}
+
+static uint8_t quasar_buf[65536];
+static unsigned long quasar_buf_pos = 0;
+static char last_uuid[40];
+
+void _start(void) {
+    int test_fd = sys_open("./bin/soloist", 0 /* O_RDONLY */, 0);
+    if (test_fd >= 0) {
+        sys_close(test_fd);
+        is_yam_mode = 1;
+        log_msg("[bridge] soloist-bridge v8 started (YAM plugin mode: relative paths)\n");
+    } else {
+        log_msg("[bridge] soloist-bridge v8 started (Standalone mode: /data/opt/soloist)\n");
+    }
+
+    int quasar_fd = -1;
+    int input_fd = -1;
+    int64_t last_quasar_retry = 0;
+    int64_t last_input_retry = 0;
+
+    int touch_down_start = 0;
+    int64_t touch_down_time = 0;
+    int touch_is_down = 0;
+
+    while (1) {
+        int status = 0;
+        while (sys_wait4(-1, &status, 1 /* WNOHANG */, 0) > 0) {}
+
+        int64_t now = now_ms();
+
+        // 1. Ensure Quasar connection
+        if (quasar_fd < 0 && now - last_quasar_retry >= 2000) {
+            last_quasar_retry = now;
+            int fd = sys_socket(2, 1, 0);
+            if (fd >= 0) {
+                struct sockaddr_in addr;
+                addr.sin_family = 2;
+                addr.sin_port = 0x9326; // 9875 in big-endian
+                addr.sin_addr = 0x0100007f; // 127.0.0.1
+                for (int i = 0; i < 8; i++) addr.sin_zero[i] = 0;
+
+                if (sys_connect(fd, &addr, sizeof(addr)) == 0) {
+                    quasar_fd = fd;
+                    quasar_buf_pos = 0;
+                    log_msg("[bridge] Connected to Quasar on 127.0.0.1:9875\n");
+                } else {
+                    sys_close(fd);
+                }
+            }
+        }
+
+        // 2. Ensure Input device is open
+        if (input_fd < 0 && now - last_input_retry >= 2000) {
+            last_input_retry = now;
+            int fd = sys_open("/dev/input/event1", 0 /* O_RDONLY */ | 00004000 /* O_NONBLOCK */, 0);
+            if (fd >= 0) {
+                input_fd = fd;
+                log_msg("[bridge] Opened /dev/input/event1 (sar0_pad0)\n");
+            }
+        }
+
+        // 3. Poll on available fds
+        struct pollfd pfd[2];
+        int nfds = 0;
+        int quasar_idx = -1;
+        int input_idx = -1;
+
+        if (quasar_fd >= 0) {
+            quasar_idx = nfds;
+            pfd[nfds].fd = quasar_fd;
+            pfd[nfds].events = 0x0001; // POLLIN
+            pfd[nfds].revents = 0;
+            nfds++;
+        }
+        if (input_fd >= 0) {
+            input_idx = nfds;
+            pfd[nfds].fd = input_fd;
+            pfd[nfds].events = 0x0001; // POLLIN
+            pfd[nfds].revents = 0;
+            nfds++;
+        }
+
+        struct timespec tmo;
+        tmo.tv_sec = 0;
+        tmo.tv_nsec = 50000000; // 50ms
+
+        int ret = sys_ppoll(pfd, nfds, &tmo, 0, 0);
+        if (ret > 0) {
+            // Check Quasar socket
+            if (quasar_idx >= 0 && (pfd[quasar_idx].revents & 0x0001)) {
+                long n = sys_read(quasar_fd, quasar_buf + quasar_buf_pos, sizeof(quasar_buf) - quasar_buf_pos);
+                if (n <= 0) {
+                    log_msg("[bridge] Quasar connection closed, reconnecting...\n");
+                    sys_close(quasar_fd);
+                    quasar_fd = -1;
+                    quasar_buf_pos = 0;
+                } else {
+                    quasar_buf_pos += n;
+
+                    // Parse framed messages: [uint32_le length][payload]
+                    while (quasar_buf_pos >= 4) {
+                        uint32_t frame_len = (uint32_t)quasar_buf[0] |
+                                             ((uint32_t)quasar_buf[1] << 8) |
+                                             ((uint32_t)quasar_buf[2] << 16) |
+                                             ((uint32_t)quasar_buf[3] << 24);
+
+                        if (frame_len > sizeof(quasar_buf) - 4) {
+                            log_msg("[bridge] Frame length error, resetting buffer\n");
+                            quasar_buf_pos = 0;
+                            break;
+                        }
+
+                        if (quasar_buf_pos < 4 + frame_len) {
+                            break;
+                        }
+
+                        const uint8_t *frame_body = quasar_buf + 4;
+                        const uint8_t *state_payload = 0;
+                        unsigned long state_len = 0;
+
+                        if (find_field(frame_body, frame_len, 3, 2, &state_payload, &state_len, 0)) {
+                            // AliceState in f=3
+                        } else if (find_field(frame_body, frame_len, 252, 2, &state_payload, &state_len, 0)) {
+                            // AliceState in f=252
+                        }
+
+                        if (state_payload && state_len > 0) {
+                            uint64_t alice_state = 0;
+                            find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state);
+
+                            static uint64_t prev_alice_state = 0;
+                            if (alice_state == 1 && prev_alice_state != 1) {
+                                if (spotify_is_active) {
+                                    run_soloist_cmd("pause");
+                                    spotify_is_active = 0;
+                                }
+                            }
+                            prev_alice_state = alice_state;
+
+                            const uint8_t *asr_payload = 0;
+                            unsigned long asr_len = 0;
+                            uint64_t is_final = 0;
+                            if (find_field(state_payload, state_len, 15, 2, &asr_payload, &asr_len, 0)) {
+                                find_field(asr_payload, asr_len, 2, 0, 0, 0, &is_final);
+                            }
+
+                            const uint8_t *uuid_bytes = 0;
+                            unsigned long uuid_len = 0;
+                            const uint8_t *text_bytes = 0;
+                            unsigned long text_len = 0;
+
+                            find_field(state_payload, state_len, 7, 2, &uuid_bytes, &uuid_len, 0);
+                            find_field(state_payload, state_len, 2, 2, &text_bytes, &text_len, 0);
+
+                            if ((!text_bytes || text_len == 0) && asr_payload) {
+                                find_field(asr_payload, asr_len, 1, 2, &text_bytes, &text_len, 0);
+                            }
+
+                            if (text_bytes && text_len > 0) {
+                                char lower_check[512];
+                                char raw_check[512];
+                                unsigned long clen = text_len;
+                                if (clen >= sizeof(raw_check)) clen = sizeof(raw_check) - 1;
+                                for (unsigned long i = 0; i < clen; i++) raw_check[i] = text_bytes[i];
+                                raw_check[clen] = 0;
+                                to_lower_ru(lower_check, raw_check, sizeof(lower_check));
+
+                                int is_fast_ctrl = 0;
+                                if (str_contains(lower_check, "пауз") ||
+                                    str_contains(lower_check, "стоп") ||
+                                    str_contains(lower_check, "хватит") ||
+                                    str_contains(lower_check, "замолчи") ||
+                                    str_contains(lower_check, "останови") ||
+                                    str_contains(lower_check, "выключи музыку") ||
+                                    str_contains(lower_check, "отключи музыку") ||
+                                    str_contains(lower_check, "дальше") ||
+                                    str_contains(lower_check, "следующ") ||
+                                    str_contains(lower_check, "переключи") ||
+                                    str_contains(lower_check, "пропусти") ||
+                                    str_contains(lower_check, "назад") ||
+                                    str_contains(lower_check, "предыдущ") ||
+                                    str_contains(lower_check, "прошл") ||
+                                    str_contains(lower_check, "перемешай") ||
+                                    str_contains(lower_check, "по порядку") ||
+                                    str_contains(lower_check, "зацикли") ||
+                                    str_contains(lower_check, "повторяй") ||
+                                    str_contains(lower_check, "продолж") ||
+                                    str_contains(lower_check, "играй") ||
+                                    str_contains(lower_check, "возобнов") ||
+                                    str_contains(lower_check, "заиграй") ||
+                                    str_contains(lower_check, "цензур") ||
+                                    str_contains(lower_check, "без мата") ||
+                                    str_contains(lower_check, "с матом") ||
+                                    str_contains(lower_check, "детский режим") ||
+                                    str_contains(lower_check, "взрослый режим")) {
+                                    is_fast_ctrl = 1;
+                                }
+
+                                int is_search = 0;
+                                if (!is_fast_ctrl) {
+                                    if (str_contains(lower_check, "включи") ||
+                                        str_contains(lower_check, "поставь") ||
+                                        str_contains(lower_check, "сыграй") ||
+                                        str_contains(lower_check, "запусти") ||
+                                        str_contains(lower_check, "найди") ||
+                                        str_contains(lower_check, "вруби") ||
+                                        str_contains(lower_check, "слушать")) {
+                                        is_search = 1;
+                                    }
+                                }
+
+                                // Fast control commands fire instantly without waiting for silence!
+                                // Search/Play queries wait for final recognition so the full phrase is captured!
+                                if (is_fast_ctrl || alice_state == 3 || is_final == 1) {
+                                    int is_new = 1;
+                                    if (uuid_bytes && uuid_len > 0 && uuid_len < sizeof(last_uuid)) {
+                                        if (mem_equal(last_uuid, uuid_bytes, uuid_len)) {
+                                            is_new = 0;
+                                        } else {
+                                            for (unsigned long i = 0; i < uuid_len; i++) last_uuid[i] = (char)uuid_bytes[i];
+                                            last_uuid[uuid_len] = 0;
+                                        }
+                                    }
+
+                                    if (is_new) {
+                                        handle_voice_recognition(quasar_fd, (const char *)text_bytes, text_len);
+                                    }
+                                }
+                            }
+                        }
+
+                        unsigned long total_consumed = 4 + frame_len;
+                        unsigned long remaining = quasar_buf_pos - total_consumed;
+                        for (unsigned long i = 0; i < remaining; i++) {
+                            quasar_buf[i] = quasar_buf[total_consumed + i];
+                        }
+                        quasar_buf_pos = remaining;
+                    }
+                }
+            } else if (quasar_idx >= 0 && (pfd[quasar_idx].revents & (0x0008 | 0x0010 | 0x0020))) {
+                log_msg("[bridge] Quasar socket error, reconnecting...\n");
+                sys_close(quasar_fd);
+                quasar_fd = -1;
+                quasar_buf_pos = 0;
+            }
+
+            // Check Input device
+            if (input_idx >= 0 && (pfd[input_idx].revents & 0x0001)) {
+                struct {
+                    uint32_t tv_sec_lo;
+                    uint32_t tv_sec_hi;
+                    uint32_t tv_usec_lo;
+                    uint32_t tv_usec_hi;
+                    uint16_t type;
+                    uint16_t code;
+                    int32_t value;
+                } ev;
+
+                while (sys_read(input_fd, &ev, sizeof(ev)) == sizeof(ev)) {
+                    if (ev.type == 1 /* EV_KEY */ && ev.code == 0x100 /* BTN_0 */) {
+                        if (ev.value == 1) { // Press
+                            touch_down_start = 1;
+                            touch_down_time = now_ms();
+                            touch_is_down = 1;
+                        } else if (ev.value == 0) { // Release
+                            if (touch_down_start) {
+                                int64_t dur = now_ms() - touch_down_time;
+                                if (dur < 600) { // Short tap < 600ms
+                                    log_msg("[bridge] Center touch TAP detected -> TOGGLE PLAY/PAUSE\n");
+                                    send_cancel_alice(quasar_fd);
+                                    run_toggle();
+                                } else {
+                                    log_msg("[bridge] Center touch HOLD -> ALICE TRIGGER\n");
+                                }
+                            }
+                            touch_down_start = 0;
+                            touch_is_down = 0;
+                        }
+                    }
+                }
+            } else if (input_idx >= 0 && (pfd[input_idx].revents & (0x0008 | 0x0010 | 0x0020))) {
+                log_msg("[bridge] Input device error, reopening...\n");
+                sys_close(input_fd);
+                input_fd = -1;
+            }
+        }
+    }
+}

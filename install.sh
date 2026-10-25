@@ -1,0 +1,238 @@
+#!/bin/sh
+set -e
+
+echo "=== Spotify Soloist + Voice/Touch Track Search Installer (aarch64) ==="
+
+# 1. Root check
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: Этот скрипт должен выполняться от root на колонке!" >&2
+    exit 1
+fi
+
+# 2. Arch check
+ARCH=$(uname -m)
+if [ "$ARCH" != "aarch64" ]; then
+    echo "ERROR: Архитектура ядра $ARCH не поддерживается (требуется aarch64)." >&2
+    exit 1
+fi
+
+# 3. Free space check (need ~40 MB in /data)
+FREE_KB=$(df /data | awk 'NR==2 {print $4}')
+if [ "$FREE_KB" -lt 35000 ]; then
+    echo "ERROR: Недостаточно места в /data (доступно ${FREE_KB} KB, нужно минимум 35000 KB)." >&2
+    exit 1
+fi
+
+# 4. API Key
+API_KEY="${1:-}"
+if [ -z "$API_KEY" ]; then
+    if [ -f "/data/opt/soloist/start.sh" ]; then
+        SAVED_KEY=$(grep -o 'API_KEY="[^"]*"' /data/opt/soloist/start.sh 2>/dev/null | cut -d'"' -f2 || true)
+    fi
+    if [ -n "$SAVED_KEY" ] && [ "$SAVED_KEY" != "dummy" ]; then
+        API_KEY="$SAVED_KEY"
+        echo "Найден сохранённый API-ключ: ${API_KEY:0:8}..."
+    else
+        echo ""
+        echo "Для работы требуется Soloist API Key от Spotify."
+        echo "Получить его можно за 30 секунд (нужен Spotify Premium):"
+        echo "https://developer.spotify.com/dashboard/soloist"
+        echo ""
+        printf "Введите ваш API-ключ (spak_...): "
+        read API_KEY
+    fi
+fi
+
+if [ -z "$API_KEY" ]; then
+    echo "ERROR: API-ключ не может быть пустым!" >&2
+    exit 1
+fi
+
+# 5. Device Name
+DEVICE_NAME="${2:-Yandex Station Lite}"
+
+# 6. Stop previous instances
+echo "Остановка старых служб..."
+killall -9 soloist soloist-bridge spotiya 2>/dev/null || true
+sleep 1
+
+# 7. Create directories
+INSTALL_DIR="/data/opt/soloist"
+mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/lib64" "$INSTALL_DIR/scripts" "$INSTALL_DIR/data" "/tmp/soloist_cache"
+
+# 8. Copy files
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "Копирование бинарников и библиотек..."
+cp -f "$SCRIPT_DIR/bin/soloist" "$INSTALL_DIR/bin/soloist"
+if [ -f "$SCRIPT_DIR/bin/soloist-bridge" ]; then
+    cp -f "$SCRIPT_DIR/bin/soloist-bridge" "$INSTALL_DIR/bin/soloist-bridge"
+    chmod 755 "$INSTALL_DIR/bin/soloist-bridge"
+fi
+if [ -f "$SCRIPT_DIR/bin/curl" ]; then
+    cp -f "$SCRIPT_DIR/bin/curl" "$INSTALL_DIR/bin/curl"
+    chmod 755 "$INSTALL_DIR/bin/curl"
+fi
+cp -af "$SCRIPT_DIR/lib64/"* "$INSTALL_DIR/lib64/"
+cp -f "$SCRIPT_DIR/scripts/stop.sh" "$INSTALL_DIR/stop.sh"
+cp -f "$SCRIPT_DIR/scripts/status.sh" "$INSTALL_DIR/status.sh"
+if [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
+    cp -f "$SCRIPT_DIR/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
+    chmod 755 "$INSTALL_DIR/uninstall.sh"
+fi
+if [ -f "$SCRIPT_DIR/scripts/toggle.sh" ]; then
+    cp -f "$SCRIPT_DIR/scripts/toggle.sh" "$INSTALL_DIR/scripts/toggle.sh"
+    chmod 755 "$INSTALL_DIR/scripts/toggle.sh"
+fi
+if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
+    cp -f "$SCRIPT_DIR/scripts/search_and_play.sh" "$INSTALL_DIR/scripts/search_and_play.sh"
+    chmod 755 "$INSTALL_DIR/scripts/search_and_play.sh"
+fi
+
+# Spotify Search API Credentials
+if [ -f "$SCRIPT_DIR/spotify_api.conf" ] && [ ! -f "$INSTALL_DIR/spotify_api.conf" ]; then
+    cp -f "$SCRIPT_DIR/spotify_api.conf" "$INSTALL_DIR/spotify_api.conf"
+elif [ -f "$SCRIPT_DIR/spotify_api.conf.example" ] && [ ! -f "$INSTALL_DIR/spotify_api.conf" ]; then
+    cp -f "$SCRIPT_DIR/spotify_api.conf.example" "$INSTALL_DIR/spotify_api.conf.example"
+fi
+
+chmod 755 "$INSTALL_DIR/bin/soloist" "$INSTALL_DIR/lib64/ld-linux-aarch64.so.1"
+chmod 755 "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh"
+
+# 9. SSL Certificates & Hosts SNI Proxy (bypass 403 country restrictions)
+echo "Настройка SSL-сертификатов и сети..."
+mount -o remount,rw / 2>/dev/null || true
+
+if [ ! -f "/etc/ssl/certs/ca-certificates.crt" ]; then
+    mkdir -p /etc/ssl/certs
+    if [ -f "/system/vendor/quasar/ca-certificates.crt" ]; then
+        ln -sf /system/vendor/quasar/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+    fi
+fi
+
+if ! grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
+    cat << 'HOSTS_EOF' >> /etc/hosts
+
+# Spotify SNI Proxy (Bypass 403 geoblock)
+5.175.161.40 accounts.spotify.com
+5.175.161.40 api.spotify.com
+5.175.161.40 open.spotify.com
+5.175.161.40 spclient.wg.spotify.com
+HOSTS_EOF
+fi
+
+# 10. Generate start.sh
+echo "Генерация start.sh..."
+cat << START_EOF > "$INSTALL_DIR/start.sh"
+#!/bin/sh
+set -e
+mkdir -p /data/opt/soloist/data /tmp/soloist_cache /data/opt/soloist/scripts
+/data/opt/soloist/stop.sh >/dev/null 2>&1 || true
+
+for i in \$(seq 1 45); do
+    if ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
+        if ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then
+            break
+        fi
+    fi
+    sleep 1
+done
+sleep 2
+
+export LD_LIBRARY_PATH=/data/opt/soloist/lib64:\$LD_LIBRARY_PATH
+export APULSE_PLAYBACK_DEVICE=plug:default
+export APULSE_DIAG=0
+export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+API_KEY="$API_KEY"
+
+nohup /data/opt/soloist/bin/soloist \\
+    -n "$DEVICE_NAME" \\
+    -k "\$API_KEY" \\
+    -D /data/opt/soloist/data \\
+    -C /tmp/soloist_cache \\
+    -w 127.0.0.1:9090 \\
+    --initial-volume 100 \\
+    -v > /tmp/soloist.log 2>&1 &
+
+echo \$! > /data/opt/soloist/data/soloist.pid
+echo "Spotify Soloist (arm64) started, PID=\$(cat /data/opt/soloist/data/soloist.pid)"
+
+sleep 1
+
+if [ -x /data/opt/soloist/bin/soloist-bridge ]; then
+    nohup /data/opt/soloist/bin/soloist-bridge > /tmp/soloist-bridge.log 2>&1 < /dev/null &
+    echo \$! > /data/opt/soloist/data/bridge.pid
+    echo "Soloist Bridge (Fast Control + Full Search) started, PID=\$(cat /data/opt/soloist/data/bridge.pid)"
+fi
+
+# Auto-recovery watchdog: verifies successful login and activates device
+(
+    for attempt in \$(seq 1 30); do
+        sleep 2
+        STATUS=\$(/data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
+        if echo "\$STATUS" | grep -qi "logged in: yes"; then
+            /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
+            break
+        elif echo "\$STATUS" | grep -qi "logged in: no"; then
+            echo "[watchdog] Soloist started before network was ready, restarting daemon..." >> /tmp/soloist.log
+            killall -9 soloist 2>/dev/null || true
+            sleep 1
+            nohup /data/opt/soloist/bin/soloist \\
+                -n "$DEVICE_NAME" \\
+                -k "\$API_KEY" \\
+                -D /data/opt/soloist/data \\
+                -C /tmp/soloist_cache \\
+                -w 127.0.0.1:9090 \\
+                --initial-volume 100 \\
+                -v >> /tmp/soloist.log 2>&1 &
+            sleep 2
+        fi
+    done
+) &
+START_EOF
+chmod 755 "$INSTALL_DIR/start.sh"
+
+# 11. Autostart setup in init.d
+echo "Настройка автозапуска при включении колонки..."
+if [ -f "$SCRIPT_DIR/scripts/S99spotify-connect" ]; then
+    cp -f "$SCRIPT_DIR/scripts/S99spotify-connect" /etc/init.d/S99spotify-connect
+    chmod 755 /etc/init.d/S99spotify-connect
+fi
+
+# Make rootfs read-only again
+mount -o remount,ro / 2>/dev/null || true
+
+# 12. Start service
+echo "Запуск службы..."
+"$INSTALL_DIR/start.sh"
+sleep 2
+
+echo ""
+echo "=== Установка успешно завершена! ==="
+echo "Имя устройства в Spotify: $DEVICE_NAME"
+echo ""
+echo "Управление голосом:"
+echo "  • «Алиса, включи [название трека или исполнителя]»  -> Поиск и воспроизведение в Spotify"
+echo "  • «Алиса, поставь [песню / артиста]»                -> Поиск и воспроизведение в Spotify"
+echo "  • «Алиса, найди [песню / группу]»                  -> Поиск и воспроизведение в Spotify"
+echo "  • «Алиса, пауза» / «стоп» / «хватит»               -> Пауза"
+echo "  • «Алиса, дальше» / «следующий трек»              -> Следующий трек"
+echo "  • «Алиса, назад» / «предыдущий трек»              -> Предыдущий трек"
+echo "  • «Алиса, перемешай» / «в случайном порядке»       -> Режим случайного воспроизведения"
+echo "  • «Алиса, по порядку»                             -> Выключить перемешивание"
+echo "  • «Алиса, зацикли» / «повторяй»                    -> Повтор трека"
+echo "  • «Алиса, громче» / «тише»                         -> Громкость"
+echo ""
+echo "Сенсорная кнопка на колонке:"
+echo "  • Короткое касание центра: Play / Pause"
+echo ""
+echo "Автозагрузка:"
+echo "  • Служба запускается автоматически при включении колонки через /etc/init.d/S99spotify-connect"
+echo ""
+echo "Управление службой в консоли:"
+echo "  Статус:  /data/opt/soloist/status.sh"
+echo "  Стоп:    /data/opt/soloist/stop.sh"
+echo "  Старт:   /data/opt/soloist/start.sh"
+echo "  Логи:    tail -f /tmp/soloist.log /tmp/soloist-search.log"
+echo "=========================================================="

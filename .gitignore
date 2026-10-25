@@ -1,0 +1,11 @@
+# Credentials & local data
+spotify_api.conf
+*.pid
+*.log
+data/
+cache/
+
+# Archives
+*.tar.gz
+*.zip
+*.yap
