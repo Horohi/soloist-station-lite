@@ -48,10 +48,59 @@ if [ -z "$API_KEY" ]; then
     exit 1
 fi
 
-# 5. Device Name
+# 5. Spotify Web API Credentials (for Alice Voice Track Search)
+CLIENT_ID=""
+CLIENT_SECRET=""
+
+if [ -f "/data/opt/soloist/spotify_api.conf" ]; then
+    SAVED_CID=$(grep -o 'SPOTIFY_CLIENT_ID="[^"]*"' /data/opt/soloist/spotify_api.conf 2>/dev/null | cut -d'"' -f2 || true)
+    SAVED_SEC=$(grep -o 'SPOTIFY_CLIENT_SECRET="[^"]*"' /data/opt/soloist/spotify_api.conf 2>/dev/null | cut -d'"' -f2 || true)
+fi
+
+if [ -n "$SAVED_CID" ] && [ -n "$SAVED_SEC" ]; then
+    CLIENT_ID="$SAVED_CID"
+    CLIENT_SECRET="$SAVED_SEC"
+    echo "Найдены сохранённые ключи голосового поиска Spotify Web API."
+else
+    echo ""
+    echo "======================================================================="
+    echo " 🎙️  НАСТРОЙКА ГОЛОСОВОГО ПОИСКА ТРЕКОВ ЧЕРЕЗ АЛИСУ (SPOTIFY WEB API)"
+    echo "======================================================================="
+    echo "Чтобы Алиса могла искать ЛЮБЫЕ песни, альбомы и группы по вашему голосу,"
+    echo "нужны бесплатные ключи разработчика Spotify Web API (Client ID и Secret)."
+    echo ""
+    echo "Как получить за 1 минуту:"
+    echo "  1. Откройте: https://developer.spotify.com/dashboard"
+    echo "  2. Нажмите 'Create app' (любое имя, Redirect URI: http://localhost:8888/callback)"
+    echo "  3. Зайдите в Settings и скопируйте Client ID и Client Secret."
+    echo ""
+    printf "Введите Spotify Client ID (или Enter для пропуска): "
+    read CLIENT_ID
+    if [ -n "$CLIENT_ID" ]; then
+        printf "Введите Spotify Client Secret: "
+        read CLIENT_SECRET
+    fi
+
+    if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+        printf "\n\033[1;31m***********************************************************************\033[0m\n"
+        printf "\033[1;31m*                               ВНИМАНИЕ!                             *\033[0m\n"
+        printf "\033[1;31m*  ВЫ ПРОПУСТИЛИ ВВОД КЛЮЧЕЙ ГОЛОСОВОГО ПОИСКА SPOTIFY WEB API!       *\033[0m\n"
+        printf "\033[1;31m*                                                                     *\033[0m\n"
+        printf "\033[1;31m*  Голосовой поиск песен («Алиса, включи песню ...») работать НЕ      *\033[0m\n"
+        printf "\033[1;31m*  БУДЕТ! Колонка сможет работать только как обычный Spotify Connect  *\033[0m\n"
+        printf "\033[1;31m*  приёмник (выбор треков только через приложение Spotify с телефона).*\033[0m\n"
+        printf "\033[1;31m*                                                                     *\033[0m\n"
+        printf "\033[1;31m*  Вы сможете добавить ключи позже в:                                 *\033[0m\n"
+        printf "\033[1;31m*  /data/opt/soloist/spotify_api.conf                                 *\033[0m\n"
+        printf "\033[1;31m***********************************************************************\033[0m\n\n"
+        sleep 2
+    fi
+fi
+
+# 6. Device Name
 DEVICE_NAME="${2:-Yandex Station Lite}"
 
-# 6. Stop previous instances
+# 7. Stop previous instances
 echo "Остановка старых служб..."
 killall -9 soloist soloist-bridge spotiya 2>/dev/null || true
 sleep 1
@@ -89,8 +138,16 @@ if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
 fi
 
 # Spotify Search API Credentials
-if [ -f "$SCRIPT_DIR/spotify_api.conf" ] && [ ! -f "$INSTALL_DIR/spotify_api.conf" ]; then
+if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
+    cat << EOF_CONF > "$INSTALL_DIR/spotify_api.conf"
+SPOTIFY_CLIENT_ID="$CLIENT_ID"
+SPOTIFY_CLIENT_SECRET="$CLIENT_SECRET"
+EOF_CONF
+    chmod 600 "$INSTALL_DIR/spotify_api.conf"
+    echo "Конфигурация голосового поиска успешно сохранена в $INSTALL_DIR/spotify_api.conf"
+elif [ -f "$SCRIPT_DIR/spotify_api.conf" ] && [ ! -f "$INSTALL_DIR/spotify_api.conf" ]; then
     cp -f "$SCRIPT_DIR/spotify_api.conf" "$INSTALL_DIR/spotify_api.conf"
+    chmod 600 "$INSTALL_DIR/spotify_api.conf"
 elif [ -f "$SCRIPT_DIR/spotify_api.conf.example" ] && [ ! -f "$INSTALL_DIR/spotify_api.conf" ]; then
     cp -f "$SCRIPT_DIR/spotify_api.conf.example" "$INSTALL_DIR/spotify_api.conf.example"
 fi
