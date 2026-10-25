@@ -131,14 +131,55 @@ if [ -f "$CENSOR_FILE" ]; then
     echo "[search] Censorship filter ACTIVE (filtering explicit tracks)" >> "$LOG"
 fi
 
-LIMIT=1
-[ "$CENSORSHIP" = "1" ] && LIMIT=5
+LIMIT=5
 
 SEARCH_RESP=$($CURL_BIN $CURL_OPTS "https://api.spotify.com/v1/search?q=$ENCODED&type=$TYPE&limit=$LIMIT" \
     -H "Authorization: Bearer $TOKEN")
 
-if [ "$CENSORSHIP" = "1" ] && [ "$TYPE" = "track" ]; then
-    URI=$(echo "$SEARCH_RESP" | awk -F'"' 'BEGIN { RS="\"type\":\"track\"" } /"explicit":false/ && /spotify:track:/ { for (i=1; i<=NF; i++) { if ($i ~ /^spotify:track:/) { print $i; exit; } } }')
+if [ "$TYPE" = "track" ]; then
+    URI=$(echo "$SEARCH_RESP" | awk -v query="$TERM" -v censor="$CENSORSHIP" '
+    BEGIN {
+        RS = "\\{\"album\":"
+        best_score = -1
+        best_uri = ""
+        nwords = split(tolower(query), qwords, " ")
+    }
+    NR > 1 {
+        if (censor == "1" && $0 ~ /"explicit":true/) next
+        uri = ""
+        if (match($0, /"uri":"spotify:track:[a-zA-Z0-9]+/)) {
+            uri = substr($0, RSTART + 7, RLENGTH - 7)
+        }
+        if (uri == "") next
+
+        name = ""
+        if (match($0, /"name":"[^"]+","track_number"/)) {
+            name = tolower(substr($0, RSTART + 8, RLENGTH - 24))
+        }
+
+        artists = ""
+        if (match($0, /"artists":/)) {
+            artists = tolower(substr($0, RSTART))
+        }
+
+        score = 0
+        for (i = 1; i <= nwords; i++) {
+            w = qwords[i]
+            if (length(w) == 0) continue
+            if (index(name, w) > 0) score += 5
+            if (index(artists, w) > 0) score += 2
+        }
+
+        if (score > best_score) {
+            best_score = score
+            best_uri = uri
+        } else if (best_uri == "") {
+            best_uri = uri
+        }
+    }
+    END {
+        if (best_uri != "") print best_uri
+    }')
 else
     URI=$(echo "$SEARCH_RESP" | grep -oE "spotify:$TYPE:[a-zA-Z0-9]+" | head -n 1)
 fi
@@ -148,11 +189,50 @@ if [ -z "$URI" ]; then
     echo "[search] No match for type=$TYPE, trying general search..." >> "$LOG"
     SEARCH_RESP=$($CURL_BIN $CURL_OPTS "https://api.spotify.com/v1/search?q=$ENCODED&type=track,artist,album&limit=5" \
         -H "Authorization: Bearer $TOKEN")
-    if [ "$CENSORSHIP" = "1" ]; then
-        URI=$(echo "$SEARCH_RESP" | awk -F'"' 'BEGIN { RS="\"type\":\"track\"" } /"explicit":false/ && /spotify:track:/ { for (i=1; i<=NF; i++) { if ($i ~ /^spotify:track:/) { print $i; exit; } } }')
-    fi
+    URI=$(echo "$SEARCH_RESP" | awk -v query="$TERM" -v censor="$CENSORSHIP" '
+    BEGIN {
+        RS = "\\{\"album\":"
+        best_score = -1
+        best_uri = ""
+        nwords = split(tolower(query), qwords, " ")
+    }
+    NR > 1 {
+        if (censor == "1" && $0 ~ /"explicit":true/) next
+        uri = ""
+        if (match($0, /"uri":"spotify:track:[a-zA-Z0-9]+/)) {
+            uri = substr($0, RSTART + 7, RLENGTH - 7)
+        }
+        if (uri == "") next
+
+        name = ""
+        if (match($0, /"name":"[^"]+","track_number"/)) {
+            name = tolower(substr($0, RSTART + 8, RLENGTH - 24))
+        }
+
+        artists = ""
+        if (match($0, /"artists":/)) {
+            artists = tolower(substr($0, RSTART))
+        }
+
+        score = 0
+        for (i = 1; i <= nwords; i++) {
+            w = qwords[i]
+            if (length(w) == 0) continue
+            if (index(name, w) > 0) score += 5
+            if (index(artists, w) > 0) score += 2
+        }
+
+        if (score > best_score) {
+            best_score = score
+            best_uri = uri
+        } else if (best_uri == "") {
+            best_uri = uri
+        }
+    }
+    END {
+        if (best_uri != "") print best_uri
+    }')
     # Prioritize track > artist > album
-    [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:track:[a-zA-Z0-9]+' | head -n 1)
     [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:artist:[a-zA-Z0-9]+' | head -n 1)
     [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:album:[a-zA-Z0-9]+' | head -n 1)
 fi
