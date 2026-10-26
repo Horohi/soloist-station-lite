@@ -1,6 +1,11 @@
 #!/bin/sh
 set -e
 
+# Sanitize PATH and library environment so Entware (/opt) or custom LD_LIBRARY_PATH
+# cannot conflict with system tools or soloist bundled glibc
+export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
+unset LD_LIBRARY_PATH LD_PRELOAD
+
 echo "=== Spotify Soloist Universal Installer for Yandex Station (aarch64) ==="
 
 # 1. Root check
@@ -227,6 +232,12 @@ echo "Генерация start.sh..."
 cat << START_EOF > "$INSTALL_DIR/start.sh"
 #!/bin/sh
 set -e
+
+# Sanitize PATH and library environment so Entware (/opt) or custom LD_LIBRARY_PATH
+# cannot conflict with system tools or soloist bundled glibc
+export PATH="/bin:/usr/bin:/sbin:/usr/sbin:\$PATH"
+unset LD_LIBRARY_PATH LD_PRELOAD
+
 mkdir -p /data/opt/soloist/data /tmp/soloist_cache /data/opt/soloist/scripts
 /data/opt/soloist/stop.sh >/dev/null 2>&1 || true
 
@@ -240,7 +251,6 @@ for i in \$(seq 1 45); do
 done
 sleep 2
 
-export LD_LIBRARY_PATH=/data/opt/soloist/lib64:\$LD_LIBRARY_PATH
 export APULSE_PLAYBACK_DEVICE=plug:default
 export APULSE_DIAG=0
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
@@ -248,6 +258,7 @@ export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 API_KEY="$API_KEY"
 
+LD_LIBRARY_PATH="/data/opt/soloist/lib64" \\
 nohup /data/opt/soloist/bin/soloist \\
     -n "$DEVICE_NAME" \\
     -k "\$API_KEY" \\
@@ -272,9 +283,9 @@ fi
     # 1. Wait for daemon to become ready and activate device if logged in
     for attempt in \$(seq 1 15); do
         sleep 2
-        STATUS=\$(/data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
+        STATUS=\$(LD_LIBRARY_PATH="/data/opt/soloist/lib64" /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
         if echo "\$STATUS" | grep -qi "logged in: yes"; then
-            /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
+            LD_LIBRARY_PATH="/data/opt/soloist/lib64" /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
             break
         fi
     done

@@ -1,4 +1,7 @@
 #!/bin/sh
+export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
+unset LD_LIBRARY_PATH LD_PRELOAD
+
 # Kill the PID from a pid-file only if it still belongs to the expected process
 # (pid-files live in /data and survive reboots, so the PID may have been reused).
 kill_pidfile() {

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
+unset LD_LIBRARY_PATH LD_PRELOAD
+
 echo "=== Удаление Spotify Soloist + Bridge ==="
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: Требуются права root!" >&2

@@ -1,4 +1,7 @@
 #!/bin/sh
+export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
+unset LD_LIBRARY_PATH LD_PRELOAD
+
 QUERY="$1"
 if [ -z "$QUERY" ]; then
     exit 0
@@ -12,6 +15,10 @@ BASE_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 [ -d "$BASE_DIR/bin" ] || BASE_DIR="/data/opt/soloist"
 
 SOLOIST_BIN="$BASE_DIR/bin/soloist"
+run_soloist() {
+    LD_LIBRARY_PATH="$BASE_DIR/lib64" "$SOLOIST_BIN" "$@"
+}
+
 CURL_BIN="$BASE_DIR/bin/curl"
 [ -x "$CURL_BIN" ] || CURL_BIN="curl"
 API_CONF="$BASE_DIR/spotify_api.conf"
@@ -48,10 +55,10 @@ echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 # If search term is empty or generic 'музыку' -> resume or play default
 if [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; then
     echo "[search] Generic play request, resuming..." >> "$LOG"
-    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
-    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
+    run_soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
+    run_soloist ctl -w 127.0.0.1:9090 play
     sleep 0.5
-    NOW_STATE=$("$SOLOIST_BIN" ctl -w 127.0.0.1:9090 now 2>/dev/null || true)
+    NOW_STATE=$(run_soloist ctl -w 127.0.0.1:9090 now 2>/dev/null || true)
     if echo "$NOW_STATE" | grep -qi "playing" && ! echo "$NOW_STATE" | grep -qi "nothing"; then
         exit 0
     fi
@@ -64,13 +71,15 @@ fi
 # Spotify API Configuration
 if [ ! -f "$API_CONF" ]; then
     echo "[search] Missing $API_CONF, resuming existing playlist" >> "$LOG"
-    exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
+    run_soloist ctl -w 127.0.0.1:9090 play
+    exit 0
 fi
 
 . "$API_CONF"
 if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
     echo "[search] Spotify API keys not set in $API_CONF" >> "$LOG"
-    exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
+    run_soloist ctl -w 127.0.0.1:9090 play
+    exit 0
 fi
 
 CURL_OPTS="--resolve api.spotify.com:443:5.175.161.40 --resolve accounts.spotify.com:443:5.175.161.40 -s"
@@ -97,7 +106,8 @@ if [ -z "$TOKEN" ]; then
         echo "[search] Access token successfully updated" >> "$LOG"
     else
         echo "[search] ERROR: Failed to get token: $AUTH_RESP" >> "$LOG"
-        exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
+        run_soloist ctl -w 127.0.0.1:9090 play
+        exit 0
     fi
 fi
 
@@ -199,10 +209,10 @@ fi
 
 if [ -n "$URI" ]; then
     echo "[search] SUCCESS: Found URI '$URI' -> sending to Soloist" >> "$LOG"
-    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
-    exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play "$URI"
+    run_soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
+    run_soloist ctl -w 127.0.0.1:9090 play "$URI"
 else
     echo "[search] No matches found for '$TERM' in Spotify API" >> "$LOG"
-    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
-    exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
+    run_soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
+    run_soloist ctl -w 127.0.0.1:9090 play
 fi

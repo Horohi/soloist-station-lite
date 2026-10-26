@@ -192,10 +192,11 @@ static void send_alice_method(int quasar_fd, unsigned char method) {
 
 static void send_cancel_alice(int quasar_fd) {
     if (quasar_fd < 0) return;
+    send_alice_method(quasar_fd, 1);    // CANCEL_DIALOG
     send_alice_method(quasar_fd, 3);    // STOP_CONVERSATION
     send_alice_method(quasar_fd, 6);    // CANCEL_DIALOG_AND_CLEAR_QUEUE
     send_alice_method(quasar_fd, 0x0e); // STOP_TTS
-    log_msg("[bridge] Sent cancel_alice (stop+queue+tts) to Quasar\n");
+    log_msg("[bridge] Sent cancel_alice (dialog+stop+queue+tts) to Quasar\n");
 }
 
 static int64_t cancel_alice_until_ms = 0;
@@ -292,7 +293,6 @@ static void run_toggle(void) {
         };
         const char *envp[] = {
             "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
             "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
             0
         };
@@ -313,7 +313,6 @@ static void run_search_and_play(const char *query) {
         };
         const char *envp[] = {
             "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
             "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
             0
         };
@@ -812,49 +811,37 @@ static unsigned long ws_buf_pos = 0;
 static char last_uuid[64];
 static char last_processed_text[256];
 
-static int open_touch_device(void) {
+#define MAX_INPUT_DEVS 8
+static int input_fds[MAX_INPUT_DEVS];
+static int num_input_fds = 0;
+
+static void open_input_devices(void) {
+    for (int i = 0; i < num_input_fds; i++) {
+        if (input_fds[i] >= 0) sys_close(input_fds[i]);
+    }
+    num_input_fds = 0;
+
     char path[] = "/dev/input/event0";
     char name[64];
-    int fallback_fd = -1;
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 8 && num_input_fds < MAX_INPUT_DEVS; i++) {
         path[16] = '0' + i;
         int fd = sys_open(path, 0 /* O_RDONLY */ | 00004000 /* O_NONBLOCK */, 0);
         if (fd < 0) continue;
 
         for (int k = 0; k < 64; k++) name[k] = 0;
         int ret = sys_ioctl(fd, 0x80404506 /* EVIOCGNAME(64) */, name);
+        log_msg("[bridge] Opened input device: ");
+        log_msg(path);
         if (ret >= 0) {
-            char lower_name[64];
-            to_lower_ru(lower_name, name, sizeof(lower_name));
-
-            // Known touch / sensor names across Yandex Station models:
-            // - "sar0_pad0" (Station Lite 1, Lite 2, Mini 2)
-            // - "awinic_sar" (Station Midi)
-            // - "midi_touch" (Station 2)
-            // - "touch", "pad", "sar", "aw96"
-            if (str_contains(lower_name, "sar") ||
-                str_contains(lower_name, "touch") ||
-                str_contains(lower_name, "pad") ||
-                str_contains(lower_name, "awinic") ||
-                str_contains(lower_name, "aw96")) {
-                log_msg("[bridge] Auto-detected primary touch sensor: ");
-                log_msg(path);
-                log_msg(" (\"");
-                log_msg(name);
-                log_msg("\")\n");
-                if (fallback_fd >= 0) sys_close(fallback_fd);
-                return fd;
-            }
+            log_msg(" (\"");
+            log_msg(name);
+            log_msg("\")\n");
+        } else {
+            log_msg("\n");
         }
-        if (fallback_fd < 0) fallback_fd = fd;
-        else sys_close(fd);
+        input_fds[num_input_fds++] = fd;
     }
-
-    if (fallback_fd >= 0) {
-        log_msg("[bridge] Using fallback input device\n");
-    }
-    return fallback_fd;
 }
 
 void _start(void) {
@@ -862,13 +849,12 @@ void _start(void) {
     if (test_fd >= 0) {
         sys_close(test_fd);
         is_yam_mode = 1;
-        log_msg("[bridge] soloist-bridge v12 started (YAM plugin mode: relative paths)\n");
+        log_msg("[bridge] soloist-bridge v13 started (YAM plugin mode: relative paths)\n");
     } else {
-        log_msg("[bridge] soloist-bridge v12 started (Standalone mode: /data/opt/soloist)\n");
+        log_msg("[bridge] soloist-bridge v13 started (Standalone mode: /data/opt/soloist)\n");
     }
 
     int quasar_fd = -1;
-    int input_fd = -1;
     int soloist_ws_fd = -1;
     int soloist_ws_handshake = 0;
     int64_t last_quasar_retry = 0;
@@ -906,10 +892,10 @@ void _start(void) {
             }
         }
 
-        // 2. Ensure Input device is open (Dynamic Sensor Auto-Detection across all Stations)
-        if (input_fd < 0 && now - last_input_retry >= 2000) {
+        // 2. Ensure Input devices are open (Multi-device monitoring across all Stations)
+        if (num_input_fds == 0 && now - last_input_retry >= 2000) {
             last_input_retry = now;
-            input_fd = open_touch_device();
+            open_input_devices();
         }
 
         // 3. Ensure Soloist WS connection
@@ -937,22 +923,15 @@ void _start(void) {
         }
 
         // 4. Poll on available fds
-        struct pollfd pfd[3];
+        struct pollfd pfd[2 + MAX_INPUT_DEVS];
         int nfds = 0;
         int quasar_idx = -1;
-        int input_idx = -1;
         int soloist_ws_idx = -1;
+        int input_start_idx = -1;
 
         if (quasar_fd >= 0) {
             quasar_idx = nfds;
             pfd[nfds].fd = quasar_fd;
-            pfd[nfds].events = 0x0001; // POLLIN
-            pfd[nfds].revents = 0;
-            nfds++;
-        }
-        if (input_fd >= 0) {
-            input_idx = nfds;
-            pfd[nfds].fd = input_fd;
             pfd[nfds].events = 0x0001; // POLLIN
             pfd[nfds].revents = 0;
             nfds++;
@@ -963,6 +942,15 @@ void _start(void) {
             pfd[nfds].events = 0x0001; // POLLIN
             pfd[nfds].revents = 0;
             nfds++;
+        }
+        if (num_input_fds > 0) {
+            input_start_idx = nfds;
+            for (int i = 0; i < num_input_fds; i++) {
+                pfd[nfds].fd = input_fds[i];
+                pfd[nfds].events = 0x0001; // POLLIN
+                pfd[nfds].revents = 0;
+                nfds++;
+            }
         }
 
         struct timespec tmo;
@@ -1013,8 +1001,8 @@ void _start(void) {
                             uint64_t alice_state = 0;
                             find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state);
 
-                            // Silence Alice if she attempts to speak TTS (state 2) or process (state 3) during our suppression window
-                            if ((alice_state == 2 || alice_state == 3) && now < cancel_alice_until_ms) {
+                            // Silence Alice if she attempts to speak TTS (state 2), process (state 3), or listen during our suppression window
+                            if (alice_state != 0 && now < cancel_alice_until_ms) {
                                 send_cancel_alice(quasar_fd);
                             }
 
@@ -1139,58 +1127,70 @@ void _start(void) {
                 quasar_buf_pos = 0;
             }
 
-            // Check Input device
-            if (input_idx >= 0 && (pfd[input_idx].revents & 0x0001)) {
-                struct {
-                    uint32_t tv_sec_lo;
-                    uint32_t tv_sec_hi;
-                    uint32_t tv_usec_lo;
-                    uint32_t tv_usec_hi;
-                    uint16_t type;
-                    uint16_t code;
-                    int32_t value;
-                } ev;
+            // Check Input devices (Multi-device monitoring across all Stations)
+            if (input_start_idx >= 0) {
+                for (int i = 0; i < num_input_fds; i++) {
+                    int p_idx = input_start_idx + i;
+                    if (pfd[p_idx].revents & 0x0001) {
+                        struct {
+                            uint32_t tv_sec_lo;
+                            uint32_t tv_sec_hi;
+                            uint32_t tv_usec_lo;
+                            uint32_t tv_usec_hi;
+                            uint16_t type;
+                            uint16_t code;
+                            int32_t value;
+                        } ev;
 
-                while (sys_read(input_fd, &ev, sizeof(ev)) == sizeof(ev)) {
-                    if (ev.type == 1 /* EV_KEY */ && (ev.code == 0x246 /* KEY_VOICECOMMAND */ ||
+                        while (sys_read(input_fds[i], &ev, sizeof(ev)) == sizeof(ev)) {
+                            int is_play_pause_key = (ev.code == 164   /* KEY_PLAYPAUSE */ ||
+                                                     ev.code == 119   /* KEY_PAUSE */ ||
+                                                     ev.code == 128   /* KEY_STOP */ ||
+                                                     ev.code == 166   /* KEY_STOPCD */ ||
+                                                     ev.code == 207   /* KEY_PLAY */);
+                            int is_touch_voice_key = (ev.code == 0x246 /* KEY_VOICECOMMAND */ ||
                                                       ev.code == 0x100 /* BTN_0 */ ||
-                                                      ev.code == 164   /* KEY_PLAYPAUSE */ ||
-                                                      ev.code == 207   /* KEY_PLAY */ ||
-                                                      ev.code == 353   /* KEY_SELECT */)) {
-                        if (ev.value == 1) { // Press
-                            touch_down_start = 1;
-                            touch_down_time = now_ms();
-                            touch_is_down = 1;
-                        } else if (ev.value == 0) { // Release
-                            if (touch_down_start) {
-                                int64_t dur = now_ms() - touch_down_time;
-                                if (dur < 700) { // Short tap < 700ms
-                                    log_msg("[bridge] Center touch TAP detected -> TOGGLE PLAY/PAUSE\n");
-                                    send_cancel_alice(quasar_fd);
-                                    if (playback_status == 1) {
-                                        log_msg("[bridge] Instant action: PAUSE\n");
-                                        spotify_is_active = 0;
-                                        run_soloist_cmd("pause");
-                                    } else if (playback_status == 2) {
-                                        log_msg("[bridge] Instant action: PLAY\n");
-                                        spotify_is_active = 1;
-                                        run_soloist_cmd("play");
-                                    } else {
-                                        run_toggle();
+                                                      ev.code == 353   /* KEY_SELECT */);
+
+                            if (ev.type == 1 /* EV_KEY */ && (is_play_pause_key || is_touch_voice_key)) {
+                                if (ev.value == 1) { // Press
+                                    touch_down_start = 1;
+                                    touch_down_time = now_ms();
+                                    touch_is_down = 1;
+                                } else if (ev.value == 0) { // Release
+                                    if (touch_down_start) {
+                                        int64_t dur = now_ms() - touch_down_time;
+                                        // Dedicated keys always trigger; touch/voice keys trigger on short tap (< 700ms)
+                                        if (is_play_pause_key || dur < 700) {
+                                            log_msg("[bridge] Button / Touch TAP detected -> TOGGLE PLAY/PAUSE\n");
+                                            trigger_alice_suppression(quasar_fd, 4000);
+                                            if (playback_status == 1) {
+                                                log_msg("[bridge] Instant action: PAUSE\n");
+                                                spotify_is_active = 0;
+                                                run_soloist_cmd("pause");
+                                            } else if (playback_status == 2) {
+                                                log_msg("[bridge] Instant action: PLAY\n");
+                                                spotify_is_active = 1;
+                                                run_soloist_cmd("play");
+                                            } else {
+                                                run_toggle();
+                                            }
+                                        } else {
+                                            log_msg("[bridge] Button / Touch HOLD -> ALICE TRIGGER\n");
+                                        }
                                     }
-                                } else {
-                                    log_msg("[bridge] Center touch HOLD -> ALICE TRIGGER\n");
+                                    touch_down_start = 0;
+                                    touch_is_down = 0;
                                 }
                             }
-                            touch_down_start = 0;
-                            touch_is_down = 0;
                         }
+                    } else if (pfd[p_idx].revents & (0x0008 | 0x0010 | 0x0020)) {
+                        log_msg("[bridge] Input device error on fd, reopening...\n");
+                        for (int k = 0; k < num_input_fds; k++) sys_close(input_fds[k]);
+                        num_input_fds = 0;
+                        break;
                     }
                 }
-            } else if (input_idx >= 0 && (pfd[input_idx].revents & (0x0008 | 0x0010 | 0x0020))) {
-                log_msg("[bridge] Input device error, reopening...\n");
-                sys_close(input_fd);
-                input_fd = -1;
             }
 
             // Check Soloist WS socket
