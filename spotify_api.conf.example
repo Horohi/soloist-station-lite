@@ -15,6 +15,3 @@
 
 SPOTIFY_CLIENT_ID=""
 SPOTIFY_CLIENT_SECRET=""
-
-# Анонс треков перед включением ("true" / "false")
-ANNOUNCE_TRACKS="true"

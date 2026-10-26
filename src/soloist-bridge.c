@@ -640,7 +640,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             return;
         }
 
-        trigger_alice_suppression(quasar_fd, 7000);
+        trigger_alice_suppression(quasar_fd, 4000);
         spotify_is_active = 1;
 
         log_msg("[bridge] Action: SEARCH & PLAY query='");
