@@ -1,6 +1,6 @@
 CC ?= clang
 TARGET ?= aarch64-linux-gnu
-CFLAGS ?= --target=$(TARGET) -O2 -fno-builtin -nostdlib -fPIE -Wl,-pie
+CFLAGS ?= --target=$(TARGET) -fuse-ld=lld -static -fno-stack-protector -O2 -fno-builtin -nostdlib
 STRIP ?= llvm-strip
 
 BIN_DIR = bin

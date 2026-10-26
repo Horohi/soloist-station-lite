@@ -189,6 +189,13 @@ static void send_cancel_alice(int quasar_fd) {
     log_msg("[bridge] Sent cancel_alice (stop+queue+tts) to Quasar\n");
 }
 
+static int64_t cancel_alice_until_ms = 0;
+
+static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
+    cancel_alice_until_ms = now_ms() + duration_ms;
+    send_cancel_alice(quasar_fd);
+}
+
 static int is_yam_mode = 0;
 
 static const char *get_soloist_bin(void) {
@@ -210,22 +217,30 @@ static const char *get_censor_path(void) {
 static void run_soloist_cmd(const char *cmd) {
     long pid = sys_clone(17 /* SIGCHLD */, 0);
     if (pid == 0) {
-        if (cmd && cmd[0] == 'p' && cmd[1] == 'l') { // "play"
-            sys_msleep(500); // 500ms delay to let Alice release ALSA dmix
-        }
         const char *bin = get_soloist_bin();
+        const char *envp[] = {
+            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+            0
+        };
+        if (cmd && cmd[0] == 'p' && cmd[1] == 'l') { // "play"
+            long apid = sys_clone(17, 0);
+            if (apid == 0) {
+                const char *act_argv[] = { bin, "ctl", "-w", "127.0.0.1:9090", "activate", 0 };
+                sys_execve(bin, act_argv, envp);
+                sys_exit(1);
+            }
+            int status = 0;
+            sys_wait4((int)apid, &status, 0, 0);
+            sys_msleep(300); // 300ms delay to let Alice release ALSA dmix
+        }
         const char *argv[] = {
             bin,
             "ctl",
             "-w",
             "127.0.0.1:9090",
             cmd,
-            0
-        };
-        const char *envp[] = {
-            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
             0
         };
         sys_execve(bin, argv, envp);
@@ -437,7 +452,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "выключи музыку") ||
         str_contains(lower_buf, "отключи музыку")) {
         log_msg("[bridge] Action: PAUSE\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 3000);
         spotify_is_active = 0;
         run_soloist_cmd("pause");
         return;
@@ -449,7 +464,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "переключи") ||
         str_contains(lower_buf, "пропусти")) {
         log_msg("[bridge] Action: NEXT TRACK\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 3000);
         spotify_is_active = 1;
         run_soloist_cmd("next");
         return;
@@ -460,7 +475,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "предыдущ") ||
         str_contains(lower_buf, "прошл")) {
         log_msg("[bridge] Action: PREVIOUS TRACK\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 3000);
         spotify_is_active = 1;
         run_soloist_cmd("prev");
         return;
@@ -472,7 +487,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "случайном порядке") ||
         str_contains(lower_buf, "включи перемешивание")) {
         log_msg("[bridge] Action: SHUFFLE ON\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 2500);
         run_soloist_cmd2("shuffle", "on");
         return;
     }
@@ -480,7 +495,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "выключи перемешивание") ||
         str_contains(lower_buf, "отключи перемешивание")) {
         log_msg("[bridge] Action: SHUFFLE OFF\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 2500);
         run_soloist_cmd2("shuffle", "off");
         return;
     }
@@ -490,7 +505,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "повторяй") ||
         str_contains(lower_buf, "включи повтор")) {
         log_msg("[bridge] Action: REPEAT ON\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 2500);
         run_soloist_cmd2("repeat", "context");
         return;
     }
@@ -498,7 +513,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "выключи повтор") ||
         str_contains(lower_buf, "отключи повтор")) {
         log_msg("[bridge] Action: REPEAT OFF\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 2500);
         run_soloist_cmd2("repeat", "off");
         return;
     }
@@ -511,7 +526,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "вруби музыку") ||
         (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
         log_msg("[bridge] Action: RESUME\n");
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 3500);
         spotify_is_active = 1;
         run_search_and_play("включи музыку");
         return;
@@ -523,7 +538,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "с матом") ||
         str_contains(lower_buf, "детский режим") ||
         str_contains(lower_buf, "взрослый режим")) {
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 2500);
         if (str_contains(lower_buf, "выключ") ||
             str_contains(lower_buf, "отключ") ||
             str_contains(lower_buf, "с матом") ||
@@ -577,7 +592,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             return;
         }
 
-        send_cancel_alice(quasar_fd);
+        trigger_alice_suppression(quasar_fd, 4000);
         spotify_is_active = 1;
 
         log_msg("[bridge] Action: SEARCH & PLAY query='");
@@ -597,15 +612,16 @@ void _start(void) {
     if (test_fd >= 0) {
         sys_close(test_fd);
         is_yam_mode = 1;
-        log_msg("[bridge] soloist-bridge v8 started (YAM plugin mode: relative paths)\n");
+        log_msg("[bridge] soloist-bridge v9 started (YAM plugin mode: relative paths)\n");
     } else {
-        log_msg("[bridge] soloist-bridge v8 started (Standalone mode: /data/opt/soloist)\n");
+        log_msg("[bridge] soloist-bridge v9 started (Standalone mode: /data/opt/soloist)\n");
     }
 
     int quasar_fd = -1;
     int input_fd = -1;
     int64_t last_quasar_retry = 0;
     int64_t last_input_retry = 0;
+    int64_t last_cancel_periodic = 0;
 
     int touch_down_start = 0;
     int64_t touch_down_time = 0;
@@ -616,6 +632,14 @@ void _start(void) {
         while (sys_wait4(-1, &status, 1 /* WNOHANG */, 0) > 0) {}
 
         int64_t now = now_ms();
+
+        // Periodic Alice suppression while cancellation window is active
+        if (quasar_fd >= 0 && now < cancel_alice_until_ms) {
+            if (now - last_cancel_periodic >= 250) {
+                last_cancel_periodic = now;
+                send_cancel_alice(quasar_fd);
+            }
+        }
 
         // 1. Ensure Quasar connection
         if (quasar_fd < 0 && now - last_quasar_retry >= 2000) {
@@ -716,6 +740,10 @@ void _start(void) {
                         if (state_payload && state_len > 0) {
                             uint64_t alice_state = 0;
                             find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state);
+
+                            if (alice_state == 3 && now < cancel_alice_until_ms) {
+                                send_cancel_alice(quasar_fd);
+                            }
 
                             static uint64_t prev_alice_state = 0;
                             if (alice_state == 1 && prev_alice_state != 1) {
@@ -856,7 +884,7 @@ void _start(void) {
                                 int64_t dur = now_ms() - touch_down_time;
                                 if (dur < 600) { // Short tap < 600ms
                                     log_msg("[bridge] Center touch TAP detected -> TOGGLE PLAY/PAUSE\n");
-                                    send_cancel_alice(quasar_fd);
+                                    trigger_alice_suppression(quasar_fd, 2500);
                                     run_toggle();
                                 } else {
                                     log_msg("[bridge] Center touch HOLD -> ALICE TRIGGER\n");

@@ -239,8 +239,10 @@ fi
 
 if [ -n "$URI" ]; then
     echo "[search] SUCCESS: Found URI '$URI' -> sending to Soloist" >> "$LOG"
+    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
     exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play "$URI"
 else
     echo "[search] No matches found for '$TERM' in Spotify API" >> "$LOG"
+    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
     exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
 fi
