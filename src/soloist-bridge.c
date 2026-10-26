@@ -37,6 +37,15 @@ static inline int sys_close(int fd) {
     return (int)x0;
 }
 
+static inline int sys_ioctl(int fd, unsigned long req, void *arg) {
+    register long x8 __asm__("x8") = 29;
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = req;
+    register long x2 __asm__("x2") = (long)arg;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+}
+
 static inline int sys_socket(int domain, int type, int protocol) {
     register long x8 __asm__("x8") = 198;
     register long x0 __asm__("x0") = domain;
@@ -803,14 +812,59 @@ static unsigned long ws_buf_pos = 0;
 static char last_uuid[64];
 static char last_processed_text[256];
 
+static int open_touch_device(void) {
+    char path[] = "/dev/input/event0";
+    char name[64];
+    int fallback_fd = -1;
+
+    for (int i = 0; i < 8; i++) {
+        path[16] = '0' + i;
+        int fd = sys_open(path, 0 /* O_RDONLY */ | 00004000 /* O_NONBLOCK */, 0);
+        if (fd < 0) continue;
+
+        for (int k = 0; k < 64; k++) name[k] = 0;
+        int ret = sys_ioctl(fd, 0x80404506 /* EVIOCGNAME(64) */, name);
+        if (ret >= 0) {
+            char lower_name[64];
+            to_lower_ru(lower_name, name, sizeof(lower_name));
+
+            // Known touch / sensor names across Yandex Station models:
+            // - "sar0_pad0" (Station Lite 1, Lite 2, Mini 2)
+            // - "awinic_sar" (Station Midi)
+            // - "midi_touch" (Station 2)
+            // - "touch", "pad", "sar", "aw96"
+            if (str_contains(lower_name, "sar") ||
+                str_contains(lower_name, "touch") ||
+                str_contains(lower_name, "pad") ||
+                str_contains(lower_name, "awinic") ||
+                str_contains(lower_name, "aw96")) {
+                log_msg("[bridge] Auto-detected primary touch sensor: ");
+                log_msg(path);
+                log_msg(" (\"");
+                log_msg(name);
+                log_msg("\")\n");
+                if (fallback_fd >= 0) sys_close(fallback_fd);
+                return fd;
+            }
+        }
+        if (fallback_fd < 0) fallback_fd = fd;
+        else sys_close(fd);
+    }
+
+    if (fallback_fd >= 0) {
+        log_msg("[bridge] Using fallback input device\n");
+    }
+    return fallback_fd;
+}
+
 void _start(void) {
     int test_fd = sys_open("./bin/soloist", 0 /* O_RDONLY */, 0);
     if (test_fd >= 0) {
         sys_close(test_fd);
         is_yam_mode = 1;
-        log_msg("[bridge] soloist-bridge v11 started (YAM plugin mode: relative paths)\n");
+        log_msg("[bridge] soloist-bridge v12 started (YAM plugin mode: relative paths)\n");
     } else {
-        log_msg("[bridge] soloist-bridge v11 started (Standalone mode: /data/opt/soloist)\n");
+        log_msg("[bridge] soloist-bridge v12 started (Standalone mode: /data/opt/soloist)\n");
     }
 
     int quasar_fd = -1;
@@ -852,14 +906,10 @@ void _start(void) {
             }
         }
 
-        // 2. Ensure Input device is open
+        // 2. Ensure Input device is open (Dynamic Sensor Auto-Detection across all Stations)
         if (input_fd < 0 && now - last_input_retry >= 2000) {
             last_input_retry = now;
-            int fd = sys_open("/dev/input/event1", 0 /* O_RDONLY */ | 00004000 /* O_NONBLOCK */, 0);
-            if (fd >= 0) {
-                input_fd = fd;
-                log_msg("[bridge] Opened /dev/input/event1 (sar0_pad0)\n");
-            }
+            input_fd = open_touch_device();
         }
 
         // 3. Ensure Soloist WS connection
@@ -1102,9 +1152,11 @@ void _start(void) {
                 } ev;
 
                 while (sys_read(input_fd, &ev, sizeof(ev)) == sizeof(ev)) {
-                    if (ev.type == 1 /* EV_KEY */ && (ev.code == 0x246 /* KEY_VOICECOMMAND (Station Lite center touch) */ ||
+                    if (ev.type == 1 /* EV_KEY */ && (ev.code == 0x246 /* KEY_VOICECOMMAND */ ||
                                                       ev.code == 0x100 /* BTN_0 */ ||
-                                                      ev.code == 164   /* KEY_PLAYPAUSE */)) {
+                                                      ev.code == 164   /* KEY_PLAYPAUSE */ ||
+                                                      ev.code == 207   /* KEY_PLAY */ ||
+                                                      ev.code == 353   /* KEY_SELECT */)) {
                         if (ev.value == 1) { // Press
                             touch_down_start = 1;
                             touch_down_time = now_ms();

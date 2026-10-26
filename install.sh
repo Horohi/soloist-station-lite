@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-echo "=== Spotify Soloist + Voice/Touch Track Search Installer (aarch64) ==="
+echo "=== Spotify Soloist Universal Installer for Yandex Station (aarch64) ==="
 
 # 1. Root check
 if [ "$(id -u)" -ne 0 ]; then
@@ -97,8 +97,43 @@ else
     fi
 fi
 
-# 6. Device Name
-DEVICE_NAME="${2:-Yandex Station Lite}"
+# 6. Model & Device Name Detection
+DT_COMPAT=""
+if [ -f /proc/device-tree/compatible ]; then
+    DT_COMPAT=$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null || true)
+fi
+
+DETECTED_MODEL="Yandex Station"
+case "$DT_COMPAT" in
+    *station-micro*|*micro*)
+        DETECTED_MODEL="Yandex Station Lite"
+        ;;
+    *plum*)
+        DETECTED_MODEL="Yandex Station Lite 2"
+        ;;
+    *station-mini2*)
+        DETECTED_MODEL="Yandex Station Mini 2"
+        ;;
+    *station-mini3*|*bergamot*)
+        DETECTED_MODEL="Yandex Station Mini 3"
+        ;;
+    *station-mini*)
+        DETECTED_MODEL="Yandex Station Mini"
+        ;;
+    *station-midi*|*midi*)
+        DETECTED_MODEL="Yandex Station 2"
+        ;;
+    *cucumber*|*amlogic,a5*|*amlogic,\ a5*)
+        DETECTED_MODEL="Yandex Station Midi"
+        ;;
+    *pickle*)
+        DETECTED_MODEL="Yandex Station Mini 3 Pro"
+        ;;
+esac
+
+echo "Определена модель: $DETECTED_MODEL ($ARCH)"
+
+DEVICE_NAME="${2:-$DETECTED_MODEL}"
 
 # These values are written into start.sh inside double quotes: refuse characters that would break it
 case "$API_KEY" in
