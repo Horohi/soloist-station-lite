@@ -428,6 +428,84 @@ static int mem_equal(const void *a, const void *b, unsigned long n) {
     return 1;
 }
 
+static void str_copy(char *dst, const char *src, unsigned long max_dst) {
+    if (!dst || max_dst == 0) return;
+    unsigned long i = 0;
+    while (src && src[i] && i + 1 < max_dst) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+static int json_find_str(const char *json, const char *key, char *out, unsigned long max_out) {
+    if (!json || !key || !out || max_out == 0) return 0;
+    unsigned long klen = str_len(key);
+    for (unsigned long i = 0; json[i]; i++) {
+        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
+            unsigned long idx = i + 1 + klen + 1;
+            while (json[idx] == ' ' || json[idx] == ':') idx++;
+            if (json[idx] == '"') {
+                idx++;
+                unsigned long o = 0;
+                while (json[idx] && json[idx] != '"' && o + 1 < max_out) {
+                    out[o++] = json[idx++];
+                }
+                out[o] = 0;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int json_find_uint64(const char *json, const char *key, uint64_t *val) {
+    if (!json || !key || !val) return 0;
+    unsigned long klen = str_len(key);
+    for (unsigned long i = 0; json[i]; i++) {
+        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
+            unsigned long idx = i + 1 + klen + 1;
+            while (json[idx] == ' ' || json[idx] == ':') idx++;
+            if (json[idx] >= '0' && json[idx] <= '9') {
+                uint64_t v = 0;
+                while (json[idx] >= '0' && json[idx] <= '9') {
+                    v = v * 10 + (uint64_t)(json[idx] - '0');
+                    idx++;
+                }
+                *val = v;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int json_find_int(const char *json, const char *key, int *val) {
+    if (!json || !key || !val) return 0;
+    unsigned long klen = str_len(key);
+    for (unsigned long i = 0; json[i]; i++) {
+        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
+            unsigned long idx = i + 1 + klen + 1;
+            while (json[idx] == ' ' || json[idx] == ':') idx++;
+            int sign = 1;
+            if (json[idx] == '-') {
+                sign = -1;
+                idx++;
+            }
+            if (json[idx] >= '0' && json[idx] <= '9') {
+                int v = 0;
+                while (json[idx] >= '0' && json[idx] <= '9') {
+                    v = v * 10 + (int)(json[idx] - '0');
+                    idx++;
+                }
+                *val = sign * v;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* Word-boundary helpers. Cyrillic bytes (>= 0x80) count as word characters, so
  * "тв" no longer matches inside "молитва" and "бра" no longer matches "брат". */
 static int is_word_byte(uint8_t c) {
@@ -482,6 +560,65 @@ static int is_explicit_search(const char *lower) {
 }
 
 static int spotify_is_active = 0;
+static char current_track_uri[128] = {0};
+static char last_auto_next_uri[128] = {0};
+static int playback_status = 0; // 0=stopped, 1=playing, 2=paused, 3=buffering
+static uint64_t track_duration_ms = 0;
+static uint64_t base_position_ms = 0;
+static int64_t local_recorded_ms = 0;
+static int playback_speed = 0;
+static int64_t stuck_since_ms = 0;
+static int64_t last_auto_next_time = 0;
+
+static void handle_soloist_ws_json(const char *json) {
+    char status_str[32];
+    if (json_find_str(json, "status", status_str, sizeof(status_str))) {
+        if (str_equal(status_str, "playing")) {
+            playback_status = 1;
+            playback_speed = 1;
+            spotify_is_active = 1;
+        } else if (str_equal(status_str, "paused")) {
+            playback_status = 2;
+            playback_speed = 0;
+        } else if (str_equal(status_str, "buffering")) {
+            playback_status = 3;
+            playback_speed = 0;
+        } else if (str_equal(status_str, "stopped")) {
+            playback_status = 0;
+            playback_speed = 0;
+            spotify_is_active = 0;
+        }
+    }
+
+    uint64_t dur = 0;
+    if (json_find_uint64(json, "duration_ms", &dur)) {
+        if (dur > 0) track_duration_ms = dur;
+    }
+
+    uint64_t pos = 0;
+    if (json_find_uint64(json, "position_ms", &pos)) {
+        base_position_ms = pos;
+        local_recorded_ms = now_ms();
+    }
+
+    int spd = 0;
+    if (json_find_int(json, "speed", &spd)) {
+        playback_speed = spd;
+    }
+
+    char uri_buf[128];
+    if (json_find_str(json, "uri", uri_buf, sizeof(uri_buf))) {
+        if (uri_buf[0] == 's' && uri_buf[1] == 'p' && uri_buf[2] == 'o' && uri_buf[3] == 't') {
+            if (!str_equal(current_track_uri, uri_buf)) {
+                str_copy(current_track_uri, uri_buf, sizeof(current_track_uri));
+                stuck_since_ms = 0;
+                log_msg("[bridge] Current track: ");
+                log_msg(current_track_uri);
+                log_msg("\n");
+            }
+        }
+    }
+}
 
 static void handle_voice_recognition(int quasar_fd, const char *text, unsigned long text_len) {
     char lower_buf[512];
@@ -661,6 +798,8 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 
 static uint8_t quasar_buf[65536];
 static unsigned long quasar_buf_pos = 0;
+static uint8_t ws_buf[8192];
+static unsigned long ws_buf_pos = 0;
 static char last_uuid[64];
 static char last_processed_text[256];
 
@@ -669,15 +808,18 @@ void _start(void) {
     if (test_fd >= 0) {
         sys_close(test_fd);
         is_yam_mode = 1;
-        log_msg("[bridge] soloist-bridge v10 started (YAM plugin mode: relative paths)\n");
+        log_msg("[bridge] soloist-bridge v11 started (YAM plugin mode: relative paths)\n");
     } else {
-        log_msg("[bridge] soloist-bridge v10 started (Standalone mode: /data/opt/soloist)\n");
+        log_msg("[bridge] soloist-bridge v11 started (Standalone mode: /data/opt/soloist)\n");
     }
 
     int quasar_fd = -1;
     int input_fd = -1;
+    int soloist_ws_fd = -1;
+    int soloist_ws_handshake = 0;
     int64_t last_quasar_retry = 0;
     int64_t last_input_retry = 0;
+    int64_t last_soloist_ws_retry = 0;
 
     int touch_down_start = 0;
     int64_t touch_down_time = 0;
@@ -720,11 +862,36 @@ void _start(void) {
             }
         }
 
-        // 3. Poll on available fds
-        struct pollfd pfd[2];
+        // 3. Ensure Soloist WS connection
+        if (soloist_ws_fd < 0 && now - last_soloist_ws_retry >= 3000) {
+            last_soloist_ws_retry = now;
+            int fd = sys_socket(2 /* AF_INET */, 1 /* SOCK_STREAM */, 0);
+            if (fd >= 0) {
+                struct sockaddr_in addr;
+                addr.sin_family = 2;
+                addr.sin_port = 0x8223; // 9090 in big-endian
+                addr.sin_addr = 0x0100007f; // 127.0.0.1
+                for (int i = 0; i < 8; i++) addr.sin_zero[i] = 0;
+
+                if (sys_connect(fd, &addr, sizeof(addr)) == 0) {
+                    soloist_ws_fd = fd;
+                    soloist_ws_handshake = 0;
+                    ws_buf_pos = 0;
+                    const char *req = "GET / HTTP/1.1\r\nHost: 127.0.0.1:9090\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+                    sys_write(soloist_ws_fd, req, str_len(req));
+                    log_msg("[bridge] Connected to Soloist WS on 127.0.0.1:9090\n");
+                } else {
+                    sys_close(fd);
+                }
+            }
+        }
+
+        // 4. Poll on available fds
+        struct pollfd pfd[3];
         int nfds = 0;
         int quasar_idx = -1;
         int input_idx = -1;
+        int soloist_ws_idx = -1;
 
         if (quasar_fd >= 0) {
             quasar_idx = nfds;
@@ -736,6 +903,13 @@ void _start(void) {
         if (input_fd >= 0) {
             input_idx = nfds;
             pfd[nfds].fd = input_fd;
+            pfd[nfds].events = 0x0001; // POLLIN
+            pfd[nfds].revents = 0;
+            nfds++;
+        }
+        if (soloist_ws_fd >= 0) {
+            soloist_ws_idx = nfds;
+            pfd[nfds].fd = soloist_ws_fd;
             pfd[nfds].events = 0x0001; // POLLIN
             pfd[nfds].revents = 0;
             nfds++;
@@ -941,7 +1115,17 @@ void _start(void) {
                                 if (dur < 700) { // Short tap < 700ms
                                     log_msg("[bridge] Center touch TAP detected -> TOGGLE PLAY/PAUSE\n");
                                     send_cancel_alice(quasar_fd);
-                                    run_toggle();
+                                    if (playback_status == 1) {
+                                        log_msg("[bridge] Instant action: PAUSE\n");
+                                        spotify_is_active = 0;
+                                        run_soloist_cmd("pause");
+                                    } else if (playback_status == 2) {
+                                        log_msg("[bridge] Instant action: PLAY\n");
+                                        spotify_is_active = 1;
+                                        run_soloist_cmd("play");
+                                    } else {
+                                        run_toggle();
+                                    }
                                 } else {
                                     log_msg("[bridge] Center touch HOLD -> ALICE TRIGGER\n");
                                 }
@@ -955,6 +1139,127 @@ void _start(void) {
                 log_msg("[bridge] Input device error, reopening...\n");
                 sys_close(input_fd);
                 input_fd = -1;
+            }
+
+            // Check Soloist WS socket
+            if (soloist_ws_idx >= 0 && (pfd[soloist_ws_idx].revents & 0x0001)) {
+                long n = sys_read(soloist_ws_fd, ws_buf + ws_buf_pos, sizeof(ws_buf) - 1 - ws_buf_pos);
+                if (n <= 0) {
+                    log_msg("[bridge] Soloist WS connection closed, reconnecting...\n");
+                    sys_close(soloist_ws_fd);
+                    soloist_ws_fd = -1;
+                    soloist_ws_handshake = 0;
+                    ws_buf_pos = 0;
+                } else {
+                    ws_buf_pos += n;
+                    ws_buf[ws_buf_pos] = 0;
+
+                    if (!soloist_ws_handshake) {
+                        int hdr_end = -1;
+                        for (unsigned long i = 0; i + 3 < ws_buf_pos; i++) {
+                            if (ws_buf[i] == '\r' && ws_buf[i+1] == '\n' && ws_buf[i+2] == '\r' && ws_buf[i+3] == '\n') {
+                                hdr_end = (int)(i + 4);
+                                break;
+                            }
+                        }
+                        if (hdr_end > 0) {
+                            soloist_ws_handshake = 1;
+                            unsigned long rem = ws_buf_pos - hdr_end;
+                            for (unsigned long i = 0; i < rem; i++) ws_buf[i] = ws_buf[hdr_end + i];
+                            ws_buf_pos = rem;
+                            ws_buf[ws_buf_pos] = 0;
+                            log_msg("[bridge] Soloist WS Handshake complete\n");
+                        }
+                    }
+
+                    if (soloist_ws_handshake) {
+                        while (ws_buf_pos >= 2) {
+                            uint8_t b0 = ws_buf[0];
+                            uint8_t b1 = ws_buf[1];
+                            int opcode = b0 & 0x0f;
+                            unsigned long payload_len = b1 & 0x7f;
+                            unsigned long hdr_len = 2;
+
+                            if (payload_len == 126) {
+                                if (ws_buf_pos < 4) break;
+                                payload_len = ((unsigned long)ws_buf[2] << 8) | ws_buf[3];
+                                hdr_len = 4;
+                            } else if (payload_len == 127) {
+                                if (ws_buf_pos < 10) break;
+                                payload_len = ((unsigned long)ws_buf[6] << 24) | ((unsigned long)ws_buf[7] << 16) | ((unsigned long)ws_buf[8] << 8) | ws_buf[9];
+                                hdr_len = 10;
+                            }
+
+                            if (hdr_len + payload_len > sizeof(ws_buf) - 16) {
+                                log_msg("[bridge] Warning: oversize WS frame dropped\n");
+                                ws_buf_pos = 0;
+                                break;
+                            }
+
+                            if (ws_buf_pos < hdr_len + payload_len) break; // Incomplete frame
+
+                            if (opcode == 1) { // Text JSON frame
+                                uint8_t save = ws_buf[hdr_len + payload_len];
+                                ws_buf[hdr_len + payload_len] = 0;
+                                handle_soloist_ws_json((const char *)(ws_buf + hdr_len));
+                                ws_buf[hdr_len + payload_len] = save;
+                            } else if (opcode == 9) { // Ping frame
+                                static const uint8_t pong_frame[] = { 0x8a, 0x80, 0x00, 0x00, 0x00, 0x00 };
+                                sys_write(soloist_ws_fd, pong_frame, sizeof(pong_frame));
+                            }
+
+                            unsigned long total_consumed = hdr_len + payload_len;
+                            unsigned long rem = ws_buf_pos - total_consumed;
+                            for (unsigned long i = 0; i < rem; i++) ws_buf[i] = ws_buf[total_consumed + i];
+                            ws_buf_pos = rem;
+                            ws_buf[ws_buf_pos] = 0;
+                        }
+                    }
+                }
+            } else if (soloist_ws_idx >= 0 && (pfd[soloist_ws_idx].revents & (0x0008 | 0x0010 | 0x0020))) {
+                log_msg("[bridge] Soloist WS error, reconnecting...\n");
+                sys_close(soloist_ws_fd);
+                soloist_ws_fd = -1;
+                soloist_ws_handshake = 0;
+                ws_buf_pos = 0;
+            }
+        }
+
+        // Auto-Next Watchdog (Issue #4): Detect track end stall caused by apulse missing underflow callback
+        if (soloist_ws_fd >= 0 && soloist_ws_handshake) {
+            if ((playback_status == 1 || playback_status == 3) && track_duration_ms > 2000) {
+                uint64_t current_pos = base_position_ms;
+                if (playback_speed == 1 && local_recorded_ms > 0) {
+                    int64_t elapsed = now - local_recorded_ms;
+                    if (elapsed > 0) current_pos += (uint64_t)elapsed;
+                }
+
+                int is_at_end = 0;
+                // Check condition 1: buffering within the last 3.5 seconds of the track (e.g. at -0:02 / -0:00)
+                if (playback_status == 3 && current_pos + 3500 >= track_duration_ms) {
+                    is_at_end = 1;
+                }
+                // Check condition 2: playback position counted past duration
+                else if (current_pos >= track_duration_ms) {
+                    is_at_end = 1;
+                }
+
+                if (is_at_end) {
+                    if (stuck_since_ms == 0) {
+                        stuck_since_ms = now;
+                    } else if (now - stuck_since_ms >= 1500 && now - last_auto_next_time >= 5000) {
+                        if (!str_equal(last_auto_next_uri, current_track_uri) && current_track_uri[0] != 0) {
+                            log_msg("[bridge] Auto-Next: track ended and audio output stalled, advancing to next track\n");
+                            str_copy(last_auto_next_uri, current_track_uri, sizeof(last_auto_next_uri));
+                            last_auto_next_time = now;
+                            run_soloist_cmd("next");
+                        }
+                    }
+                } else {
+                    stuck_since_ms = 0;
+                }
+            } else {
+                stuck_since_ms = 0;
             }
         }
     }
