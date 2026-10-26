@@ -129,6 +129,10 @@ if [ -f "$SCRIPT_DIR/bin/curl" ]; then
     cp -f "$SCRIPT_DIR/bin/curl" "$INSTALL_DIR/bin/curl"
     chmod 755 "$INSTALL_DIR/bin/curl"
 fi
+if [ -f "$SCRIPT_DIR/bin/mp32wav" ]; then
+    cp -f "$SCRIPT_DIR/bin/mp32wav" "$INSTALL_DIR/bin/mp32wav"
+    chmod 755 "$INSTALL_DIR/bin/mp32wav"
+fi
 cp -af "$SCRIPT_DIR/lib64/"* "$INSTALL_DIR/lib64/"
 cp -f "$SCRIPT_DIR/scripts/stop.sh" "$INSTALL_DIR/stop.sh"
 cp -f "$SCRIPT_DIR/scripts/status.sh" "$INSTALL_DIR/status.sh"
@@ -158,6 +162,10 @@ elif [ -f "$SCRIPT_DIR/spotify_api.conf" ] && [ ! -f "$INSTALL_DIR/spotify_api.c
     chmod 600 "$INSTALL_DIR/spotify_api.conf"
 elif [ -f "$SCRIPT_DIR/spotify_api.conf.example" ] && [ ! -f "$INSTALL_DIR/spotify_api.conf" ]; then
     cp -f "$SCRIPT_DIR/spotify_api.conf.example" "$INSTALL_DIR/spotify_api.conf.example"
+fi
+
+if [ -f "$SCRIPT_DIR/config.env.example" ] && [ ! -f "$INSTALL_DIR/config.env" ]; then
+    cp -f "$SCRIPT_DIR/config.env.example" "$INSTALL_DIR/config.env"
 fi
 
 chmod 755 "$INSTALL_DIR/bin/soloist" "$INSTALL_DIR/lib64/ld-linux-aarch64.so.1"
@@ -228,7 +236,7 @@ echo "Spotify Soloist (arm64) started, PID=\$(cat /data/opt/soloist/data/soloist
 sleep 1
 
 if [ -x /data/opt/soloist/bin/soloist-bridge ]; then
-    nohup /data/opt/soloist/bin/soloist-bridge > /tmp/soloist-bridge.log 2>&1 < /dev/null &
+    /usr/bin/setsid /data/opt/soloist/bin/soloist-bridge > /tmp/soloist-bridge.log 2>&1 < /dev/null &
     echo \$! > /data/opt/soloist/data/bridge.pid
     echo "Soloist Bridge (Fast Control + Full Search) started, PID=\$(cat /data/opt/soloist/data/bridge.pid)"
 fi

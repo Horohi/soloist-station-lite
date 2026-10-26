@@ -640,7 +640,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             return;
         }
 
-        trigger_alice_suppression(quasar_fd, 4000);
+        trigger_alice_suppression(quasar_fd, 7000);
         spotify_is_active = 1;
 
         log_msg("[bridge] Action: SEARCH & PLAY query='");
@@ -913,7 +913,9 @@ void _start(void) {
                 } ev;
 
                 while (sys_read(input_fd, &ev, sizeof(ev)) == sizeof(ev)) {
-                    if (ev.type == 1 /* EV_KEY */ && ev.code == 0x100 /* BTN_0 */) {
+                    if (ev.type == 1 /* EV_KEY */ && (ev.code == 0x246 /* KEY_VOICECOMMAND (Station Lite center touch) */ ||
+                                                      ev.code == 0x100 /* BTN_0 */ ||
+                                                      ev.code == 164   /* KEY_PLAYPAUSE */)) {
                         if (ev.value == 1) { // Press
                             touch_down_start = 1;
                             touch_down_time = now_ms();
@@ -921,7 +923,7 @@ void _start(void) {
                         } else if (ev.value == 0) { // Release
                             if (touch_down_start) {
                                 int64_t dur = now_ms() - touch_down_time;
-                                if (dur < 600) { // Short tap < 600ms
+                                if (dur < 700) { // Short tap < 700ms
                                     log_msg("[bridge] Center touch TAP detected -> TOGGLE PLAY/PAUSE\n");
                                     trigger_alice_suppression(quasar_fd, 2500);
                                     run_toggle();
