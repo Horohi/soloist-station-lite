@@ -233,27 +233,30 @@ if [ -x /data/opt/soloist/bin/soloist-bridge ]; then
     echo "Soloist Bridge (Fast Control + Full Search) started, PID=\$(cat /data/opt/soloist/data/bridge.pid)"
 fi
 
-# Auto-recovery watchdog: verifies successful login and activates device
+# Activation & RAM cache guard
 (
-    for attempt in \$(seq 1 30); do
+    # 1. Wait for daemon to become ready and activate device if logged in
+    for attempt in \$(seq 1 15); do
         sleep 2
         STATUS=\$(/data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
         if echo "\$STATUS" | grep -qi "logged in: yes"; then
             /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
             break
-        elif echo "\$STATUS" | grep -qi "logged in: no"; then
-            echo "[watchdog] Soloist started before network was ready, restarting daemon..." >> /tmp/soloist.log
-            killall -9 soloist 2>/dev/null || true
-            sleep 1
-            nohup /data/opt/soloist/bin/soloist \\
-                -n "$DEVICE_NAME" \\
-                -k "\$API_KEY" \\
-                -D /data/opt/soloist/data \\
-                -C /tmp/soloist_cache \\
-                -w 127.0.0.1:9090 \\
-                --initial-volume 100 \\
-                -v >> /tmp/soloist.log 2>&1 &
-            sleep 2
+        fi
+    done
+
+    # 2. RAM guard: keep audio stream cache under 20MB so tmpfs never exhausts RAM
+    while true; do
+        sleep 120
+        if [ -d /tmp/soloist_cache/cache ]; then
+            CACHE_KB=\$(du -sk /tmp/soloist_cache/cache 2>/dev/null | awk '{print \$1}')
+            if [ "\${CACHE_KB:-0}" -gt 20480 ]; then
+                find /tmp/soloist_cache/cache -type f -amin +10 -delete 2>/dev/null || true
+                CACHE_KB_AFTER=\$(du -sk /tmp/soloist_cache/cache 2>/dev/null | awk '{print \$1}')
+                if [ "\${CACHE_KB_AFTER:-0}" -gt 20480 ]; then
+                    rm -rf /tmp/soloist_cache/cache/* 2>/dev/null || true
+                fi
+            fi
         fi
     done
 ) &
