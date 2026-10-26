@@ -171,32 +171,53 @@ static int64_t now_ms(void) {
     return 0;
 }
 
-/* Builds and sends one AliceCapability method frame. Building the frame at runtime
- * (instead of hand-written byte arrays) keeps the declared lengths in sync with the data. */
-static void send_alice_method(int quasar_fd, unsigned char method) {
-    // QuasarMessage: field 210 (remoting) -> Remoting: field 7 ("AliceCapability"), field 8 (alice_capability_method)
-    static const char cap[] = "AliceCapability";
-    unsigned char f[4 + 3 + 2 + sizeof(cap) - 1 + 4];
-    unsigned long n = 0;
-    const unsigned long cap_len = sizeof(cap) - 1;
-    const unsigned long inner_len = 2 + cap_len + 4;   // 0x3a,len,cap + 0x42,0x02,0x08,method
-    const unsigned long body_len = 3 + inner_len;      // 0x92,0x0d,len + inner
+/* Builds and sends one AliceCapability method frame via Quasar IPC (SharedMessage).
+ * Wire format verified against Quasar & Spotiya:
+ * [uint32_le msg_len (28)]
+ * field 252 (Remoting):
+ *   field 7 ("AliceCapability")
+ *   field 8 ({ 0x08, method })
+ * field 253 (type = 210, varint 0xd2 0x01)
+ */
+static int send_alice_method(int quasar_fd, unsigned char method) {
+    if (quasar_fd < 0) return -1;
+    static const unsigned char frame_template[32] = {
+        0x1c, 0x00, 0x00, 0x00, // length = 28
+        0xe2, 0x0f,             // tag: field 252, wire type 2
+        0x15,                   // remoting length = 21 bytes
+        0x3a, 0x0f,             // tag: field 7, len 15
+        'A','l','i','c','e','C','a','p','a','b','i','l','i','t','y',
+        0x42, 0x02,             // tag: field 8, len 2
+        0x08, 0x00,             // method field 1 (0x08), method byte (filled at [27])
+        0xe8, 0x0f,             // tag: field 253, wire type 0
+        0xd2, 0x01              // value = 210 (QuasarMessage::remoting)
+    };
+    unsigned char frame[32];
+    for (int i = 0; i < 32; i++) frame[i] = frame_template[i];
+    frame[27] = method;
 
-    f[n++] = (unsigned char)body_len; f[n++] = 0; f[n++] = 0; f[n++] = 0; // frame length (LE)
-    f[n++] = 0x92; f[n++] = 0x0d; f[n++] = (unsigned char)inner_len;      // field 210
-    f[n++] = 0x3a; f[n++] = (unsigned char)cap_len;                       // field 7
-    for (unsigned long i = 0; i < cap_len; i++) f[n++] = (unsigned char)cap[i];
-    f[n++] = 0x42; f[n++] = 0x02; f[n++] = 0x08; f[n++] = method;         // field 8 { method }
-    sys_write(quasar_fd, f, n);
+    long n = sys_write(quasar_fd, frame, sizeof(frame));
+    return (n == (long)sizeof(frame)) ? 0 : -1;
 }
 
 static void send_cancel_alice(int quasar_fd) {
     if (quasar_fd < 0) return;
-    send_alice_method(quasar_fd, 1);    // CANCEL_DIALOG
-    send_alice_method(quasar_fd, 3);    // STOP_CONVERSATION
-    send_alice_method(quasar_fd, 6);    // CANCEL_DIALOG_AND_CLEAR_QUEUE
-    send_alice_method(quasar_fd, 0x0e); // STOP_TTS
-    log_msg("[bridge] Sent cancel_alice (dialog+stop+queue+tts) to Quasar\n");
+    int err = 0;
+    // Native Quasar remoting directives:
+    // kind 3: STOP_CONVERSATION
+    // kind 6: CANCEL_DIALOG_AND_CLEAR_QUEUE
+    // kind 0x0e: STOP_TTS
+    // kind 1: CANCEL_DIALOG
+    if (send_alice_method(quasar_fd, 3) < 0) err = 1;
+    if (send_alice_method(quasar_fd, 6) < 0) err = 1;
+    if (send_alice_method(quasar_fd, 0x0e) < 0) err = 1;
+    if (send_alice_method(quasar_fd, 1) < 0) err = 1;
+
+    if (!err) {
+        log_msg("[bridge] Sent cancel_alice (stop+queue+tts+dialog) via Remoting f252/f253 to Quasar\n");
+    } else {
+        log_msg("[bridge] Warning: Failed to send cancel_alice to Quasar socket\n");
+    }
 }
 
 static int64_t cancel_alice_until_ms = 0;
@@ -809,7 +830,12 @@ static unsigned long quasar_buf_pos = 0;
 static uint8_t ws_buf[8192];
 static unsigned long ws_buf_pos = 0;
 static char last_uuid[64];
+static int64_t last_uuid_time = 0;
 static char last_processed_text[256];
+static int64_t last_processed_text_time = 0;
+static char last_executed_action[256];
+static int64_t last_executed_action_time = 0;
+static int64_t last_search_time = 0;
 
 #define MAX_INPUT_DEVS 8
 static int input_fds[MAX_INPUT_DEVS];
@@ -849,9 +875,9 @@ void _start(void) {
     if (test_fd >= 0) {
         sys_close(test_fd);
         is_yam_mode = 1;
-        log_msg("[bridge] soloist-bridge v13 started (YAM plugin mode: relative paths)\n");
+        log_msg("[bridge] soloist-bridge v14 started (YAM plugin mode: relative paths)\n");
     } else {
-        log_msg("[bridge] soloist-bridge v13 started (Standalone mode: /data/opt/soloist)\n");
+        log_msg("[bridge] soloist-bridge v14 started (Standalone mode: /data/opt/soloist)\n");
     }
 
     int quasar_fd = -1;
@@ -1006,14 +1032,6 @@ void _start(void) {
                                 send_cancel_alice(quasar_fd);
                             }
 
-                            static uint64_t prev_alice_state = 0;
-                            // Reset deduplication cache when Alice returns to idle
-                            if (alice_state == 0 && prev_alice_state != 0) {
-                                last_uuid[0] = 0;
-                                last_processed_text[0] = 0;
-                            }
-                            prev_alice_state = alice_state;
-
                             const uint8_t *asr_payload = 0;
                             unsigned long asr_len = 0;
                             uint64_t is_final = 0;
@@ -1086,25 +1104,46 @@ void _start(void) {
                                 // Fast control commands fire instantly without waiting for silence!
                                 // Search/Play queries wait for final recognition so the full phrase is captured!
                                 if (is_fast_ctrl || alice_state == 3 || is_final == 1) {
-                                    int is_new = 1;
+                                    int is_dup = 0;
+
+                                    // 1. Same request/dialog UUID within 4000ms
                                     if (uuid_bytes && uuid_len > 0 && uuid_len < sizeof(last_uuid)) {
-                                        if (mem_equal(last_uuid, uuid_bytes, uuid_len)) {
-                                            is_new = 0;
-                                        } else {
-                                            for (unsigned long i = 0; i < uuid_len; i++) last_uuid[i] = (char)uuid_bytes[i];
-                                            last_uuid[uuid_len] = 0;
-                                        }
-                                    } else {
-                                        if (str_equal(last_processed_text, lower_check)) {
-                                            is_new = 0;
+                                        if (now - last_uuid_time < 4000 && mem_equal(last_uuid, uuid_bytes, uuid_len)) {
+                                            is_dup = 1;
                                         }
                                     }
 
-                                    if (is_new) {
-                                        unsigned long tlen = str_len(lower_check);
-                                        if (tlen >= sizeof(last_processed_text)) tlen = sizeof(last_processed_text) - 1;
-                                        for (unsigned long i = 0; i < tlen; i++) last_processed_text[i] = lower_check[i];
-                                        last_processed_text[tlen] = 0;
+                                    // 2. Exact same recognized phrase within 2500ms
+                                    if (str_equal(last_processed_text, lower_check) && (now - last_processed_text_time < 2500)) {
+                                        is_dup = 1;
+                                    }
+
+                                    // 3. Fast control action already performed within 1500ms
+                                    if (is_fast_ctrl && str_equal(last_executed_action, lower_check) && (now - last_executed_action_time < 1500)) {
+                                        is_dup = 1;
+                                    }
+
+                                    // 4. Search query cooldown: do not start multiple search scripts within 2500ms
+                                    if (!is_fast_ctrl && (now - last_search_time < 2500)) {
+                                        is_dup = 1;
+                                    }
+
+                                    if (!is_dup) {
+                                        str_copy(last_processed_text, lower_check, sizeof(last_processed_text));
+                                        last_processed_text_time = now;
+
+                                        if (uuid_bytes && uuid_len > 0 && uuid_len < sizeof(last_uuid)) {
+                                            for (unsigned long i = 0; i < uuid_len; i++) last_uuid[i] = (char)uuid_bytes[i];
+                                            last_uuid[uuid_len] = 0;
+                                            last_uuid_time = now;
+                                        }
+
+                                        if (is_fast_ctrl) {
+                                            str_copy(last_executed_action, lower_check, sizeof(last_executed_action));
+                                            last_executed_action_time = now;
+                                        } else {
+                                            last_search_time = now;
+                                        }
 
                                         handle_voice_recognition(quasar_fd, (const char *)text_bytes, text_len);
                                     }
