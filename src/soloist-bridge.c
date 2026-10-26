@@ -162,30 +162,30 @@ static int64_t now_ms(void) {
     return 0;
 }
 
+/* Builds and sends one AliceCapability method frame. Building the frame at runtime
+ * (instead of hand-written byte arrays) keeps the declared lengths in sync with the data. */
+static void send_alice_method(int quasar_fd, unsigned char method) {
+    // QuasarMessage: field 210 (remoting) -> Remoting: field 7 ("AliceCapability"), field 8 (alice_capability_method)
+    static const char cap[] = "AliceCapability";
+    unsigned char f[4 + 3 + 2 + sizeof(cap) - 1 + 4];
+    unsigned long n = 0;
+    const unsigned long cap_len = sizeof(cap) - 1;
+    const unsigned long inner_len = 2 + cap_len + 4;   // 0x3a,len,cap + 0x42,0x02,0x08,method
+    const unsigned long body_len = 3 + inner_len;      // 0x92,0x0d,len + inner
+
+    f[n++] = (unsigned char)body_len; f[n++] = 0; f[n++] = 0; f[n++] = 0; // frame length (LE)
+    f[n++] = 0x92; f[n++] = 0x0d; f[n++] = (unsigned char)inner_len;      // field 210
+    f[n++] = 0x3a; f[n++] = (unsigned char)cap_len;                       // field 7
+    for (unsigned long i = 0; i < cap_len; i++) f[n++] = (unsigned char)cap[i];
+    f[n++] = 0x42; f[n++] = 0x02; f[n++] = 0x08; f[n++] = method;         // field 8 { method }
+    sys_write(quasar_fd, f, n);
+}
+
 static void send_cancel_alice(int quasar_fd) {
     if (quasar_fd < 0) return;
-    // QuasarMessage: field 210 (remoting) -> Remoting: field 7 ("AliceCapability"), field 8 (alice_capability_method)
-    static const unsigned char cancel_frame_stop[28] = {
-        0x18, 0x00, 0x00, 0x00, // length = 24
-        0x92, 0x0d, 0x15,       // field 210, length 21
-        0x3a, 0x0f, 'A', 'l', 'i', 'c', 'e', 'C', 'a', 'p', 'a', 'b', 'i', 'l', 'i', 't', 'y',
-        0x42, 0x02, 0x08, 0x03  // method = STOP_CONVERSATION (3)
-    };
-    static const unsigned char cancel_frame_queue[28] = {
-        0x18, 0x00, 0x00, 0x00, // length = 24
-        0x92, 0x0d, 0x15,       // field 210, length 21
-        0x3a, 0x0f, 'A', 'l', 'i', 'c', 'e', 'C', 'a', 'b', 'i', 'l', 'i', 't', 'y',
-        0x42, 0x02, 0x08, 0x06  // method = CANCEL_DIALOG_AND_CLEAR_QUEUE (6)
-    };
-    static const unsigned char cancel_frame_tts[28] = {
-        0x18, 0x00, 0x00, 0x00, // length = 24
-        0x92, 0x0d, 0x15,       // field 210, length 21
-        0x3a, 0x0f, 'A', 'l', 'i', 'c', 'e', 'C', 'a', 'b', 'i', 'l', 'i', 't', 'y',
-        0x42, 0x02, 0x08, 0x0e  // method = STOP_TTS (14)
-    };
-    sys_write(quasar_fd, cancel_frame_stop, sizeof(cancel_frame_stop));
-    sys_write(quasar_fd, cancel_frame_queue, sizeof(cancel_frame_queue));
-    sys_write(quasar_fd, cancel_frame_tts, sizeof(cancel_frame_tts));
+    send_alice_method(quasar_fd, 3);    // STOP_CONVERSATION
+    send_alice_method(quasar_fd, 6);    // CANCEL_DIALOG_AND_CLEAR_QUEUE
+    send_alice_method(quasar_fd, 0x0e); // STOP_TTS
     log_msg("[bridge] Sent cancel_alice (stop+queue+tts) to Quasar\n");
 }
 
@@ -342,7 +342,7 @@ static int find_field(const uint8_t *data, unsigned long len, uint32_t field_num
             }
         } else if (wire == 2) {
             uint64_t flen = parse_varint(data, len, &offset);
-            if (offset + flen > len) return 0;
+            if (flen > len - offset) return 0;
             if (fnum == field_num && expected_wire == 2) {
                 if (val_ptr) *val_ptr = &data[offset];
                 if (val_len) *val_len = flen;
@@ -428,6 +428,51 @@ static int mem_equal(const void *a, const void *b, unsigned long n) {
     return 1;
 }
 
+/* Word-boundary helpers. Cyrillic bytes (>= 0x80) count as word characters, so
+ * "тв" no longer matches inside "молитва" and "бра" no longer matches "брат". */
+static int is_word_byte(uint8_t c) {
+    return c >= 0x80 || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+/* needle occurs at the start of a word (prefix match: "свет" matches "свет", "света", "светильник") */
+static int str_has_word_prefix(const char *haystack, const char *needle) {
+    unsigned long hlen = str_len(haystack);
+    unsigned long nlen = str_len(needle);
+    if (nlen == 0 || hlen < nlen) return 0;
+    for (unsigned long i = 0; i + nlen <= hlen; i++) {
+        if (i > 0 && is_word_byte((uint8_t)haystack[i - 1])) continue;
+        if (mem_equal(haystack + i, needle, nlen)) return 1;
+    }
+    return 0;
+}
+
+/* needle occurs as a whole word */
+static int str_has_word(const char *haystack, const char *needle) {
+    unsigned long hlen = str_len(haystack);
+    unsigned long nlen = str_len(needle);
+    if (nlen == 0 || hlen < nlen) return 0;
+    for (unsigned long i = 0; i + nlen <= hlen; i++) {
+        if (i > 0 && is_word_byte((uint8_t)haystack[i - 1])) continue;
+        if (i + nlen < hlen && is_word_byte((uint8_t)haystack[i + nlen])) continue;
+        if (mem_equal(haystack + i, needle, nlen)) return 1;
+    }
+    return 0;
+}
+
+/* "включи песню Назад в СССР" / "поставь группу Стоп" etc.: a play verb plus an explicit
+ * media-type noun means a catalog search, even if the title contains control words
+ * such as "назад", "дальше", "стоп" or "пауза". */
+static int is_explicit_search(const char *lower) {
+    int has_verb = str_has_word_prefix(lower, "включи") || str_has_word_prefix(lower, "поставь") ||
+                   str_has_word_prefix(lower, "сыграй") || str_has_word_prefix(lower, "запусти") ||
+                   str_has_word_prefix(lower, "найди") || str_has_word_prefix(lower, "вруби") ||
+                   str_has_word_prefix(lower, "слушать");
+    int has_noun = str_has_word_prefix(lower, "песн") || str_has_word_prefix(lower, "трек") ||
+                   str_has_word_prefix(lower, "альбом") || str_has_word_prefix(lower, "групп") ||
+                   str_has_word_prefix(lower, "исполнител") || str_has_word_prefix(lower, "артист");
+    return has_verb && has_noun;
+}
+
 static int spotify_is_active = 0;
 
 static void handle_voice_recognition(int quasar_fd, const char *text, unsigned long text_len) {
@@ -443,93 +488,96 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     log_msg(lower_buf);
     log_msg("\"\n");
 
-    // Check PAUSE / STOP keywords (Instant Action)
-    if (str_contains(lower_buf, "пауз") ||
-        str_contains(lower_buf, "стоп") ||
-        str_contains(lower_buf, "хватит") ||
-        str_contains(lower_buf, "замолчи") ||
-        str_contains(lower_buf, "останови") ||
-        str_contains(lower_buf, "выключи музыку") ||
-        str_contains(lower_buf, "отключи музыку")) {
-        log_msg("[bridge] Action: PAUSE\n");
-        trigger_alice_suppression(quasar_fd, 3000);
-        spotify_is_active = 0;
-        run_soloist_cmd("pause");
-        return;
-    }
+    // An explicit catalog search ("включи песню ...") must not be hijacked by control words in the title
+    if (!is_explicit_search(lower_buf)) {
+        // Check PAUSE / STOP keywords (Instant Action)
+        if (str_contains(lower_buf, "пауз") ||
+            str_contains(lower_buf, "стоп") ||
+            str_contains(lower_buf, "хватит") ||
+            str_contains(lower_buf, "замолчи") ||
+            str_contains(lower_buf, "останови") ||
+            str_contains(lower_buf, "выключи музыку") ||
+            str_contains(lower_buf, "отключи музыку")) {
+            log_msg("[bridge] Action: PAUSE\n");
+            trigger_alice_suppression(quasar_fd, 3000);
+            spotify_is_active = 0;
+            run_soloist_cmd("pause");
+            return;
+        }
 
-    // Check NEXT TRACK keywords (Instant Action)
-    if (str_contains(lower_buf, "дальше") ||
-        str_contains(lower_buf, "следующ") ||
-        str_contains(lower_buf, "переключи") ||
-        str_contains(lower_buf, "пропусти")) {
-        log_msg("[bridge] Action: NEXT TRACK\n");
-        trigger_alice_suppression(quasar_fd, 3000);
-        spotify_is_active = 1;
-        run_soloist_cmd("next");
-        return;
-    }
+        // Check NEXT TRACK keywords (Instant Action)
+        if (str_contains(lower_buf, "дальше") ||
+            str_contains(lower_buf, "следующ") ||
+            str_contains(lower_buf, "переключи") ||
+            str_contains(lower_buf, "пропусти")) {
+            log_msg("[bridge] Action: NEXT TRACK\n");
+            trigger_alice_suppression(quasar_fd, 3000);
+            spotify_is_active = 1;
+            run_soloist_cmd("next");
+            return;
+        }
 
-    // Check PREVIOUS TRACK keywords (Instant Action)
-    if (str_contains(lower_buf, "назад") ||
-        str_contains(lower_buf, "предыдущ") ||
-        str_contains(lower_buf, "прошл")) {
-        log_msg("[bridge] Action: PREVIOUS TRACK\n");
-        trigger_alice_suppression(quasar_fd, 3000);
-        spotify_is_active = 1;
-        run_soloist_cmd("prev");
-        return;
-    }
+        // Check PREVIOUS TRACK keywords (Instant Action)
+        if (str_contains(lower_buf, "назад") ||
+            str_contains(lower_buf, "предыдущ") ||
+            str_contains(lower_buf, "прошл")) {
+            log_msg("[bridge] Action: PREVIOUS TRACK\n");
+            trigger_alice_suppression(quasar_fd, 3000);
+            spotify_is_active = 1;
+            run_soloist_cmd("prev");
+            return;
+        }
 
-    // Check SHUFFLE keywords (Instant Action)
-    if (str_contains(lower_buf, "перемешай") ||
-        str_contains(lower_buf, "случайный порядок") ||
-        str_contains(lower_buf, "случайном порядке") ||
-        str_contains(lower_buf, "включи перемешивание")) {
-        log_msg("[bridge] Action: SHUFFLE ON\n");
-        trigger_alice_suppression(quasar_fd, 2500);
-        run_soloist_cmd2("shuffle", "on");
-        return;
-    }
-    if (str_contains(lower_buf, "по порядку") ||
-        str_contains(lower_buf, "выключи перемешивание") ||
-        str_contains(lower_buf, "отключи перемешивание")) {
-        log_msg("[bridge] Action: SHUFFLE OFF\n");
-        trigger_alice_suppression(quasar_fd, 2500);
-        run_soloist_cmd2("shuffle", "off");
-        return;
-    }
+        // Check SHUFFLE keywords (Instant Action)
+        if (str_contains(lower_buf, "перемешай") ||
+            str_contains(lower_buf, "случайный порядок") ||
+            str_contains(lower_buf, "случайном порядке") ||
+            str_contains(lower_buf, "включи перемешивание")) {
+            log_msg("[bridge] Action: SHUFFLE ON\n");
+            trigger_alice_suppression(quasar_fd, 2500);
+            run_soloist_cmd2("shuffle", "on");
+            return;
+        }
+        if (str_contains(lower_buf, "по порядку") ||
+            str_contains(lower_buf, "выключи перемешивание") ||
+            str_contains(lower_buf, "отключи перемешивание")) {
+            log_msg("[bridge] Action: SHUFFLE OFF\n");
+            trigger_alice_suppression(quasar_fd, 2500);
+            run_soloist_cmd2("shuffle", "off");
+            return;
+        }
 
-    // Check REPEAT keywords (Instant Action)
-    if (str_contains(lower_buf, "зацикли") ||
-        str_contains(lower_buf, "повторяй") ||
-        str_contains(lower_buf, "включи повтор")) {
-        log_msg("[bridge] Action: REPEAT ON\n");
-        trigger_alice_suppression(quasar_fd, 2500);
-        run_soloist_cmd2("repeat", "context");
-        return;
-    }
-    if (str_contains(lower_buf, "не повторяй") ||
-        str_contains(lower_buf, "выключи повтор") ||
-        str_contains(lower_buf, "отключи повтор")) {
-        log_msg("[bridge] Action: REPEAT OFF\n");
-        trigger_alice_suppression(quasar_fd, 2500);
-        run_soloist_cmd2("repeat", "off");
-        return;
-    }
+        // Check REPEAT keywords (Instant Action)
+        if (str_contains(lower_buf, "зацикли") ||
+            str_contains(lower_buf, "повторяй") ||
+            str_contains(lower_buf, "включи повтор")) {
+            log_msg("[bridge] Action: REPEAT ON\n");
+            trigger_alice_suppression(quasar_fd, 2500);
+            run_soloist_cmd2("repeat", "context");
+            return;
+        }
+        if (str_contains(lower_buf, "не повторяй") ||
+            str_contains(lower_buf, "выключи повтор") ||
+            str_contains(lower_buf, "отключи повтор")) {
+            log_msg("[bridge] Action: REPEAT OFF\n");
+            trigger_alice_suppression(quasar_fd, 2500);
+            run_soloist_cmd2("repeat", "off");
+            return;
+        }
 
-    // Resume checks (Fast Action)
-    if (str_contains(lower_buf, "продолж") ||
-        str_contains(lower_buf, "играй") ||
-        str_contains(lower_buf, "возобнов") ||
-        str_contains(lower_buf, "заиграй") ||
-        str_contains(lower_buf, "вруби музыку") ||
-        (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
-        log_msg("[bridge] Action: RESUME\n");
-        trigger_alice_suppression(quasar_fd, 3500);
-        spotify_is_active = 1;
-        run_search_and_play("включи музыку");
-        return;
+        // Resume checks (Fast Action)
+        if (str_contains(lower_buf, "продолж") ||
+            str_contains(lower_buf, "играй") ||
+            str_contains(lower_buf, "возобнов") ||
+            str_contains(lower_buf, "заиграй") ||
+            str_contains(lower_buf, "вруби музыку") ||
+            (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
+            log_msg("[bridge] Action: RESUME\n");
+            trigger_alice_suppression(quasar_fd, 3500);
+            spotify_is_active = 1;
+            run_search_and_play("включи музыку");
+            return;
+        }
     }
 
     // Censorship toggle
@@ -569,25 +617,25 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "вруби") ||
         str_contains(lower_buf, "слушать")) {
 
-        // Ignore household smart home commands
-        if (str_contains(lower_buf, "свет") ||
-            str_contains(lower_buf, "ламп") ||
-            str_contains(lower_buf, "люстр") ||
-            str_contains(lower_buf, "розетк") ||
-            str_contains(lower_buf, "ночник") ||
-            str_contains(lower_buf, "подсветк") ||
-            str_contains(lower_buf, "бра") ||
-            str_contains(lower_buf, "торшер") ||
-            str_contains(lower_buf, "гирлянд") ||
-            str_contains(lower_buf, "чайник") ||
-            str_contains(lower_buf, "пылесос") ||
-            str_contains(lower_buf, "кондиционер") ||
-            str_contains(lower_buf, "телевизор") ||
-            str_contains(lower_buf, "тв") ||
-            str_contains(lower_buf, "таймер") ||
-            str_contains(lower_buf, "будильник") ||
-            str_contains(lower_buf, "блютуз") ||
-            str_contains(lower_buf, "bluetooth")) {
+        // Ignore household smart home commands (word-aware: short tokens must be whole words)
+        if (str_has_word_prefix(lower_buf, "свет") ||
+            str_has_word_prefix(lower_buf, "ламп") ||
+            str_has_word_prefix(lower_buf, "люстр") ||
+            str_has_word_prefix(lower_buf, "розетк") ||
+            str_has_word_prefix(lower_buf, "ночник") ||
+            str_has_word_prefix(lower_buf, "подсветк") ||
+            str_has_word(lower_buf, "бра") ||
+            str_has_word_prefix(lower_buf, "торшер") ||
+            str_has_word_prefix(lower_buf, "гирлянд") ||
+            str_has_word_prefix(lower_buf, "чайник") ||
+            str_has_word_prefix(lower_buf, "пылесос") ||
+            str_has_word_prefix(lower_buf, "кондиционер") ||
+            str_has_word_prefix(lower_buf, "телевизор") ||
+            str_has_word(lower_buf, "тв") ||
+            str_has_word_prefix(lower_buf, "таймер") ||
+            str_has_word_prefix(lower_buf, "будильник") ||
+            str_has_word_prefix(lower_buf, "блютуз") ||
+            str_has_word_prefix(lower_buf, "bluetooth")) {
             log_msg("[bridge] Household smart command, ignoring\n");
             return;
         }
@@ -813,17 +861,8 @@ void _start(void) {
                                     is_fast_ctrl = 1;
                                 }
 
-                                int is_search = 0;
-                                if (!is_fast_ctrl) {
-                                    if (str_contains(lower_check, "включи") ||
-                                        str_contains(lower_check, "поставь") ||
-                                        str_contains(lower_check, "сыграй") ||
-                                        str_contains(lower_check, "запусти") ||
-                                        str_contains(lower_check, "найди") ||
-                                        str_contains(lower_check, "вруби") ||
-                                        str_contains(lower_check, "слушать")) {
-                                        is_search = 1;
-                                    }
+                                if (is_fast_ctrl && is_explicit_search(lower_check)) {
+                                    is_fast_ctrl = 0; // title search: wait for the final recognition
                                 }
 
                                 // Fast control commands fire instantly without waiting for silence!

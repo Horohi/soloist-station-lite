@@ -5,7 +5,7 @@ if [ -z "$QUERY" ]; then
 fi
 
 LOG="/tmp/soloist-search.log"
-echo "[search] ===== Incoming query: '$QUERY' =====" >> "$LOG"
+printf "[search] ===== Incoming query: '%s' =====\n" "$QUERY" >> "$LOG"
 
 # Base directory detection
 BASE_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
@@ -19,31 +19,28 @@ API_CONF="$BASE_DIR/spotify_api.conf"
 CENSOR_FILE="$BASE_DIR/data/censorship"
 [ -f "$CENSOR_FILE" ] || CENSOR_FILE="/data/opt/soloist/data/censorship"
 
-# Clean Alice greetings and filler words
-CLEAN=$(echo "$QUERY" | tr '[:upper:]' '[:lower:]' | \
-    sed -e 's/алиса,//g' -e 's/алиса//g' \
-        -e 's/Алиса,//g' -e 's/Алиса//g' \
-        -e 's/пожалуйста//g' -e 's/Пожалуйста//g' \
-        -e 's/давай//g' -e 's/Давай//g' | xargs)
+# Normalize whitespace (replaces `xargs`, which chokes on quotes: "Don't Stop Me Now")
+squeeze() {
+    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/ /g'
+}
 
-# Strip leading action verbs
-TERM=$(echo "$CLEAN" | sed -E 's/^(включи|поставь|сыграй|запусти|найди|слушать|вруби|Включи|Поставь|Сыграй|Запусти|Найди|Слушать|Вруби)[[:space:]]+//g' | xargs)
+# Clean Alice greetings and filler words. Only LEADING fillers (and a trailing "пожалуйста")
+# are removed, so titles like "Давай поговорим" or the band "Алиса" survive.
+CLEAN=$(printf '%s\n' "$QUERY" | tr '[:upper:]' '[:lower:]' | squeeze | \
+    sed -E -e 's/^((алиса,?|давай|пожалуйста)[[:space:]]+)+//' -e 's/[[:space:]]+пожалуйста$//')
 
-# Detect search type hint
+# Strip leading action verb
+TERM=$(printf '%s\n' "$CLEAN" | sed -E 's/^(включи|поставь|сыграй|запусти|найди|слушать|вруби)[[:space:]]+//' | squeeze)
+
+# Detect search type hint from the FIRST word only ("песню Группа крови" is a track, not an artist)
 TYPE="track"
 case "$TERM" in
-    *альбом*|*Альбом*)
-        TYPE="album"
-        TERM=$(echo "$TERM" | sed -E 's/^(альбом|Альбом)[[:space:]]+//g' | xargs)
-        ;;
-    *групп*|*исполнител*|*артист*|*певц*|*певиц*)
-        TYPE="artist"
-        TERM=$(echo "$TERM" | sed -E 's/^(группу|исполнителя|артиста|певца|певицу|Группу|Исполнителя)[[:space:]]+//g' | xargs)
-        ;;
-    *песн*|*трек*)
-        TYPE="track"
-        TERM=$(echo "$TERM" | sed -E 's/^(песню|песня|трек|Песню|Песня|Трек)[[:space:]]+//g' | xargs)
-        ;;
+    "альбом "*)
+        TYPE="album"; TERM="${TERM#* }" ;;
+    "группу "*|"группа "*|"исполнителя "*|"исполнитель "*|"артиста "*|"артист "*|"певца "*|"певицу "*)
+        TYPE="artist"; TERM="${TERM#* }" ;;
+    "песню "*|"песня "*|"трек "*)
+        TYPE="track"; TERM="${TERM#* }" ;;
 esac
 
 echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
@@ -51,6 +48,7 @@ echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 # If search term is empty or generic 'музыку' -> resume or play default
 if [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; then
     echo "[search] Generic play request, resuming..." >> "$LOG"
+    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
     "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
     sleep 0.5
     NOW_STATE=$("$SOLOIST_BIN" ctl -w 127.0.0.1:9090 now 2>/dev/null || true)
@@ -75,8 +73,6 @@ if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
     exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
 fi
 
-CURL_BIN="/data/opt/soloist/bin/curl"
-[ -x "$CURL_BIN" ] || CURL_BIN="curl"
 CURL_OPTS="--resolve api.spotify.com:443:5.175.161.40 --resolve accounts.spotify.com:443:5.175.161.40 -s"
 
 # Token management
@@ -96,12 +92,12 @@ if [ -z "$TOKEN" ]; then
         -d "grant_type=client_credentials&client_id=$SPOTIFY_CLIENT_ID&client_secret=$SPOTIFY_CLIENT_SECRET")
     TOKEN=$(echo "$AUTH_RESP" | grep -oE '"access_token":"[^"]+"' | cut -d'"' -f4)
     if [ -n "$TOKEN" ]; then
-        echo "$TOKEN" > /tmp/spotify_token
-        echo $((NOW + 3300)) > /tmp/spotify_token_exp
+        rm -f /tmp/spotify_token /tmp/spotify_token_exp
+        (umask 077; echo "$TOKEN" > /tmp/spotify_token; echo $((NOW + 3300)) > /tmp/spotify_token_exp)
         echo "[search] Access token successfully updated" >> "$LOG"
     else
         echo "[search] ERROR: Failed to get token: $AUTH_RESP" >> "$LOG"
-        exec /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 play
+        exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 play
     fi
 fi
 
@@ -136,13 +132,15 @@ LIMIT=5
 SEARCH_RESP=$($CURL_BIN $CURL_OPTS "https://api.spotify.com/v1/search?q=$ENCODED&type=$TYPE&limit=$LIMIT" \
     -H "Authorization: Bearer $TOKEN")
 
-if [ "$TYPE" = "track" ]; then
-    URI=$(echo "$SEARCH_RESP" | awk -v query="$TERM" -v censor="$CENSORSHIP" '
+# Rank track results by how many query words hit the title (x5) or the artists (x2).
+# The term is passed via the environment: awk -v would interpret backslash escapes.
+pick_track() {
+    SEARCH_TERM="$TERM" awk -v censor="$CENSORSHIP" '
     BEGIN {
         RS = "\\{\"album\":"
         best_score = -1
         best_uri = ""
-        nwords = split(tolower(query), qwords, " ")
+        nwords = split(tolower(ENVIRON["SEARCH_TERM"]), qwords, " ")
     }
     NR > 1 {
         if (censor == "1" && $0 ~ /"explicit":true/) next
@@ -179,7 +177,11 @@ if [ "$TYPE" = "track" ]; then
     }
     END {
         if (best_uri != "") print best_uri
-    }')
+    }'
+}
+
+if [ "$TYPE" = "track" ]; then
+    URI=$(printf '%s' "$SEARCH_RESP" | pick_track)
 else
     URI=$(echo "$SEARCH_RESP" | grep -oE "spotify:$TYPE:[a-zA-Z0-9]+" | head -n 1)
 fi
@@ -189,49 +191,7 @@ if [ -z "$URI" ]; then
     echo "[search] No match for type=$TYPE, trying general search..." >> "$LOG"
     SEARCH_RESP=$($CURL_BIN $CURL_OPTS "https://api.spotify.com/v1/search?q=$ENCODED&type=track,artist,album&limit=5" \
         -H "Authorization: Bearer $TOKEN")
-    URI=$(echo "$SEARCH_RESP" | awk -v query="$TERM" -v censor="$CENSORSHIP" '
-    BEGIN {
-        RS = "\\{\"album\":"
-        best_score = -1
-        best_uri = ""
-        nwords = split(tolower(query), qwords, " ")
-    }
-    NR > 1 {
-        if (censor == "1" && $0 ~ /"explicit":true/) next
-        uri = ""
-        if (match($0, /"uri":"spotify:track:[a-zA-Z0-9]+/)) {
-            uri = substr($0, RSTART + 7, RLENGTH - 7)
-        }
-        if (uri == "") next
-
-        name = ""
-        if (match($0, /"name":"[^"]+","track_number"/)) {
-            name = tolower(substr($0, RSTART + 8, RLENGTH - 24))
-        }
-
-        artists = ""
-        if (match($0, /"artists":/)) {
-            artists = tolower(substr($0, RSTART))
-        }
-
-        score = 0
-        for (i = 1; i <= nwords; i++) {
-            w = qwords[i]
-            if (length(w) == 0) continue
-            if (index(name, w) > 0) score += 5
-            if (index(artists, w) > 0) score += 2
-        }
-
-        if (score > best_score) {
-            best_score = score
-            best_uri = uri
-        } else if (best_uri == "") {
-            best_uri = uri
-        }
-    }
-    END {
-        if (best_uri != "") print best_uri
-    }')
+    URI=$(printf '%s' "$SEARCH_RESP" | pick_track)
     # Prioritize track > artist > album
     [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:artist:[a-zA-Z0-9]+' | head -n 1)
     [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:album:[a-zA-Z0-9]+' | head -n 1)
