@@ -100,6 +100,14 @@ fi
 # 6. Device Name
 DEVICE_NAME="${2:-Yandex Station Lite}"
 
+# These values are written into start.sh inside double quotes: refuse characters that would break it
+case "$API_KEY" in
+    *[!A-Za-z0-9_-]*) echo "ERROR: API-ключ содержит недопустимые символы." >&2; exit 1 ;;
+esac
+case "$DEVICE_NAME" in
+    *[\"\$\`\\]*) echo "ERROR: Имя устройства не должно содержать \" \$ \` или \\." >&2; exit 1 ;;
+esac
+
 # 7. Stop previous instances
 echo "Остановка старых служб..."
 killall -9 soloist soloist-bridge spotiya 2>/dev/null || true
@@ -158,6 +166,8 @@ chmod 755 "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh"
 # 9. SSL Certificates & Hosts SNI Proxy (bypass 403 country restrictions)
 echo "Настройка SSL-сертификатов и сети..."
 mount -o remount,rw / 2>/dev/null || true
+# Always put the rootfs back to read-only, even if a later step fails (set -e)
+trap 'mount -o remount,ro / 2>/dev/null || true' EXIT
 
 if [ ! -f "/etc/ssl/certs/ca-certificates.crt" ]; then
     mkdir -p /etc/ssl/certs
@@ -248,7 +258,7 @@ fi
     done
 ) &
 START_EOF
-chmod 755 "$INSTALL_DIR/start.sh"
+chmod 700 "$INSTALL_DIR/start.sh"   # contains the Soloist API key
 
 # 11. Autostart setup in init.d
 echo "Настройка автозапуска при включении колонки..."

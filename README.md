@@ -72,12 +72,14 @@
      ```
 
 ### 2. Установка на колонку
-Скачайте готовый релизный архив из раздела [Releases](../../releases) и запустите:
+`install.sh` выполняется **на самой колонке** (нужны root и `aarch64`), а не на компьютере.
+Скачайте релизный архив из раздела [Releases](../../releases) (в нём лежат `bin/soloist` и `lib64/`, которых нет в репозитории), затем:
 ```bash
 tar -xzf soloist-station-lite.tar.gz
-cd soloist-station-lite
-./install.sh
+adb push soloist-station-lite /data/local/tmp/soloist-station-lite
+adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 ```
+(Если нужно передать ключ и имя заранее: `sh ./install.sh <API_KEY> "<Имя устройства>"`.)
 
 Скрипт автоматически:
 - Скопирует все необходимые файлы на колонку в `/data/opt/soloist`
@@ -99,7 +101,7 @@ make
 
 Или вручную через `clang`:
 ```bash
-clang --target=aarch64-linux-gnu -O2 -fno-builtin -nostdlib -fPIE -Wl,-pie -o bin/soloist-bridge src/soloist-bridge.c
+clang --target=aarch64-linux-gnu -fuse-ld=lld -static -fno-stack-protector -O2 -fno-builtin -nostdlib -o bin/soloist-bridge src/soloist-bridge.c
 llvm-strip -s bin/soloist-bridge
 ```
 
