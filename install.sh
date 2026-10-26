@@ -228,9 +228,8 @@ echo "Spotify Soloist (arm64) started, PID=\$(cat /data/opt/soloist/data/soloist
 sleep 1
 
 if [ -x /data/opt/soloist/bin/soloist-bridge ]; then
-    /usr/bin/setsid /data/opt/soloist/bin/soloist-bridge > /tmp/soloist-bridge.log 2>&1 < /dev/null &
-    echo \$! > /data/opt/soloist/data/bridge.pid
-    echo "Soloist Bridge (Fast Control + Full Search) started, PID=\$(cat /data/opt/soloist/data/bridge.pid)"
+    /sbin/start-stop-daemon -S -b -m -p /data/opt/soloist/data/bridge.pid -a /bin/sh -- -c "exec /data/opt/soloist/bin/soloist-bridge >> /tmp/soloist-bridge.log 2>&1" || /usr/bin/setsid /data/opt/soloist/bin/soloist-bridge > /tmp/soloist-bridge.log 2>&1 < /dev/null &
+    echo "Soloist Bridge (Fast Control + Full Search) started, PID=\$(cat /data/opt/soloist/data/bridge.pid 2>/dev/null)"
 fi
 
 # Activation & RAM cache guard

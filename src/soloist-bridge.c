@@ -459,18 +459,26 @@ static int str_has_word(const char *haystack, const char *needle) {
     return 0;
 }
 
-/* "включи песню Назад в СССР" / "поставь группу Стоп" etc.: a play verb plus an explicit
- * media-type noun means a catalog search, even if the title contains control words
- * such as "назад", "дальше", "стоп" or "пауза". */
+/* "включи песню Назад в СССР" / "поставь группу Стоп" / "включи Кино" etc.: a play verb
+ * means a catalog search, even if the title contains control words such as "назад",
+ * "дальше", "стоп" or "пауза". */
 static int is_explicit_search(const char *lower) {
+    if (str_has_word_prefix(lower, "выключи") || str_has_word_prefix(lower, "отключи")) {
+        return 0;
+    }
     int has_verb = str_has_word_prefix(lower, "включи") || str_has_word_prefix(lower, "поставь") ||
                    str_has_word_prefix(lower, "сыграй") || str_has_word_prefix(lower, "запусти") ||
                    str_has_word_prefix(lower, "найди") || str_has_word_prefix(lower, "вруби") ||
                    str_has_word_prefix(lower, "слушать");
-    int has_noun = str_has_word_prefix(lower, "песн") || str_has_word_prefix(lower, "трек") ||
-                   str_has_word_prefix(lower, "альбом") || str_has_word_prefix(lower, "групп") ||
-                   str_has_word_prefix(lower, "исполнител") || str_has_word_prefix(lower, "артист");
-    return has_verb && has_noun;
+    if (!has_verb) return 0;
+
+    // Check if it is a simple resume command rather than a specific track/artist query
+    if (str_equal(lower, "включи музыку") || str_equal(lower, "вруби музыку") ||
+        str_equal(lower, "включить музыку") || str_equal(lower, "алиса включи музыку") ||
+        str_equal(lower, "алиса вруби музыку") || str_equal(lower, "слушать музыку")) {
+        return 0;
+    }
+    return 1;
 }
 
 static int spotify_is_active = 0;
@@ -566,14 +574,14 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         }
 
         // Resume checks (Fast Action)
-        if (str_contains(lower_buf, "продолж") ||
-            str_contains(lower_buf, "играй") ||
-            str_contains(lower_buf, "возобнов") ||
-            str_contains(lower_buf, "заиграй") ||
+        if (str_has_word_prefix(lower_buf, "продолж") ||
+            str_has_word(lower_buf, "играй") ||
+            str_has_word_prefix(lower_buf, "возобнов") ||
+            str_has_word(lower_buf, "заиграй") ||
             str_contains(lower_buf, "вруби музыку") ||
             (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
             log_msg("[bridge] Action: RESUME\n");
-            trigger_alice_suppression(quasar_fd, 3500);
+            trigger_alice_suppression(quasar_fd, 2500);
             spotify_is_active = 1;
             run_search_and_play("включи музыку");
             return;
@@ -653,23 +661,23 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 
 static uint8_t quasar_buf[65536];
 static unsigned long quasar_buf_pos = 0;
-static char last_uuid[40];
+static char last_uuid[64];
+static char last_processed_text[256];
 
 void _start(void) {
     int test_fd = sys_open("./bin/soloist", 0 /* O_RDONLY */, 0);
     if (test_fd >= 0) {
         sys_close(test_fd);
         is_yam_mode = 1;
-        log_msg("[bridge] soloist-bridge v9 started (YAM plugin mode: relative paths)\n");
+        log_msg("[bridge] soloist-bridge v10 started (YAM plugin mode: relative paths)\n");
     } else {
-        log_msg("[bridge] soloist-bridge v9 started (Standalone mode: /data/opt/soloist)\n");
+        log_msg("[bridge] soloist-bridge v10 started (Standalone mode: /data/opt/soloist)\n");
     }
 
     int quasar_fd = -1;
     int input_fd = -1;
     int64_t last_quasar_retry = 0;
     int64_t last_input_retry = 0;
-    int64_t last_cancel_periodic = 0;
 
     int touch_down_start = 0;
     int64_t touch_down_time = 0;
@@ -680,14 +688,6 @@ void _start(void) {
         while (sys_wait4(-1, &status, 1 /* WNOHANG */, 0) > 0) {}
 
         int64_t now = now_ms();
-
-        // Periodic Alice suppression while cancellation window is active
-        if (quasar_fd >= 0 && now < cancel_alice_until_ms) {
-            if (now - last_cancel_periodic >= 250) {
-                last_cancel_periodic = now;
-                send_cancel_alice(quasar_fd);
-            }
-        }
 
         // 1. Ensure Quasar connection
         if (quasar_fd < 0 && now - last_quasar_retry >= 2000) {
@@ -789,36 +789,44 @@ void _start(void) {
                             uint64_t alice_state = 0;
                             find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state);
 
-                            if (alice_state == 3 && now < cancel_alice_until_ms) {
+                            // Silence Alice if she attempts to speak TTS (state 2) or process (state 3) during our suppression window
+                            if ((alice_state == 2 || alice_state == 3) && now < cancel_alice_until_ms) {
                                 send_cancel_alice(quasar_fd);
                             }
 
                             static uint64_t prev_alice_state = 0;
-                            if (alice_state == 1 && prev_alice_state != 1) {
-                                if (spotify_is_active) {
-                                    run_soloist_cmd("pause");
-                                    spotify_is_active = 0;
-                                }
+                            // Reset deduplication cache when Alice returns to idle
+                            if (alice_state == 0 && prev_alice_state != 0) {
+                                last_uuid[0] = 0;
+                                last_processed_text[0] = 0;
                             }
                             prev_alice_state = alice_state;
 
                             const uint8_t *asr_payload = 0;
                             unsigned long asr_len = 0;
                             uint64_t is_final = 0;
+                            const uint8_t *text_bytes = 0;
+                            unsigned long text_len = 0;
+
+                            // Extract live recognized text ONLY from request_state (f=15) or text_state (f=13).
+                            // NEVER read field 2 of AliceState: it contains stale recognized_phrase from past queries!
                             if (find_field(state_payload, state_len, 15, 2, &asr_payload, &asr_len, 0)) {
+                                find_field(asr_payload, asr_len, 1, 2, &text_bytes, &text_len, 0);
                                 find_field(asr_payload, asr_len, 2, 0, 0, 0, &is_final);
+                            } else {
+                                const uint8_t *text_payload = 0;
+                                unsigned long text_payload_len = 0;
+                                if (find_field(state_payload, state_len, 13, 2, &text_payload, &text_payload_len, 0)) {
+                                    find_field(text_payload, text_payload_len, 1, 2, &text_bytes, &text_len, 0);
+                                    find_field(text_payload, text_payload_len, 4, 0, 0, 0, &is_final);
+                                }
                             }
 
                             const uint8_t *uuid_bytes = 0;
                             unsigned long uuid_len = 0;
-                            const uint8_t *text_bytes = 0;
-                            unsigned long text_len = 0;
-
                             find_field(state_payload, state_len, 7, 2, &uuid_bytes, &uuid_len, 0);
-                            find_field(state_payload, state_len, 2, 2, &text_bytes, &text_len, 0);
-
-                            if ((!text_bytes || text_len == 0) && asr_payload) {
-                                find_field(asr_payload, asr_len, 1, 2, &text_bytes, &text_len, 0);
+                            if ((!uuid_bytes || uuid_len == 0) && asr_payload) {
+                                find_field(asr_payload, asr_len, 3, 2, &uuid_bytes, &uuid_len, 0);
                             }
 
                             if (text_bytes && text_len > 0) {
@@ -831,38 +839,36 @@ void _start(void) {
                                 to_lower_ru(lower_check, raw_check, sizeof(lower_check));
 
                                 int is_fast_ctrl = 0;
-                                if (str_contains(lower_check, "пауз") ||
-                                    str_contains(lower_check, "стоп") ||
-                                    str_contains(lower_check, "хватит") ||
-                                    str_contains(lower_check, "замолчи") ||
-                                    str_contains(lower_check, "останови") ||
-                                    str_contains(lower_check, "выключи музыку") ||
-                                    str_contains(lower_check, "отключи музыку") ||
-                                    str_contains(lower_check, "дальше") ||
-                                    str_contains(lower_check, "следующ") ||
-                                    str_contains(lower_check, "переключи") ||
-                                    str_contains(lower_check, "пропусти") ||
-                                    str_contains(lower_check, "назад") ||
-                                    str_contains(lower_check, "предыдущ") ||
-                                    str_contains(lower_check, "прошл") ||
-                                    str_contains(lower_check, "перемешай") ||
-                                    str_contains(lower_check, "по порядку") ||
-                                    str_contains(lower_check, "зацикли") ||
-                                    str_contains(lower_check, "повторяй") ||
-                                    str_contains(lower_check, "продолж") ||
-                                    str_contains(lower_check, "играй") ||
-                                    str_contains(lower_check, "возобнов") ||
-                                    str_contains(lower_check, "заиграй") ||
-                                    str_contains(lower_check, "цензур") ||
-                                    str_contains(lower_check, "без мата") ||
-                                    str_contains(lower_check, "с матом") ||
-                                    str_contains(lower_check, "детский режим") ||
-                                    str_contains(lower_check, "взрослый режим")) {
-                                    is_fast_ctrl = 1;
-                                }
-
-                                if (is_fast_ctrl && is_explicit_search(lower_check)) {
-                                    is_fast_ctrl = 0; // title search: wait for the final recognition
+                                if (!is_explicit_search(lower_check)) {
+                                    if (str_contains(lower_check, "пауз") ||
+                                        str_contains(lower_check, "стоп") ||
+                                        str_contains(lower_check, "хватит") ||
+                                        str_contains(lower_check, "замолчи") ||
+                                        str_contains(lower_check, "останови") ||
+                                        str_contains(lower_check, "выключи музыку") ||
+                                        str_contains(lower_check, "отключи музыку") ||
+                                        str_contains(lower_check, "дальше") ||
+                                        str_contains(lower_check, "следующ") ||
+                                        str_contains(lower_check, "переключи") ||
+                                        str_contains(lower_check, "пропусти") ||
+                                        str_contains(lower_check, "назад") ||
+                                        str_contains(lower_check, "предыдущ") ||
+                                        str_contains(lower_check, "прошл") ||
+                                        str_contains(lower_check, "перемешай") ||
+                                        str_contains(lower_check, "по порядку") ||
+                                        str_contains(lower_check, "зацикли") ||
+                                        str_contains(lower_check, "повторяй") ||
+                                        str_has_word_prefix(lower_check, "продолж") ||
+                                        str_has_word(lower_check, "играй") ||
+                                        str_has_word_prefix(lower_check, "возобнов") ||
+                                        str_has_word(lower_check, "заиграй") ||
+                                        str_contains(lower_check, "цензур") ||
+                                        str_contains(lower_check, "без мата") ||
+                                        str_contains(lower_check, "с матом") ||
+                                        str_contains(lower_check, "детский режим") ||
+                                        str_contains(lower_check, "взрослый режим")) {
+                                        is_fast_ctrl = 1;
+                                    }
                                 }
 
                                 // Fast control commands fire instantly without waiting for silence!
@@ -876,9 +882,18 @@ void _start(void) {
                                             for (unsigned long i = 0; i < uuid_len; i++) last_uuid[i] = (char)uuid_bytes[i];
                                             last_uuid[uuid_len] = 0;
                                         }
+                                    } else {
+                                        if (str_equal(last_processed_text, lower_check)) {
+                                            is_new = 0;
+                                        }
                                     }
 
                                     if (is_new) {
+                                        unsigned long tlen = str_len(lower_check);
+                                        if (tlen >= sizeof(last_processed_text)) tlen = sizeof(last_processed_text) - 1;
+                                        for (unsigned long i = 0; i < tlen; i++) last_processed_text[i] = lower_check[i];
+                                        last_processed_text[tlen] = 0;
+
                                         handle_voice_recognition(quasar_fd, (const char *)text_bytes, text_len);
                                     }
                                 }
@@ -925,7 +940,7 @@ void _start(void) {
                                 int64_t dur = now_ms() - touch_down_time;
                                 if (dur < 700) { // Short tap < 700ms
                                     log_msg("[bridge] Center touch TAP detected -> TOGGLE PLAY/PAUSE\n");
-                                    trigger_alice_suppression(quasar_fd, 2500);
+                                    send_cancel_alice(quasar_fd);
                                     run_toggle();
                                 } else {
                                     log_msg("[bridge] Center touch HOLD -> ALICE TRIGGER\n");
