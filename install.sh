@@ -185,6 +185,11 @@ if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
     chmod 755 "$INSTALL_DIR/scripts/search_and_play.sh"
 fi
 
+for helper in control.sh request_state.sh; do
+    cp -f "$SCRIPT_DIR/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
+    chmod 755 "$INSTALL_DIR/scripts/$helper"
+done
+
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
     cat << EOF_CONF > "$INSTALL_DIR/spotify_api.conf"
