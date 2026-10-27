@@ -8,7 +8,7 @@ TARGET_BIN = $(BIN_DIR)/soloist-bridge
 
 all: $(TARGET_BIN)
 
-$(TARGET_BIN): $(SRC_DIR)/soloist-bridge.c
+$(TARGET_BIN): $(SRC_DIR)/soloist-bridge.c $(SRC_DIR)/voice-request.h
 	mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $<
 	$(STRIP) -s $@

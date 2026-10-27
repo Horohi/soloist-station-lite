@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "voice-request.h"
 
 /* Minimal Linux system call wrappers for AArch64 (ARM64) */
 
@@ -34,6 +35,53 @@ static inline int sys_close(int fd) {
     register long x8 __asm__("x8") = 57;
     register long x0 __asm__("x0") = fd;
     __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_mkdir(const char *path, int mode) {
+    register long x8 __asm__("x8") = 34; // mkdirat
+    register long x0 __asm__("x0") = -100;
+    register long x1 __asm__("x1") = (long)path;
+    register long x2 __asm__("x2") = mode;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_rename(const char *from, const char *to) {
+    register long x8 __asm__("x8") = 38; // renameat
+    register long x0 __asm__("x0") = -100;
+    register long x1 __asm__("x1") = (long)from;
+    register long x2 __asm__("x2") = -100;
+    register long x3 __asm__("x3") = (long)to;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_pipe(int fds[2]) {
+    register long x8 __asm__("x8") = 59; // pipe2
+    register long x0 __asm__("x0") = (long)fds;
+    register long x1 __asm__("x1") = 2048; // O_NONBLOCK
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_dup3(int from, int to) {
+    register long x8 __asm__("x8") = 24;
+    register long x0 __asm__("x0") = from;
+    register long x1 __asm__("x1") = to;
+    register long x2 __asm__("x2") = 0;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+}
+
+static inline int sys_signal_default(int signal) {
+    struct { unsigned long handler, flags, restorer, mask; } action = {0, 0, 0, 0};
+    register long x8 __asm__("x8") = 134; // rt_sigaction
+    register long x0 __asm__("x0") = signal;
+    register long x1 __asm__("x1") = (long)&action;
+    register long x2 __asm__("x2") = 0;
+    register long x3 __asm__("x3") = 8; // Kernel sigset size, not libc's sigset_t.
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
     return (int)x0;
 }
 
@@ -229,165 +277,127 @@ static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
 
 static int is_yam_mode = 0;
 
-static const char *get_soloist_bin(void) {
-    return is_yam_mode ? "./bin/soloist" : "/data/opt/soloist/bin/soloist";
-}
-
-static const char *get_toggle_sh(void) {
-    return is_yam_mode ? "./scripts/toggle.sh" : "/data/opt/soloist/scripts/toggle.sh";
-}
-
-static const char *get_search_sh(void) {
-    return is_yam_mode ? "./scripts/search_and_play.sh" : "/data/opt/soloist/scripts/search_and_play.sh";
+static const char *get_controller_sh(void) {
+    return is_yam_mode ? "./scripts/control.sh" : "/data/opt/soloist/scripts/control.sh";
 }
 
 static const char *get_censor_path(void) {
     return is_yam_mode ? "./data/censorship" : "/data/opt/soloist/data/censorship";
 }
 
-static void run_soloist_cmd(const char *cmd) {
-    long pid = sys_clone(17 /* SIGCHLD */, 0);
-    if (pid == 0) {
-        const char *bin = get_soloist_bin();
-        const char *envp[] = {
-            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
-            0
-        };
-        if (cmd && cmd[0] == 'p' && cmd[1] == 'l') { // "play"
-            long apid = sys_clone(17, 0);
-            if (apid == 0) {
-                const char *act_argv[] = { bin, "ctl", "-w", "127.0.0.1:9090", "activate", 0 };
-                sys_execve(bin, act_argv, envp);
-                sys_exit(1);
-            }
-            int status = 0;
-            sys_wait4((int)apid, &status, 0, 0);
-            sys_msleep(300); // 300ms delay to let Alice release ALSA dmix
+static int str_equal(const char *a, const char *b);
+
+static void publish_track(const char *uri) {
+    const char *dir = is_yam_mode ? "./data/requests" : "/data/opt/soloist/data/requests";
+    const char *tmp = is_yam_mode ? "./data/requests/track.tmp" : "/data/opt/soloist/data/requests/track.tmp";
+    const char *path = is_yam_mode ? "./data/requests/track" : "/data/opt/soloist/data/requests/track";
+    sys_mkdir(dir, 0700);
+    int fd = sys_open(tmp, 577 /* O_WRONLY|O_CREAT|O_TRUNC */, 0600);
+    if (fd < 0) return;
+    long written = sys_write(fd, uri, str_len(uri));
+    sys_close(fd);
+    if (written == (long)str_len(uri)) sys_rename(tmp, path);
+}
+
+struct controller_command {
+    char action[16];
+    char arg[512];
+    char generation[32];
+};
+static struct controller_command controller_queue[16];
+static unsigned int controller_head, controller_count;
+static long controller_pid;
+static int controller_fd = -1;
+
+static void service_controllers(void) {
+    int status;
+    while (sys_wait4(-1, &status, 1 /* WNOHANG */, 0) > 0) {}
+    if (controller_pid > 0) {
+        char admission = 0;
+        long result = sys_read(controller_fd, &admission, 1);
+        if (result == -11 /* EAGAIN */ || result == -4 /* EINTR */) return;
+        if (result != 1 || admission != 'A') {
+            log_msg("[bridge] Command admission failed: ");
+            log_msg(controller_queue[controller_head].action);
+            log_msg("\n");
         }
-        const char *argv[] = {
-            bin,
-            "ctl",
-            "-w",
-            "127.0.0.1:9090",
-            cmd,
-            0
-        };
-        sys_execve(bin, argv, envp);
-        sys_exit(1);
+        sys_close(controller_fd);
+        controller_fd = -1;
+        controller_pid = 0;
+        controller_head = (controller_head + 1) % 16;
+        controller_count--;
     }
-}
-
-static void run_soloist_cmd2(const char *cmd, const char *arg) {
+    if (!controller_count) return;
+    struct controller_command *command = &controller_queue[controller_head];
+    int admission_pipe[2];
+    if (sys_pipe(admission_pipe) < 0) {
+        log_msg("[bridge] Cannot open command admission pipe\n");
+        controller_head = (controller_head + 1) % 16;
+        controller_count--;
+        return;
+    }
     long pid = sys_clone(17 /* SIGCHLD */, 0);
     if (pid == 0) {
-        const char *bin = get_soloist_bin();
-        const char *argv[] = {
-            bin,
-            "ctl",
-            "-w",
-            "127.0.0.1:9090",
-            cmd,
-            arg,
-            0
-        };
+        sys_close(admission_pipe[0]);
+        if (admission_pipe[1] != 3) {
+            if (sys_dup3(admission_pipe[1], 3) < 0) sys_exit(1);
+            sys_close(admission_pipe[1]);
+        }
+        // Service launchers may ignore these signals; controllers must be stoppable.
+        if (sys_signal_default(1) < 0 || sys_signal_default(2) < 0 || sys_signal_default(15) < 0) sys_exit(1);
+        const char *argv[] = { "/bin/sh", get_controller_sh(), command->action,
+            command->arg[0] ? command->arg : 0,
+            command->generation[0] ? command->generation : 0, 0 };
         const char *envp[] = {
             "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "LD_LIBRARY_PATH=./lib64:/data/opt/soloist/lib64",
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
-            0
-        };
-        sys_execve(bin, argv, envp);
-        sys_exit(1);
-    }
-}
-
-static void run_toggle(void) {
-    long pid = sys_clone(17 /* SIGCHLD */, 0);
-    if (pid == 0) {
-        const char *sh = get_toggle_sh();
-        const char *argv[] = {
-            "/bin/sh",
-            sh,
-            0
-        };
-        const char *envp[] = {
-            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
-            0
+            "SOLOIST_BRIDGE_ADMISSION=1",
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", 0
         };
         sys_execve("/bin/sh", argv, envp);
         sys_exit(1);
     }
-}
-
-static void run_search_and_play(const char *query) {
-    long pid = sys_clone(17 /* SIGCHLD */, 0);
-    if (pid == 0) {
-        const char *sh = get_search_sh();
-        const char *argv[] = {
-            "/bin/sh",
-            sh,
-            query,
-            0
-        };
-        const char *envp[] = {
-            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
-            0
-        };
-        sys_execve("/bin/sh", argv, envp);
-        sys_exit(1);
+    sys_close(admission_pipe[1]);
+    if (pid > 0) {
+        controller_pid = pid;
+        controller_fd = admission_pipe[0];
+    } else {
+        sys_close(admission_pipe[0]);
+        log_msg("[bridge] Cannot start command admission\n");
+        controller_head = (controller_head + 1) % 16;
+        controller_count--;
     }
 }
 
-/* Protobuf parser helpers */
-
-static uint64_t parse_varint(const uint8_t *data, unsigned long len, unsigned long *offset) {
-    uint64_t res = 0;
-    int shift = 0;
-    while (*offset < len && shift < 64) {
-        uint8_t b = data[(*offset)++];
-        res |= (uint64_t)(b & 0x7f) << shift;
-        if (!(b & 0x80)) break;
-        shift += 7;
+static void run_controller(const char *action, const char *arg) {
+    unsigned long action_len = str_len(action), arg_len = str_len(arg);
+    if (controller_count == 16 || action_len >= 16 || arg_len >= 512) {
+        log_msg("[bridge] Command rejected: admission queue full or argument too long\n");
+        return;
     }
-    return res;
+    struct controller_command *command = &controller_queue[(controller_head + controller_count) % 16];
+    for (unsigned long i = 0; i <= action_len; i++) command->action[i] = action[i];
+    for (unsigned long i = 0; i < arg_len; i++) command->arg[i] = arg[i];
+    command->arg[arg_len] = 0;
+    command->generation[0] = 0;
+    if (str_equal(action, "auto-next")) { // Observe intent before waiting in the queue.
+        const char *path = is_yam_mode ? "./data/requests/generation" : "/data/opt/soloist/data/requests/generation";
+        int fd = sys_open(path, 0, 0);
+        long n = fd < 0 ? 0 : sys_read(fd, command->generation, sizeof(command->generation) - 1);
+        if (fd >= 0) sys_close(fd);
+        if (n <= 0) { command->generation[0] = '0'; n = 1; }
+        while (n > 0 && (command->generation[n-1] == '\n' || command->generation[n-1] == '\r')) n--;
+        command->generation[n] = 0;
+    }
+    controller_count++;
+    service_controllers();
 }
 
-static int find_field(const uint8_t *data, unsigned long len, uint32_t field_num, int expected_wire, const uint8_t **val_ptr, unsigned long *val_len, uint64_t *varint_val) {
-    unsigned long offset = 0;
-    while (offset < len) {
-        uint64_t tag = parse_varint(data, len, &offset);
-        uint32_t fnum = (uint32_t)(tag >> 3);
-        int wire = (int)(tag & 7);
-        if (fnum == 0) return 0;
-        if (wire == 0) {
-            uint64_t v = parse_varint(data, len, &offset);
-            if (fnum == field_num && expected_wire == 0) {
-                if (varint_val) *varint_val = v;
-                return 1;
-            }
-        } else if (wire == 2) {
-            uint64_t flen = parse_varint(data, len, &offset);
-            if (flen > len - offset) return 0;
-            if (fnum == field_num && expected_wire == 2) {
-                if (val_ptr) *val_ptr = &data[offset];
-                if (val_len) *val_len = flen;
-                return 1;
-            }
-            offset += flen;
-        } else if (wire == 1) {
-            offset += 8;
-        } else if (wire == 5) {
-            offset += 4;
-        } else {
-            return 0;
-        }
-    }
-    return 0;
-}
+static void run_soloist_cmd(const char *cmd) { run_controller(cmd, 0); }
+static void run_soloist_cmd2(const char *cmd, const char *arg) { run_controller(cmd, arg); }
+static void run_toggle(void) { run_controller("toggle", 0); }
+static void run_search_and_play(const char *query) { run_controller("search", query); }
+
+/* Text and command classification helpers */
 
 static void to_lower_ru(char *dst, const char *src, unsigned long max) {
     unsigned long si = 0, di = 0;
@@ -640,6 +650,7 @@ static void handle_soloist_ws_json(const char *json) {
         if (uri_buf[0] == 's' && uri_buf[1] == 'p' && uri_buf[2] == 'o' && uri_buf[3] == 't') {
             if (!str_equal(current_track_uri, uri_buf)) {
                 str_copy(current_track_uri, uri_buf, sizeof(current_track_uri));
+                publish_track(current_track_uri);
                 stuck_since_ms = 0;
                 log_msg("[bridge] Current track: ");
                 log_msg(current_track_uri);
@@ -829,13 +840,7 @@ static uint8_t quasar_buf[65536];
 static unsigned long quasar_buf_pos = 0;
 static uint8_t ws_buf[8192];
 static unsigned long ws_buf_pos = 0;
-static char last_uuid[64];
-static int64_t last_uuid_time = 0;
-static char last_processed_text[256];
-static int64_t last_processed_text_time = 0;
-static char last_executed_action[256];
-static int64_t last_executed_action_time = 0;
-static int64_t last_search_time = 0;
+static struct voice_request_state voice_requests;
 
 #define MAX_INPUT_DEVS 8
 static int input_fds[MAX_INPUT_DEVS];
@@ -892,8 +897,7 @@ void _start(void) {
     int touch_is_down = 0;
 
     while (1) {
-        int status = 0;
-        while (sys_wait4(-1, &status, 1 /* WNOHANG */, 0) > 0) {}
+        service_controllers();
 
         int64_t now = now_ms();
 
@@ -1016,139 +1020,17 @@ void _start(void) {
                         const uint8_t *frame_body = quasar_buf + 4;
                         const uint8_t *state_payload = 0;
                         unsigned long state_len = 0;
-
-                        if (find_field(frame_body, frame_len, 3, 2, &state_payload, &state_len, 0)) {
-                            // AliceState in f=3
-                        } else if (find_field(frame_body, frame_len, 252, 2, &state_payload, &state_len, 0)) {
-                            // AliceState in f=252
-                        }
-
-                        if (state_payload && state_len > 0) {
+                        if (voice_state_payload(frame_body, frame_len, &state_payload, &state_len)) {
                             uint64_t alice_state = 0;
-                            find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state);
-
-                            // Silence Alice if she attempts to speak TTS (state 2), process (state 3), or listen during our suppression window
-                            if (alice_state != 0 && now < cancel_alice_until_ms) {
+                            if (find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state) &&
+                                alice_state != 0 && now < cancel_alice_until_ms) {
                                 send_cancel_alice(quasar_fd);
                             }
-
-                            const uint8_t *asr_payload = 0;
-                            unsigned long asr_len = 0;
-                            uint64_t is_final = 0;
-                            const uint8_t *text_bytes = 0;
-                            unsigned long text_len = 0;
-
-                            // Extract live recognized text ONLY from request_state (f=15) or text_state (f=13).
-                            // NEVER read field 2 of AliceState: it contains stale recognized_phrase from past queries!
-                            if (find_field(state_payload, state_len, 15, 2, &asr_payload, &asr_len, 0)) {
-                                find_field(asr_payload, asr_len, 1, 2, &text_bytes, &text_len, 0);
-                                find_field(asr_payload, asr_len, 2, 0, 0, 0, &is_final);
-                            } else {
-                                const uint8_t *text_payload = 0;
-                                unsigned long text_payload_len = 0;
-                                if (find_field(state_payload, state_len, 13, 2, &text_payload, &text_payload_len, 0)) {
-                                    find_field(text_payload, text_payload_len, 1, 2, &text_bytes, &text_len, 0);
-                                    find_field(text_payload, text_payload_len, 4, 0, 0, 0, &is_final);
-                                }
-                            }
-
-                            const uint8_t *uuid_bytes = 0;
-                            unsigned long uuid_len = 0;
-                            find_field(state_payload, state_len, 7, 2, &uuid_bytes, &uuid_len, 0);
-                            if ((!uuid_bytes || uuid_len == 0) && asr_payload) {
-                                find_field(asr_payload, asr_len, 3, 2, &uuid_bytes, &uuid_len, 0);
-                            }
-
-                            if (text_bytes && text_len > 0) {
-                                char lower_check[512];
-                                char raw_check[512];
-                                unsigned long clen = text_len;
-                                if (clen >= sizeof(raw_check)) clen = sizeof(raw_check) - 1;
-                                for (unsigned long i = 0; i < clen; i++) raw_check[i] = text_bytes[i];
-                                raw_check[clen] = 0;
-                                to_lower_ru(lower_check, raw_check, sizeof(lower_check));
-
-                                int is_fast_ctrl = 0;
-                                if (!is_explicit_search(lower_check)) {
-                                    if (str_contains(lower_check, "пауз") ||
-                                        str_contains(lower_check, "стоп") ||
-                                        str_contains(lower_check, "хватит") ||
-                                        str_contains(lower_check, "замолчи") ||
-                                        str_contains(lower_check, "останови") ||
-                                        str_contains(lower_check, "выключи музыку") ||
-                                        str_contains(lower_check, "отключи музыку") ||
-                                        str_contains(lower_check, "дальше") ||
-                                        str_contains(lower_check, "следующ") ||
-                                        str_contains(lower_check, "переключи") ||
-                                        str_contains(lower_check, "пропусти") ||
-                                        str_contains(lower_check, "назад") ||
-                                        str_contains(lower_check, "предыдущ") ||
-                                        str_contains(lower_check, "прошл") ||
-                                        str_contains(lower_check, "перемешай") ||
-                                        str_contains(lower_check, "по порядку") ||
-                                        str_contains(lower_check, "зацикли") ||
-                                        str_contains(lower_check, "повторяй") ||
-                                        str_has_word_prefix(lower_check, "продолж") ||
-                                        str_has_word(lower_check, "играй") ||
-                                        str_has_word_prefix(lower_check, "возобнов") ||
-                                        str_has_word(lower_check, "заиграй") ||
-                                        str_contains(lower_check, "цензур") ||
-                                        str_contains(lower_check, "без мата") ||
-                                        str_contains(lower_check, "с матом") ||
-                                        str_contains(lower_check, "детский режим") ||
-                                        str_contains(lower_check, "взрослый режим")) {
-                                        is_fast_ctrl = 1;
-                                    }
-                                }
-
-                                // Fast control commands fire instantly without waiting for silence!
-                                // Search/Play queries wait for final recognition so the full phrase is captured!
-                                if (is_fast_ctrl || alice_state == 3 || is_final == 1) {
-                                    int is_dup = 0;
-
-                                    // 1. Same request/dialog UUID within 4000ms
-                                    if (uuid_bytes && uuid_len > 0 && uuid_len < sizeof(last_uuid)) {
-                                        if (now - last_uuid_time < 4000 && mem_equal(last_uuid, uuid_bytes, uuid_len)) {
-                                            is_dup = 1;
-                                        }
-                                    }
-
-                                    // 2. Exact same recognized phrase within 2500ms
-                                    if (str_equal(last_processed_text, lower_check) && (now - last_processed_text_time < 2500)) {
-                                        is_dup = 1;
-                                    }
-
-                                    // 3. Fast control action already performed within 1500ms
-                                    if (is_fast_ctrl && str_equal(last_executed_action, lower_check) && (now - last_executed_action_time < 1500)) {
-                                        is_dup = 1;
-                                    }
-
-                                    // 4. Search query cooldown: do not start multiple search scripts within 2500ms
-                                    if (!is_fast_ctrl && (now - last_search_time < 2500)) {
-                                        is_dup = 1;
-                                    }
-
-                                    if (!is_dup) {
-                                        str_copy(last_processed_text, lower_check, sizeof(last_processed_text));
-                                        last_processed_text_time = now;
-
-                                        if (uuid_bytes && uuid_len > 0 && uuid_len < sizeof(last_uuid)) {
-                                            for (unsigned long i = 0; i < uuid_len; i++) last_uuid[i] = (char)uuid_bytes[i];
-                                            last_uuid[uuid_len] = 0;
-                                            last_uuid_time = now;
-                                        }
-
-                                        if (is_fast_ctrl) {
-                                            str_copy(last_executed_action, lower_check, sizeof(last_executed_action));
-                                            last_executed_action_time = now;
-                                        } else {
-                                            last_search_time = now;
-                                        }
-
-                                        handle_voice_recognition(quasar_fd, (const char *)text_bytes, text_len);
-                                    }
-                                }
-                            }
+                        }
+                        const uint8_t *text_bytes = 0;
+                        unsigned long text_len = 0;
+                        if (voice_request_read(&voice_requests, frame_body, frame_len, &text_bytes, &text_len)) {
+                            handle_voice_recognition(quasar_fd, (const char *)text_bytes, text_len);
                         }
 
                         unsigned long total_consumed = 4 + frame_len;
@@ -1343,7 +1225,7 @@ void _start(void) {
                             log_msg("[bridge] Auto-Next: track ended and audio output stalled, advancing to next track\n");
                             str_copy(last_auto_next_uri, current_track_uri, sizeof(last_auto_next_uri));
                             last_auto_next_time = now;
-                            run_soloist_cmd("next");
+                            run_controller("auto-next", current_track_uri);
                         }
                     }
                 } else {

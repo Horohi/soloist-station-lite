@@ -15,16 +15,17 @@ BASE_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 [ -d "$BASE_DIR/bin" ] || BASE_DIR="/data/opt/soloist"
 
 SOLOIST_BIN="$BASE_DIR/bin/soloist"
-run_soloist() {
-    LD_LIBRARY_PATH="$BASE_DIR/lib64" "$SOLOIST_BIN" "$@"
-}
-
 CURL_BIN="$BASE_DIR/bin/curl"
 [ -x "$CURL_BIN" ] || CURL_BIN="curl"
 API_CONF="$BASE_DIR/spotify_api.conf"
 [ -f "$API_CONF" ] || API_CONF="/data/opt/soloist/spotify_api.conf"
 CENSOR_FILE="$BASE_DIR/data/censorship"
 [ -f "$CENSOR_FILE" ] || CENSOR_FILE="/data/opt/soloist/data/censorship"
+
+. "$BASE_DIR/scripts/request_state.sh"
+GENERATION="$2"
+[ -n "$GENERATION" ] || request_begin || exit 1
+request_current || exit 0
 
 # Normalize whitespace (replaces `xargs`, which chokes on quotes: "Don't Stop Me Now")
 squeeze() {
@@ -55,10 +56,10 @@ echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 # If search term is empty or generic 'музыку' -> resume or play default
 if [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; then
     echo "[search] Generic play request, resuming..." >> "$LOG"
-    run_soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
-    run_soloist ctl -w 127.0.0.1:9090 play
+    request_dispatch play || exit 1
     sleep 0.5
-    NOW_STATE=$(run_soloist ctl -w 127.0.0.1:9090 now 2>/dev/null || true)
+    request_current || exit 0
+    NOW_STATE=$(request_cli now) || { request_report play now "$?"; exit 1; }
     if echo "$NOW_STATE" | grep -qi "playing" && ! echo "$NOW_STATE" | grep -qi "nothing"; then
         exit 0
     fi
@@ -70,46 +71,79 @@ fi
 
 # Spotify API Configuration
 if [ ! -f "$API_CONF" ]; then
-    echo "[search] Missing $API_CONF, resuming existing playlist" >> "$LOG"
-    run_soloist ctl -w 127.0.0.1:9090 play
-    exit 0
+    echo "[search] Missing API configuration; playback unchanged" >> "$LOG"
+    exit 1
 fi
 
 . "$API_CONF"
 if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
     echo "[search] Spotify API keys not set in $API_CONF" >> "$LOG"
-    run_soloist ctl -w 127.0.0.1:9090 play
-    exit 0
+    exit 1
 fi
 
-CURL_OPTS="--resolve api.spotify.com:443:5.175.161.40 --resolve accounts.spotify.com:443:5.175.161.40 -s"
+CURL_OPTS="--resolve api.spotify.com:443:5.175.161.40 --resolve accounts.spotify.com:443:5.175.161.40 -sS --connect-timeout 5 --max-time 15"
 
-# Token management
-NOW=$(date +%s 2>/dev/null || echo 0)
+# A separate API lock serializes token refresh and cooldown without blocking pause.
+exec 9>"$STATE_DIR/api.lock"
+request_lock 9 600 || exit 1
+request_current || exit 0
+
+api_request() {
+    request_current || return 1
+    NOW=$(date +%s) || return 1
+    UNTIL=$(cat "$STATE_DIR/cooldown" 2>/dev/null)
+    case "$UNTIL" in ''|*[!0-9]*) UNTIL=0;; esac
+    if [ "$NOW" -lt "$UNTIL" ]; then
+        echo "[search] Spotify cooldown active; request discarded" >> "$LOG"
+        return 1
+    fi
+    HTTP_STATUS=$("$CURL_BIN" $CURL_OPTS -D "$STATE_DIR/headers.$$" -o "$STATE_DIR/body.$$" -w '%{http_code}' "$@") || {
+        echo "[search] HTTP transport failed; playback unchanged" >> "$LOG"
+        return 1
+    }
+    if [ "$HTTP_STATUS" = 429 ]; then
+        NOW=$(date +%s) || return 1
+        RETRY=$(awk 'tolower($1)=="retry-after:" {gsub(/\r/,"",$2); value=$2}
+            END {if(value ~ /^[0-9]+$/ && length(value)<=9) printf "%.0f",value+0; else print 60}' "$STATE_DIR/headers.$$")
+        printf '%s\n' "$((NOW + RETRY))" > "$STATE_DIR/cooldown"
+    fi
+    case "$HTTP_STATUS" in
+        2??)
+            if grep -qE '"error"[[:space:]]*:' "$STATE_DIR/body.$$"; then
+                echo "[search] API error body; playback unchanged" >> "$LOG"
+                return 1
+            fi
+            cat "$STATE_DIR/body.$$";;
+        *)
+            [ "$HTTP_STATUS" != 401 ] || rm -f "$STATE_DIR/token" "$STATE_DIR/token_exp"
+            echo "[search] HTTP $HTTP_STATUS; playback unchanged" >> "$LOG"
+            return 1;;
+    esac
+}
+
+# The cache is read only after taking the API lock; racing workers share one refresh.
+NOW=$(date +%s) || exit 1
+EXP=$(cat "$STATE_DIR/token_exp" 2>/dev/null)
+case "$EXP" in ''|*[!0-9]*) EXP=0;; esac
 TOKEN=""
-if [ -f /tmp/spotify_token_exp ] && [ -f /tmp/spotify_token ]; then
-    EXP=$(cat /tmp/spotify_token_exp 2>/dev/null || echo 0)
-    if [ "$NOW" -lt "$EXP" ]; then
-        TOKEN=$(cat /tmp/spotify_token)
-    fi
-fi
-
+[ "$NOW" -ge "$EXP" ] || TOKEN=$(cat "$STATE_DIR/token" 2>/dev/null)
 if [ -z "$TOKEN" ]; then
-    echo "[search] Fetching new access token from Spotify..." >> "$LOG"
-    AUTH_RESP=$($CURL_BIN $CURL_OPTS -X POST "https://accounts.spotify.com/api/token" \
+    AUTH_RESP=$(api_request -X POST "https://accounts.spotify.com/api/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "grant_type=client_credentials&client_id=$SPOTIFY_CLIENT_ID&client_secret=$SPOTIFY_CLIENT_SECRET")
-    TOKEN=$(echo "$AUTH_RESP" | grep -oE '"access_token":"[^"]+"' | cut -d'"' -f4)
-    if [ -n "$TOKEN" ]; then
-        rm -f /tmp/spotify_token /tmp/spotify_token_exp
-        (umask 077; echo "$TOKEN" > /tmp/spotify_token; echo $((NOW + 3300)) > /tmp/spotify_token_exp)
-        echo "[search] Access token successfully updated" >> "$LOG"
-    else
-        echo "[search] ERROR: Failed to get token: $AUTH_RESP" >> "$LOG"
-        run_soloist ctl -w 127.0.0.1:9090 play
-        exit 0
-    fi
+        --data-urlencode "grant_type=client_credentials" \
+        --data-urlencode "client_id=$SPOTIFY_CLIENT_ID" \
+        --data-urlencode "client_secret=$SPOTIFY_CLIENT_SECRET") || exit 1
+    TOKEN=$(printf '%s' "$AUTH_RESP" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    case "$TOKEN" in ''|*[!A-Za-z0-9._~+/=-]*)
+        echo "[search] Invalid token response; playback unchanged" >> "$LOG"; exit 1;;
+    esac
+    EXPIRES=$(printf '%s' "$AUTH_RESP" | grep -oE '"expires_in"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' |
+        awk '{value=$0+0} END {if(value>0 && value<=86400) printf "%.0f",value; else print 3600}')
+    [ "$EXPIRES" -gt 60 ] && EXPIRES=$((EXPIRES - 60))
+    printf '%s\n' "$TOKEN" > "$STATE_DIR/token"
+    printf '%s\n' "$((NOW + EXPIRES))" > "$STATE_DIR/token_exp"
 fi
+request_current || exit 0
 
 # URL encode function
 ENCODED=$(echo "$TERM" | awk 'BEGIN {
@@ -139,8 +173,9 @@ fi
 
 LIMIT=5
 
-SEARCH_RESP=$($CURL_BIN $CURL_OPTS "https://api.spotify.com/v1/search?q=$ENCODED&type=$TYPE&limit=$LIMIT" \
-    -H "Authorization: Bearer $TOKEN")
+SEARCH_RESP=$(api_request "https://api.spotify.com/v1/search?q=$ENCODED&type=$TYPE&limit=$LIMIT" \
+    -H "Authorization: Bearer $TOKEN") || exit 1
+request_current || exit 0
 
 # Rank track results by how many query words hit the title (x5) or the artists (x2).
 # The term is passed via the environment: awk -v would interpret backslash escapes.
@@ -199,20 +234,20 @@ fi
 # Fallback: if preferred type had no matches, search any playable type
 if [ -z "$URI" ]; then
     echo "[search] No match for type=$TYPE, trying general search..." >> "$LOG"
-    SEARCH_RESP=$($CURL_BIN $CURL_OPTS "https://api.spotify.com/v1/search?q=$ENCODED&type=track,artist,album&limit=5" \
-        -H "Authorization: Bearer $TOKEN")
+    SEARCH_RESP=$(api_request "https://api.spotify.com/v1/search?q=$ENCODED&type=track,artist,album&limit=5" \
+        -H "Authorization: Bearer $TOKEN") || exit 1
+    request_current || exit 0
     URI=$(printf '%s' "$SEARCH_RESP" | pick_track)
     # Prioritize track > artist > album
     [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:artist:[a-zA-Z0-9]+' | head -n 1)
     [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:album:[a-zA-Z0-9]+' | head -n 1)
 fi
 
+flock -u 9
 if [ -n "$URI" ]; then
-    echo "[search] SUCCESS: Found URI '$URI' -> sending to Soloist" >> "$LOG"
-    run_soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
-    run_soloist ctl -w 127.0.0.1:9090 play "$URI"
+    echo "[search] Found a catalog URI; checking current request before playback" >> "$LOG"
+    request_dispatch play "$URI"
 else
-    echo "[search] No matches found for '$TERM' in Spotify API" >> "$LOG"
-    run_soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
-    run_soloist ctl -w 127.0.0.1:9090 play
+    echo "[search] No usable match; playback unchanged" >> "$LOG"
+    exit 1
 fi
