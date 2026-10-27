@@ -78,6 +78,8 @@ English guide: [Voice request lifecycle, configuration and tests](docs/VOICE_REQ
      ```
 
 ### 2. Установка на колонку
+
+#### Вариант А. Автономная установка через `install.sh`
 `install.sh` выполняется **на самой колонке** (нужны root и `aarch64`), а не на компьютере.
 Скачайте релизный архив из раздела [Releases](../../releases) (в нём лежат `bin/soloist` и `lib64/`, которых нет в репозитории), затем:
 ```bash
@@ -86,6 +88,17 @@ adb push soloist-station-lite /data/local/tmp/soloist-station-lite
 adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 ```
 (Если нужно передать ключ и имя заранее: `sh ./install.sh <API_KEY> "<Имя устройства>"`.)
+
+#### Вариант Б. Установка через YAM v2 (Y Application Manager)
+Проект содержит манифест `yam.yaml` и полностью адаптирован под спецификацию пакетов **YAM v2** (`.yampkg`):
+```bash
+# Сборка пакета для платформы (yandexmicro, yandexmini_2, yandexplum, yandexmidi):
+yam --platform yandexmicro pack . --output soloist.yampkg
+
+# Установка пакета:
+yam install soloist.yampkg
+```
+YAM v2 автоматически зарегистрирует и запустит два системных сервиса: `soloist` (Spotify Connect клиент) и `bridge` (мост кнопок и Алисы).
 
 Скрипт автоматически:
 - Скопирует все необходимые файлы на колонку в `/data/opt/soloist`

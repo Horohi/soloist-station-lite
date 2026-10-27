@@ -6,7 +6,13 @@ unset LD_LIBRARY_PATH LD_PRELOAD
 BASE_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 [ -d "$BASE_DIR/bin" ] || BASE_DIR="/data/opt/soloist"
 SOLOIST_BIN="$BASE_DIR/bin/soloist"
-. "$BASE_DIR/scripts/request_state.sh"
+if [ -f "$BASE_DIR/scripts/request_state.sh" ]; then
+    . "$BASE_DIR/scripts/request_state.sh"
+elif [ -f "$BASE_DIR/bin/request_state.sh" ]; then
+    . "$BASE_DIR/bin/request_state.sh"
+else
+    . /data/opt/soloist/scripts/request_state.sh
+fi
 
 case "$1" in
     search) request_begin || exit 1;;
@@ -26,7 +32,13 @@ if [ "${SOLOIST_BRIDGE_ADMISSION:-}" = 1 ]; then
 fi
 if [ "$1" = search ]; then
     exec 8>&-
-    exec sh "$BASE_DIR/scripts/search_and_play.sh" "$2" "$GENERATION"
+    if [ -f "$BASE_DIR/scripts/search_and_play.sh" ]; then
+        exec sh "$BASE_DIR/scripts/search_and_play.sh" "$2" "$GENERATION"
+    elif [ -f "$BASE_DIR/bin/search_and_play.sh" ]; then
+        exec sh "$BASE_DIR/bin/search_and_play.sh" "$2" "$GENERATION"
+    else
+        exec sh /data/opt/soloist/scripts/search_and_play.sh "$2" "$GENERATION"
+    fi
 else
     # Keep the admission lock until dispatch so rapid local actions stay ordered.
     request_dispatch "$@"

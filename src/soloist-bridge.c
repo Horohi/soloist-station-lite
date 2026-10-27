@@ -330,6 +330,8 @@ static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
 static int is_yam_mode = 0;
 
 static const char *get_controller_sh(void) {
+    int fd = sys_open("./bin/control.sh", 0 /* O_RDONLY */, 0);
+    if (fd >= 0) { sys_close(fd); return "./bin/control.sh"; }
     return is_yam_mode ? "./scripts/control.sh" : "/data/opt/soloist/scripts/control.sh";
 }
 

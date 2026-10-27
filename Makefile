@@ -14,6 +14,9 @@ $(TARGET_BIN): $(SRC_DIR)/soloist-bridge.c $(SRC_DIR)/voice-request.h
 	$(STRIP) -s $@
 
 clean:
-	rm -f $(TARGET_BIN)
+	rm -f $(TARGET_BIN) soloist.yampkg
 
-.PHONY: all clean
+pack-yam: $(TARGET_BIN)
+	yam --platform yandexmicro pack . --output soloist.yampkg
+
+.PHONY: all clean pack-yam

@@ -9,3 +9,4 @@ cache/
 *.tar.gz
 *.zip
 *.yap
+*.yampkg

@@ -22,7 +22,13 @@ API_CONF="$BASE_DIR/spotify_api.conf"
 CENSOR_FILE="$BASE_DIR/data/censorship"
 [ -f "$CENSOR_FILE" ] || CENSOR_FILE="/data/opt/soloist/data/censorship"
 
-. "$BASE_DIR/scripts/request_state.sh"
+if [ -f "$BASE_DIR/scripts/request_state.sh" ]; then
+    . "$BASE_DIR/scripts/request_state.sh"
+elif [ -f "$BASE_DIR/bin/request_state.sh" ]; then
+    . "$BASE_DIR/bin/request_state.sh"
+else
+    . /data/opt/soloist/scripts/request_state.sh
+fi
 GENERATION="$2"
 [ -n "$GENERATION" ] || request_begin || exit 1
 request_current || exit 0
