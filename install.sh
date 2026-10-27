@@ -260,6 +260,9 @@ export APULSE_PLAYBACK_DEVICE=plug:default
 export APULSE_DIAG=0
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export MALLOC_ARENA_MAX=1
+export MALLOC_TRIM_THRESHOLD_=131072
+export MALLOC_MMAP_THRESHOLD_=131072
 
 API_KEY="$API_KEY"
 
