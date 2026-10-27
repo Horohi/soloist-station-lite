@@ -1,5 +1,5 @@
 name: horohi/soloist
-version: 1.1.1
+version: 1.2.0
 license: MIT
 description: Spotify Connect with Alice voice control and media buttons for Yandex Station
 homepage: https://github.com/Horohi/soloist-station-lite
@@ -7,6 +7,7 @@ targets: [yandexmicro, yandexplum, yandexmini_2, yandexmidi]
 files:
   bin/soloist: bin/soloist
   bin/soloist-bridge: bin/soloist-bridge
+  bin/soloist-cli: scripts/soloist-cli
   bin/curl: bin/curl
   bin/soloist-service: scripts/soloist-service.sh
   bin/control.sh: scripts/control.sh

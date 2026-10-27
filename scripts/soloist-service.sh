@@ -2,7 +2,7 @@
 set -e
 
 # YAM v2 provides:
-# YAM_PKG: path to immutable package version directory (/data/yam/pkgs/horohi/soloist/1.1.1)
+# YAM_PKG: path to immutable package version directory (/data/yam/pkgs/horohi/soloist/1.2.0)
 # YAM_ROOT: package manager root (/data/yam)
 # YAM_ETC: configuration directory (/data/yam/etc)
 # YAM_VAR: mutable data directory (/data/yam/var)
@@ -16,7 +16,20 @@ CONFIG_DIR="${YAM_ETC:-$PKG_DIR/data}/horohi.soloist"
 DATA_DIR="${YAM_VAR:-$PKG_DIR/data}/horohi.soloist"
 CACHE_DIR="${YAM_RUN:-/tmp}/soloist_cache"
 
-mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR"
+mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR/cache" "$CACHE_DIR/Storage" "$DATA_DIR/cache"
+if [ ! -L "$DATA_DIR/cache/Storage" ]; then
+    rm -rf "$DATA_DIR/cache/Storage" 2>/dev/null || true
+    ln -sfn "$CACHE_DIR/Storage" "$DATA_DIR/cache/Storage" 2>/dev/null || true
+fi
+
+# Enable zram compressed swap (64MB) if available and inactive
+if [ -e /dev/zram0 ] && [ "$(cat /sys/block/zram0/disksize 2>/dev/null)" = "0" ]; then
+    echo 67108864 > /sys/block/zram0/disksize 2>/dev/null || true
+    mkswap /dev/zram0 >/dev/null 2>&1 || true
+    swapon /dev/zram0 >/dev/null 2>&1 || true
+    sysctl -w vm.swappiness=20 >/dev/null 2>&1 || true
+    sysctl -w vm.vfs_cache_pressure=150 >/dev/null 2>&1 || true
+fi
 
 CONFIG_FILE="$CONFIG_DIR/config.env"
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -70,5 +83,4 @@ exec "$PKG_DIR/bin/soloist" \
     -D "$DATA_DIR" \
     -C "$CACHE_DIR" \
     -w 127.0.0.1:9090 \
-    --initial-volume 100 \
-    -v
+    --initial-volume 100

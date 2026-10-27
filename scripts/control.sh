@@ -22,6 +22,8 @@ case "$1" in
         GENERATION=$3
         case "$GENERATION" in ''|*[!0-9]*) exit 2;; esac
         request_lock 8 50 || exit 1;;
+    clean-cache|clean-cache-full)
+        ;;
     *) exit 2;;
 esac
 
@@ -29,6 +31,18 @@ esac
 if [ "${SOLOIST_BRIDGE_ADMISSION:-}" = 1 ]; then
     printf A >&3 || exit 1
     exec 3>&-
+fi
+if [ "$1" = clean-cache ]; then
+    if [ -d /tmp/soloist_cache/cache ]; then
+        find /tmp/soloist_cache/cache -type f -amin +1 -delete 2>/dev/null || true
+        find /tmp/soloist_cache/cache -type f -mmin +1 -delete 2>/dev/null || true
+    fi
+    exit 0
+elif [ "$1" = clean-cache-full ]; then
+    if [ -d /tmp/soloist_cache/cache ]; then
+        rm -rf /tmp/soloist_cache/cache/* 2>/dev/null || true
+    fi
+    exit 0
 fi
 if [ "$1" = search ]; then
     exec 8>&-

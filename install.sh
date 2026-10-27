@@ -185,10 +185,22 @@ if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
     chmod 755 "$INSTALL_DIR/scripts/search_and_play.sh"
 fi
 
-for helper in control.sh request_state.sh; do
-    cp -f "$SCRIPT_DIR/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
-    chmod 755 "$INSTALL_DIR/scripts/$helper"
+for helper in control.sh request_state.sh soloist-cli soloist-service.sh; do
+    if [ -f "$SCRIPT_DIR/scripts/$helper" ]; then
+        cp -f "$SCRIPT_DIR/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
+        chmod 755 "$INSTALL_DIR/scripts/$helper"
+    fi
 done
+
+if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
+    cp -f "$SCRIPT_DIR/scripts/soloist-cli" "$INSTALL_DIR/bin/soloist-cli"
+    chmod 755 "$INSTALL_DIR/bin/soloist-cli"
+    mkdir -p /data/opt/bin
+    ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloist 2>/dev/null || true
+    ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
+fi
+
+printf "v1.2.0\n" > "$INSTALL_DIR/version"
 
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
@@ -243,8 +255,21 @@ set -e
 export PATH="/bin:/usr/bin:/sbin:/usr/sbin:\$PATH"
 unset LD_LIBRARY_PATH LD_PRELOAD
 
-mkdir -p /data/opt/soloist/data /tmp/soloist_cache /data/opt/soloist/scripts
+mkdir -p /data/opt/soloist/data /tmp/soloist_cache/cache /tmp/soloist_cache/Storage /data/opt/soloist/data/cache /data/opt/soloist/scripts
+if [ ! -L /data/opt/soloist/data/cache/Storage ]; then
+    rm -rf /data/opt/soloist/data/cache/Storage 2>/dev/null || true
+    ln -sfn /tmp/soloist_cache/Storage /data/opt/soloist/data/cache/Storage 2>/dev/null || true
+fi
 /data/opt/soloist/stop.sh >/dev/null 2>&1 || true
+
+# 0. Enable zram compressed swap (64MB) if available and inactive to prevent OOM
+if [ -e /dev/zram0 ] && [ "\$(cat /sys/block/zram0/disksize 2>/dev/null)" = "0" ]; then
+    echo 67108864 > /sys/block/zram0/disksize 2>/dev/null || true
+    mkswap /dev/zram0 >/dev/null 2>&1 || true
+    swapon /dev/zram0 >/dev/null 2>&1 || true
+    sysctl -w vm.swappiness=20 >/dev/null 2>&1 || true
+    sysctl -w vm.vfs_cache_pressure=150 >/dev/null 2>&1 || true
+fi
 
 for i in \$(seq 1 45); do
     if ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
@@ -273,8 +298,7 @@ nohup /data/opt/soloist/bin/soloist \\
     -D /data/opt/soloist/data \\
     -C /tmp/soloist_cache \\
     -w 127.0.0.1:9090 \\
-    --initial-volume 100 \\
-    -v > /tmp/soloist.log 2>&1 &
+    --initial-volume 100 > /tmp/soloist.log 2>&1 &
 
 echo \$! > /data/opt/soloist/data/soloist.pid
 echo "Spotify Soloist (arm64) started, PID=\$(cat /data/opt/soloist/data/soloist.pid)"
@@ -353,9 +377,18 @@ echo ""
 echo "Автозагрузка:"
 echo "  • Служба запускается автоматически при включении колонки через /etc/init.d/S99spotify-connect"
 echo ""
-echo "Управление службой в консоли:"
-echo "  Статус:  /data/opt/soloist/status.sh"
-echo "  Стоп:    /data/opt/soloist/stop.sh"
-echo "  Старт:   /data/opt/soloist/start.sh"
-echo "  Логи:    tail -f /tmp/soloist.log /tmp/soloist-search.log"
+echo "Управление службой через CLI:"
+echo "  soloist status       - статус плеера, памяти, моста и трека"
+echo "  soloist update       - обновление до последней версии с GitHub в 1 команду"
+echo "  soloist clean        - очистка временного мусора, кэша и старых логов"
+echo "  soloist restart      - перезапуск плеера и моста"
+echo "  soloist logs         - просмотр логов в реальном времени (soloist logs bridge)"
 echo "=========================================================="
+
+# 12. Cleanup temporary installer files to prevent cluttering /data
+if [ -d "/data/local/tmp/soloist-station-lite" ] && [ "$SCRIPT_DIR" = "/data/local/tmp/soloist-station-lite" ]; then
+    echo "Очистка временных файлов установки..."
+    rm -f /data/local/tmp/soloist-station-lite.tar.gz 2>/dev/null || true
+    # Remove installer directory on shell exit
+    trap 'rm -rf /data/local/tmp/soloist-station-lite 2>/dev/null || true' EXIT
+fi

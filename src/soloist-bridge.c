@@ -168,6 +168,60 @@ static inline void sys_exit(int code) {
     while (1) {}
 }
 
+static inline int sys_unlink(const char *path) {
+#ifdef __aarch64__
+    register long x8 __asm__("x8") = 35; // unlinkat
+    register long x0 __asm__("x0") = -100; // AT_FDCWD
+    register long x1 __asm__("x1") = (long)path;
+    register long x2 __asm__("x2") = 0;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+#else
+    extern int unlink(const char *path);
+    return unlink(path);
+#endif
+}
+
+static inline int sys_shmget(int key, unsigned long size, int shmflg) {
+#ifdef __aarch64__
+    register long x8 __asm__("x8") = 194;
+    register long x0 __asm__("x0") = key;
+    register long x1 __asm__("x1") = size;
+    register long x2 __asm__("x2") = shmflg;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (int)x0;
+#else
+    (void)key; (void)size; (void)shmflg;
+    return -1;
+#endif
+}
+
+static inline void *sys_shmat(int shmid, const void *shmaddr, int shmflg) {
+#ifdef __aarch64__
+    register long x8 __asm__("x8") = 196;
+    register long x0 __asm__("x0") = shmid;
+    register long x1 __asm__("x1") = (long)shmaddr;
+    register long x2 __asm__("x2") = shmflg;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return (void *)x0;
+#else
+    (void)shmid; (void)shmaddr; (void)shmflg;
+    return (void *)-1;
+#endif
+}
+
+static inline int sys_shmdt(const void *shmaddr) {
+#ifdef __aarch64__
+    register long x8 __asm__("x8") = 197;
+    register long x0 __asm__("x0") = (long)shmaddr;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return (int)x0;
+#else
+    (void)shmaddr;
+    return -1;
+#endif
+}
+
 static inline long sys_wait4(int pid, int *status, int options, void *rusage) {
     register long x8 __asm__("x8") = 260;
     register long x0 __asm__("x0") = pid;
@@ -712,6 +766,7 @@ static void handle_soloist_ws_json(const char *json) {
             playback_status = 0;
             playback_speed = 0;
             spotify_is_active = 0;
+            run_controller("clean-cache-full", 0);
         }
     }
 
@@ -735,6 +790,9 @@ static void handle_soloist_ws_json(const char *json) {
     if (json_find_str(json, "uri", uri_buf, sizeof(uri_buf))) {
         if (uri_buf[0] == 's' && uri_buf[1] == 'p' && uri_buf[2] == 'o' && uri_buf[3] == 't') {
             if (!str_equal(current_track_uri, uri_buf)) {
+                if (current_track_uri[0] != 0) {
+                    run_controller("clean-cache", 0);
+                }
                 str_copy(current_track_uri, uri_buf, sizeof(current_track_uri));
                 publish_track(current_track_uri);
                 stuck_since_ms = 0;
@@ -747,6 +805,13 @@ static void handle_soloist_ws_json(const char *json) {
         }
     }
 }
+
+#ifdef __aarch64__
+static void set_led_visualizer_impl(int enable);
+static inline void set_led_visualizer(int enable) { set_led_visualizer_impl(enable); }
+#else
+static inline void set_led_visualizer(int enable) { (void)enable; }
+#endif
 
 static void handle_voice_recognition(int quasar_fd, const char *text, unsigned long text_len) {
     char lower_buf[512];
@@ -763,6 +828,39 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 
     // An explicit catalog search ("включи песню ...") must not be hijacked by control words in the title
     if (!is_explicit_search(lower_buf)) {
+        // Check LED Visualizer / Equalizer OFF keywords (NO "выключи" or "отключи" to avoid smart home collisions)
+        if (str_contains(lower_buf, "стоп дискотек") ||
+            str_contains(lower_buf, "останови дискотек") ||
+            str_contains(lower_buf, "стоп эквалайзер") ||
+            str_contains(lower_buf, "останови эквалайзер") ||
+            str_contains(lower_buf, "стоп светомузык") ||
+            str_contains(lower_buf, "останови светомузык") ||
+            str_contains(lower_buf, "погаси подсветк") ||
+            str_contains(lower_buf, "хватит светить")) {
+            log_msg("[bridge] Action: LED VISUALIZER OFF\n");
+            trigger_alice_suppression(quasar_fd, 2500);
+            set_led_visualizer(0);
+            return;
+        }
+
+        // Check LED Visualizer / Equalizer ON keywords (STRICTLY NO "включи", "выключи", or "отключи")
+        if (!str_contains(lower_buf, "включ") &&
+            !str_contains(lower_buf, "выключ") &&
+            !str_contains(lower_buf, "отключ")) {
+            if (str_contains(lower_buf, "зажигай") ||
+                str_contains(lower_buf, "зажги") ||
+                str_contains(lower_buf, "покажи эквалайзер") ||
+                str_contains(lower_buf, "режим дискотек") ||
+                str_contains(lower_buf, "светомузык") ||
+                str_contains(lower_buf, "эквалайзер") ||
+                str_contains(lower_buf, "дискотек")) {
+                log_msg("[bridge] Action: LED VISUALIZER ON (Nothing Phone Equalizer mode)\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                set_led_visualizer(1);
+                return;
+            }
+        }
+
         // Check PAUSE / STOP keywords (Instant Action)
         if (str_contains(lower_buf, "пауз") ||
             str_contains(lower_buf, "стоп") ||
@@ -865,11 +963,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             str_contains(lower_buf, "с матом") ||
             str_contains(lower_buf, "взрослый режим")) {
             log_msg("[bridge] Action: CENSORSHIP OFF\n");
-            register long x8 __asm__("x8") = 35; // unlinkat
-            register long x0 __asm__("x0") = -100; // AT_FDCWD
-            register long x1 __asm__("x1") = (long)get_censor_path();
-            register long x2 __asm__("x2") = 0;
-            __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+            sys_unlink(get_censor_path());
         } else {
             log_msg("[bridge] Action: CENSORSHIP ON\n");
             int fd = sys_open(get_censor_path(), 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
@@ -924,6 +1018,466 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     }
 }
 
+/* =========================================================================
+ * LED Equalizer / Visualizer Subsystem (Nothing Phone style / Multi-zone)
+ * Supports:
+ *   - Yandex Station Lite 1: 3 RGB zones (micro:red:ring1..3)
+ *   - Yandex Station Lite 2: 3 RGB zones (plum:red:ring1..3, restores led_ring_fb)
+ *   - Yandex Station Mini 2: 6 RGB zones (mini2:red:ring1..6)
+ *   - Yandex Station Midi:  24 RGB zones (cucumber:red:ring0..23)
+ * Default Color: Pure White across all LEDs (Nothing Phone aesthetic).
+ * Configurable via spotify_api.conf (LED_VISUALIZER=white|rainbow|cyan, LED_BRIGHTNESS=0..255)
+ * ========================================================================= */
+
+static const uint8_t sin64[64] = {
+    128, 140, 152, 164, 176, 187, 198, 208, 217, 226, 233, 240, 245, 249, 252, 254,
+    255, 254, 252, 249, 245, 240, 233, 226, 217, 208, 198, 187, 176, 164, 152, 140,
+    128, 115, 103,  91,  79,  68,  57,  47,  38,  29,  22,  15,  10,   6,   3,   1,
+      1,   1,   3,   6,  10,  15,  22,  29,  38,  47,  57,  68,  79,  91, 103, 115
+};
+
+struct led_hardware_info {
+    int probed;
+    int detected;
+    int num_zones;
+    int is_zero_indexed; // 1 for cucumber (ring0..ring23), 0 for micro/plum/mini2 (ring1..ringN)
+    char prefix[32];     // e.g. "/sys/class/leds/micro:"
+    int is_plum;         // requires restoring trigger led_ring_fb
+};
+
+static struct led_hardware_info g_led_hw = {0};
+static int g_led_enabled = 0;       // 0=off (default), 1=on
+static int g_led_color_mode = 0;    // 0=white (Nothing Phone style), 1=rainbow, 2=cyan, 3=red, 4=green, 5=blue, 6=magenta, 7=yellow
+static int g_led_brightness = 180;  // 1-255, default 180
+static uint64_t g_led_frame = 0;
+static int g_led_last_active = 0;
+static uint32_t g_bass_level = 0;
+static uint32_t g_treble_level = 0;
+static int32_t *g_audio_shm_ptr = 0;
+static uint32_t g_auto_max_rms = 120;
+static uint32_t g_prev_zone_val[24] = {0};
+
+static inline uint32_t isqrt(uint64_t n) {
+    uint64_t root = 0;
+    uint64_t bit = (uint64_t)1 << 62;
+    while (bit > n) bit >>= 2;
+    while (bit != 0) {
+        if (n >= root + bit) {
+            n -= (root + bit);
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)root;
+}
+
+static void audio_shm_ensure_attached(void) {
+    if (g_audio_shm_ptr) return;
+    int shmid = sys_shmget(0x401, 61440, 0444);
+    if (shmid >= 0) {
+        void *ptr = sys_shmat(shmid, 0, 010000 /* SHM_RDONLY */);
+        if ((long)ptr > 0 && (long)ptr != -1) {
+            g_audio_shm_ptr = (int32_t *)ptr;
+        }
+    }
+}
+
+static void audio_shm_detach(void) {
+    if (g_audio_shm_ptr) {
+        sys_shmdt(g_audio_shm_ptr);
+        g_audio_shm_ptr = 0;
+    }
+}
+
+static inline uint32_t apply_audio_curve(uint32_t raw_rms, uint32_t max_ref) {
+    // Noise gate: below 35% of peak/max_ref, keep completely dark
+    uint32_t gate = (max_ref * 35) / 100;
+    if (raw_rms <= gate) return 0;
+
+    uint32_t span = max_ref - gate;
+    if (span == 0) return 0;
+
+    uint32_t diff = raw_rms - gate;
+    if (diff > span) diff = span;
+
+    // Normalize to 0..255
+    uint32_t norm = (diff * 255) / span;
+
+    // Non-linear quadratic curve: norm^2 / 255
+    // Quiet sounds are suppressed/nearly invisible, loud peaks flare up sharply
+    return (norm * norm) / 255;
+}
+
+static void write_sysfs_int(const char *path, int val) {
+    int fd = sys_open(path, 01 /* O_WRONLY */, 0);
+    if (fd < 0) return;
+    char buf[16];
+    int len = 0;
+    if (val <= 0) {
+        buf[0] = '0';
+        buf[1] = '\n';
+        len = 2;
+    } else {
+        if (val > 255) val = 255;
+        char tmp[10];
+        int tp = 0;
+        int n = val;
+        while (n > 0) {
+            tmp[tp++] = '0' + (n % 10);
+            n /= 10;
+        }
+        while (tp > 0) {
+            buf[len++] = tmp[--tp];
+        }
+        buf[len++] = '\n';
+    }
+    sys_write(fd, buf, len);
+    sys_close(fd);
+}
+
+static void write_sysfs_str(const char *path, const char *str) {
+    int fd = sys_open(path, 01 /* O_WRONLY */, 0);
+    if (fd < 0) return;
+    sys_write(fd, str, str_len(str));
+    sys_close(fd);
+}
+
+static void build_led_path(char *dst, unsigned long max, const char *color, int zone_idx) {
+    unsigned long p = 0;
+    const char *pr = g_led_hw.prefix;
+    while (*pr && p + 1 < max) dst[p++] = *pr++;
+    while (*color && p + 1 < max) dst[p++] = *color++;
+    const char *mid = ":ring";
+    while (*mid && p + 1 < max) dst[p++] = *mid++;
+    if (zone_idx >= 10) {
+        if (p + 1 < max) dst[p++] = '0' + (zone_idx / 10);
+        if (p + 1 < max) dst[p++] = '0' + (zone_idx % 10);
+    } else {
+        if (p + 1 < max) dst[p++] = '0' + zone_idx;
+    }
+    const char *suf = "/brightness";
+    while (*suf && p + 1 < max) dst[p++] = *suf++;
+    dst[p] = 0;
+}
+
+static void led_probe(void) {
+    if (g_led_hw.probed) return;
+    g_led_hw.probed = 1;
+
+    // Check Station Lite 1 (micro)
+    int fd = sys_open("/sys/class/leds/micro:red:ring1/brightness", 0, 0);
+    if (fd >= 0) {
+        sys_close(fd);
+        g_led_hw.detected = 1;
+        g_led_hw.num_zones = 3;
+        g_led_hw.is_zero_indexed = 0;
+        g_led_hw.is_plum = 0;
+        str_copy(g_led_hw.prefix, "/sys/class/leds/micro:", sizeof(g_led_hw.prefix));
+        log_msg("[bridge] LEDs detected: Station Lite 1 (3 RGB zones)\n");
+        return;
+    }
+    // Check Station Lite 2 (plum)
+    fd = sys_open("/sys/class/leds/plum:red:ring1/brightness", 0, 0);
+    if (fd >= 0) {
+        sys_close(fd);
+        g_led_hw.detected = 1;
+        g_led_hw.num_zones = 3;
+        g_led_hw.is_zero_indexed = 0;
+        g_led_hw.is_plum = 1;
+        str_copy(g_led_hw.prefix, "/sys/class/leds/plum:", sizeof(g_led_hw.prefix));
+        log_msg("[bridge] LEDs detected: Station Lite 2 (3 RGB zones, Plum)\n");
+        return;
+    }
+    // Check Station Mini 2 (mini2)
+    fd = sys_open("/sys/class/leds/mini2:red:ring1/brightness", 0, 0);
+    if (fd >= 0) {
+        sys_close(fd);
+        g_led_hw.detected = 1;
+        g_led_hw.num_zones = 6;
+        g_led_hw.is_zero_indexed = 0;
+        g_led_hw.is_plum = 0;
+        str_copy(g_led_hw.prefix, "/sys/class/leds/mini2:", sizeof(g_led_hw.prefix));
+        log_msg("[bridge] LEDs detected: Station Mini 2 (6 RGB zones)\n");
+        return;
+    }
+    // Check Station Midi (cucumber)
+    fd = sys_open("/sys/class/leds/cucumber:red:ring0/brightness", 0, 0);
+    if (fd >= 0) {
+        sys_close(fd);
+        g_led_hw.detected = 1;
+        g_led_hw.num_zones = 24;
+        g_led_hw.is_zero_indexed = 1;
+        g_led_hw.is_plum = 0;
+        str_copy(g_led_hw.prefix, "/sys/class/leds/cucumber:", sizeof(g_led_hw.prefix));
+        log_msg("[bridge] LEDs detected: Station Midi (24 RGB zones)\n");
+        return;
+    }
+}
+
+static void led_all_off(void) {
+    audio_shm_detach();
+    for (int i = 0; i < 24; i++) g_prev_zone_val[i] = 0;
+    if (!g_led_hw.detected) return;
+    int start = g_led_hw.is_zero_indexed ? 0 : 1;
+    int end = start + g_led_hw.num_zones;
+    char path[80];
+    for (int z = start; z < end; z++) {
+        build_led_path(path, sizeof(path), "red", z);
+        write_sysfs_int(path, 0);
+        build_led_path(path, sizeof(path), "green", z);
+        write_sysfs_int(path, 0);
+        build_led_path(path, sizeof(path), "blue", z);
+        write_sysfs_int(path, 0);
+    }
+    if (g_led_hw.is_plum) {
+        for (int z = start; z < end; z++) {
+            char tpath[80];
+            build_led_path(tpath, sizeof(tpath), "red", z);
+            for (int i = 0; tpath[i]; i++) {
+                if (tpath[i] == 'b' && tpath[i+1] == 'r') {
+                    str_copy(tpath + i, "trigger", sizeof(tpath) - i);
+                    break;
+                }
+            }
+            write_sysfs_str(tpath, "led_ring_fb\n");
+        }
+    }
+    g_led_last_active = 0;
+}
+
+static void set_led_visualizer_impl(int enable) {
+    led_probe();
+    g_led_enabled = enable ? 1 : 0;
+    if (!g_led_enabled) {
+        audio_shm_detach();
+        led_all_off();
+    }
+    const char *state_path = is_yam_mode ? "./data/requests/led_state" : "/data/opt/soloist/data/requests/led_state";
+    int fd = sys_open(state_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
+    if (fd >= 0) {
+        if (g_led_enabled) {
+            sys_write(fd, "on\n", 3);
+        } else {
+            sys_write(fd, "off\n", 4);
+        }
+        sys_close(fd);
+    }
+    log_msg(g_led_enabled ? "[bridge] LED visualizer: ON (Nothing Phone Equalizer)\n" : "[bridge] LED visualizer: OFF\n");
+}
+
+static void read_led_config(void) {
+    const char *conf_path = is_yam_mode ? "./spotify_api.conf" : "/data/opt/soloist/spotify_api.conf";
+    int fd = sys_open(conf_path, 0, 0);
+    if (fd < 0) return;
+    char buf[1024];
+    long n = sys_read(fd, buf, sizeof(buf) - 1);
+    sys_close(fd);
+    if (n <= 0) return;
+    buf[n] = 0;
+    if (str_contains(buf, "LED_VISUALIZER=on") || str_contains(buf, "LED_VISUALIZER=1")) {
+        g_led_enabled = 1;
+    } else if (str_contains(buf, "LED_VISUALIZER=rainbow")) {
+        g_led_enabled = 1;
+        g_led_color_mode = 1;
+    } else if (str_contains(buf, "LED_VISUALIZER=cyan")) {
+        g_led_enabled = 1;
+        g_led_color_mode = 2;
+    } else if (str_contains(buf, "LED_VISUALIZER=white")) {
+        g_led_enabled = 1;
+        g_led_color_mode = 0;
+    }
+}
+
+static void check_led_request(void) {
+    const char *path = is_yam_mode ? "./data/requests/led" : "/data/opt/soloist/data/requests/led";
+    int fd = sys_open(path, 0, 0);
+    if (fd < 0) return;
+    char cmd[16];
+    long n = sys_read(fd, cmd, sizeof(cmd) - 1);
+    sys_close(fd);
+    sys_unlink(path);
+
+    if (n > 0) {
+        if (cmd[0] == '1' || (cmd[0] == 'o' && cmd[1] == 'n')) {
+            set_led_visualizer(1);
+        } else if (cmd[0] == '0' || (cmd[0] == 'o' && cmd[1] == 'f')) {
+            set_led_visualizer(0);
+        } else if (cmd[0] == 'w') {
+            g_led_color_mode = 0;
+            set_led_visualizer(1);
+        } else if (cmd[0] == 'r') {
+            g_led_color_mode = 1;
+            set_led_visualizer(1);
+        } else if (cmd[0] == 'c') {
+            g_led_color_mode = 2;
+            set_led_visualizer(1);
+        }
+    }
+}
+
+static void led_visualizer_tick(void) {
+    if (!g_led_enabled) {
+        if (g_led_last_active) {
+            audio_shm_detach();
+            led_all_off();
+        }
+        return;
+    }
+    if (!g_led_hw.detected) return;
+
+    if (playback_status != 1) {
+        if (g_led_last_active) {
+            audio_shm_detach();
+            led_all_off();
+        }
+        return;
+    }
+
+    g_led_last_active = 1;
+    g_led_frame++;
+
+    audio_shm_ensure_attached();
+
+    uint32_t bass_energy = 0;
+    uint32_t mid_energy = 0;
+    uint32_t treble_energy = 0;
+
+    if (g_audio_shm_ptr) {
+        int64_t total_sum_sq = 0;
+        int64_t bass_sum_sq = 0;
+        int64_t treble_sum_sq = 0;
+        int32_t lpf = 0;
+        int32_t prev_sample = 0;
+        int samples_read = 0;
+
+        // Sample Left channel across 160ms dmix buffer (7680 samples @ 48kHz)
+        for (int i = 0; i < 15360; i += 2) {
+            int32_t s = g_audio_shm_ptr[i];
+            total_sum_sq += (int64_t)s * s;
+
+            // Low-pass filter for bass (cutoff ~470 Hz)
+            lpf = (lpf * 15 + s) / 16;
+            bass_sum_sq += (int64_t)lpf * lpf;
+
+            // High-pass filter for treble
+            int32_t diff = s - prev_sample;
+            prev_sample = s;
+            treble_sum_sq += (int64_t)diff * diff;
+
+            samples_read++;
+        }
+
+        if (samples_read > 0) {
+            uint32_t total_rms = isqrt((uint64_t)(total_sum_sq / samples_read));
+            uint32_t bass_rms = isqrt((uint64_t)(bass_sum_sq / samples_read));
+            uint32_t treble_rms = isqrt((uint64_t)(treble_sum_sq / samples_read));
+            uint32_t mid_rms = (total_rms > bass_rms) ? (total_rms - (bass_rms / 2)) : (total_rms / 2);
+
+            // Auto-gain peak tracker
+            if (total_rms > g_auto_max_rms) {
+                g_auto_max_rms = total_rms;
+            } else {
+                g_auto_max_rms = (g_auto_max_rms * 98) / 100;
+            }
+            if (g_auto_max_rms < 50) g_auto_max_rms = 50;
+
+            bass_energy = apply_audio_curve(bass_rms, g_auto_max_rms);
+            mid_energy = apply_audio_curve(mid_rms, g_auto_max_rms);
+            treble_energy = apply_audio_curve(treble_rms, g_auto_max_rms);
+        }
+    } else {
+        // Fallback simulation if SHM is unavailable
+        uint32_t bar_pos = g_led_frame % 40;
+        if (bar_pos == 0 || bar_pos == 10 || bar_pos == 20 || bar_pos == 30 || bar_pos == 26) {
+            g_bass_level = 255;
+        } else {
+            g_bass_level = (g_bass_level * 78) / 100;
+        }
+        if ((bar_pos % 4) == 0) {
+            g_treble_level = 220;
+        } else {
+            g_treble_level = (g_treble_level * 55) / 100;
+        }
+        uint32_t s1 = sin64[(g_led_frame * 2) % 64];
+        uint32_t s2 = sin64[(g_led_frame * 3 + 16) % 64];
+        uint32_t sim_mid = (s1 * 7 + s2 * 3) / 10;
+
+        bass_energy = g_bass_level;
+        mid_energy = sim_mid;
+        treble_energy = g_treble_level;
+    }
+
+    int n_zones = g_led_hw.num_zones;
+    int start = g_led_hw.is_zero_indexed ? 0 : 1;
+    char path[80];
+
+    for (int i = 0; i < n_zones; i++) {
+        int z = start + i;
+        uint32_t target_energy = 0;
+
+        if (n_zones == 3) {
+            if (i == 0) target_energy = bass_energy;
+            else if (i == 1) target_energy = mid_energy;
+            else target_energy = treble_energy;
+        } else if (n_zones == 6) {
+            if (i == 0) target_energy = bass_energy;
+            else if (i == 1) target_energy = (bass_energy + mid_energy) / 2;
+            else if (i == 2) target_energy = mid_energy;
+            else if (i == 3) target_energy = (mid_energy + treble_energy) / 2;
+            else if (i == 4) target_energy = treble_energy;
+            else target_energy = (treble_energy + bass_energy) / 2;
+        } else {
+            uint32_t fraction = ((uint32_t)i * 3) / (uint32_t)n_zones;
+            if (fraction == 0) target_energy = bass_energy;
+            else if (fraction == 1) target_energy = mid_energy;
+            else target_energy = treble_energy;
+        }
+
+        if (target_energy > 255) target_energy = 255;
+
+        // Smooth decay / instant attack
+        uint32_t prev = g_prev_zone_val[i];
+        if (target_energy > prev) {
+            g_prev_zone_val[i] = target_energy; // Instant attack on beat
+        } else {
+            g_prev_zone_val[i] = (prev * 70 + target_energy * 30) / 100; // Smooth fade-out
+        }
+
+        uint32_t val = (g_prev_zone_val[i] * (uint32_t)g_led_brightness) / 255;
+
+        int r = 0, g = 0, b = 0;
+        if (g_led_color_mode == 0) {
+            r = val; g = val; b = val;
+        } else if (g_led_color_mode == 1) {
+            uint32_t hue = (g_led_frame * 3 + (uint32_t)i * (64 / (uint32_t)n_zones)) % 64;
+            r = (sin64[hue] * val) / 255;
+            g = (sin64[(hue + 21) % 64] * val) / 255;
+            b = (sin64[(hue + 42) % 64] * val) / 255;
+        } else if (g_led_color_mode == 2) {
+            r = 0; g = val; b = val;
+        } else if (g_led_color_mode == 3) {
+            r = val; g = 0; b = 0;
+        } else if (g_led_color_mode == 4) {
+            r = 0; g = val; b = 0;
+        } else if (g_led_color_mode == 5) {
+            r = 0; g = 0; b = val;
+        } else if (g_led_color_mode == 6) {
+            r = val; g = 0; b = val;
+        } else if (g_led_color_mode == 7) {
+            r = val; g = val; b = 0;
+        }
+
+        build_led_path(path, sizeof(path), "red", z);
+        write_sysfs_int(path, r);
+        build_led_path(path, sizeof(path), "green", z);
+        write_sysfs_int(path, g);
+        build_led_path(path, sizeof(path), "blue", z);
+        write_sysfs_int(path, b);
+    }
+}
+
 static uint8_t quasar_buf[65536];
 static unsigned long quasar_buf_pos = 0;
 static uint8_t ws_buf[8192];
@@ -972,6 +1526,9 @@ void _start(void) {
     } else {
         log_msg("[bridge] soloist-bridge v14 started (Standalone mode: /data/opt/soloist)\n");
     }
+
+    read_led_config();
+    led_probe();
 
     int quasar_fd = -1;
     int soloist_ws_fd = -1;
@@ -1326,5 +1883,9 @@ void _start(void) {
                 stuck_since_ms = 0;
             }
         }
+
+        // 5. LED Visualizer / Equalizer update & request processing
+        check_led_request();
+        led_visualizer_tick();
     }
 }
