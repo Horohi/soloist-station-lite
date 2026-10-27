@@ -171,15 +171,34 @@ static int64_t now_ms(void) {
     return 0;
 }
 
-/* Builds and sends one AliceCapability method frame via Quasar IPC (SharedMessage).
- * Wire format verified against Quasar & Spotiya:
- * [uint32_le msg_len (28)]
- * field 252 (Remoting):
- *   field 7 ("AliceCapability")
- *   field 8 ({ 0x08, method })
- * field 253 (type = 210, varint 0xd2 0x01)
+/* Builds and sends one AliceCapability method frame via Quasar Native IPC (QuasarMessage field 210).
+ * Length: 24 bytes body (0x18, 0x00, 0x00, 0x00)
+ * Tag 210 (wire type 2): 0x92, 0x0d
+ * Remoting length: 21 bytes (0x15)
+ * Tag 7 ("AliceCapability"): 0x3a, 0x0f, 'AliceCapability'
+ * Tag 8 ({ 0x08, method }): 0x42, 0x02, 0x08, method
  */
-static int send_alice_method(int quasar_fd, unsigned char method) {
+static int send_alice_method_f210(int quasar_fd, unsigned char method) {
+    if (quasar_fd < 0) return -1;
+    static const unsigned char frame_template[28] = {
+        0x18, 0x00, 0x00, 0x00, // length = 24
+        0x92, 0x0d,             // tag: field 210, wire type 2
+        0x15,                   // remoting length = 21 bytes
+        0x3a, 0x0f,             // tag: field 7, len 15
+        'A','l','i','c','e','C','a','p','a','b','i','l','i','t','y',
+        0x42, 0x02,             // tag: field 8, len 2
+        0x08, 0x00              // method field 1 (0x08), method byte (filled at [27])
+    };
+    unsigned char frame[28];
+    for (int i = 0; i < 28; i++) frame[i] = frame_template[i];
+    frame[27] = method;
+
+    long n = sys_write(quasar_fd, frame, sizeof(frame));
+    return (n == (long)sizeof(frame)) ? 0 : -1;
+}
+
+/* Also sends SharedMessage wrapper (field 252 + field 253: 210) for newer/alternate Quasar daemons */
+static int send_alice_method_f252(int quasar_fd, unsigned char method) {
     if (quasar_fd < 0) return -1;
     static const unsigned char frame_template[32] = {
         0x1c, 0x00, 0x00, 0x00, // length = 28
@@ -200,6 +219,37 @@ static int send_alice_method(int quasar_fd, unsigned char method) {
     return (n == (long)sizeof(frame)) ? 0 : -1;
 }
 
+static int send_alice_method(int quasar_fd, unsigned char method) {
+    int r1 = send_alice_method_f210(quasar_fd, method);
+    int r2 = send_alice_method_f252(quasar_fd, method);
+    return (r1 == 0 || r2 == 0) ? 0 : -1;
+}
+
+/* Sends PlaybackControlCapability PAUSE (method kind 1) to pause any native media player */
+static void send_playback_pause(int quasar_fd) {
+    if (quasar_fd < 0) return;
+    // Native field 210: 38 bytes
+    static const unsigned char p210[38] = {
+        0x22, 0x00, 0x00, 0x00,
+        0x92, 0x0d, 0x1f,
+        0x3a, 0x19,
+        'P','l','a','y','b','a','c','k','C','o','n','t','r','o','l','C','a','p','a','b','i','l','i','t','y',
+        0x6a, 0x02, 0x08, 0x01
+    };
+    sys_write(quasar_fd, p210, sizeof(p210));
+
+    // SharedMessage field 252/253: 42 bytes
+    static const unsigned char p252[42] = {
+        0x26, 0x00, 0x00, 0x00,
+        0xe2, 0x0f, 0x1f,
+        0x3a, 0x19,
+        'P','l','a','y','b','a','c','k','C','o','n','t','r','o','l','C','a','p','a','b','i','l','i','t','y',
+        0x6a, 0x02, 0x08, 0x01,
+        0xe8, 0x0f, 0xd2, 0x01
+    };
+    sys_write(quasar_fd, p252, sizeof(p252));
+}
+
 static void send_cancel_alice(int quasar_fd) {
     if (quasar_fd < 0) return;
     int err = 0;
@@ -213,8 +263,10 @@ static void send_cancel_alice(int quasar_fd) {
     if (send_alice_method(quasar_fd, 0x0e) < 0) err = 1;
     if (send_alice_method(quasar_fd, 1) < 0) err = 1;
 
+    send_playback_pause(quasar_fd);
+
     if (!err) {
-        log_msg("[bridge] Sent cancel_alice (stop+queue+tts+dialog) via Remoting f252/f253 to Quasar\n");
+        log_msg("[bridge] Sent cancel_alice (stop+queue+tts+dialog+pause) to Quasar\n");
     } else {
         log_msg("[bridge] Warning: Failed to send cancel_alice to Quasar socket\n");
     }
@@ -814,7 +866,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             return;
         }
 
-        trigger_alice_suppression(quasar_fd, 4000);
+        trigger_alice_suppression(quasar_fd, 5000);
         spotify_is_active = 1;
 
         log_msg("[bridge] Action: SEARCH & PLAY query='");
@@ -1196,6 +1248,8 @@ void _start(void) {
                                     touch_down_start = 1;
                                     touch_down_time = now_ms();
                                     touch_is_down = 1;
+                                    // Suppress Alice immediately on press down
+                                    trigger_alice_suppression(quasar_fd, 4000);
                                 } else if (ev.value == 0) { // Release
                                     if (touch_down_start) {
                                         int64_t dur = now_ms() - touch_down_time;
@@ -1216,6 +1270,7 @@ void _start(void) {
                                             }
                                         } else {
                                             log_msg("[bridge] Button / Touch HOLD -> ALICE TRIGGER\n");
+                                            cancel_alice_until_ms = 0;
                                         }
                                     }
                                     touch_down_start = 0;
