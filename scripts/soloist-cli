@@ -277,26 +277,6 @@ cmd_update() {
     fi
 
     DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST/soloist-station-lite.tar.gz"
-    TMP_DIR="/tmp/soloist_update_$$"
-    ARCHIVE="/tmp/soloist_update_$$.tar.gz"
-
-    mkdir -p "$TMP_DIR"
-    trap 'rm -rf "$TMP_DIR" "$ARCHIVE" 2>/dev/null || true' EXIT HUP INT TERM
-
-    printf "Загрузка релиза %s...\n" "$LATEST"
-    if ! "$CURL_BIN" -L -f -o "$ARCHIVE" "$DOWNLOAD_URL"; then
-        printf "${RED}Ошибка загрузки архива с GitHub!${NC}\n"
-        exit 1
-    fi
-
-    printf "Распаковка обновления...\n"
-    if gzip -d -c "$ARCHIVE" 2>/dev/null | tar -xf - -C "$TMP_DIR" 2>/dev/null; then
-        :
-    elif gunzip -c "$ARCHIVE" 2>/dev/null | tar -xf - -C "$TMP_DIR" 2>/dev/null; then
-        :
-    else
-        tar -xzf "$ARCHIVE" -C "$TMP_DIR"
-    fi
 
     # Stop current services
     printf "Остановка старых служб...\n"
@@ -305,41 +285,25 @@ cmd_update() {
     # Backup existing configuration
     SAVED_CONF=""
     if [ -f "$INSTALL_DIR/spotify_api.conf" ]; then
-        cp -f "$INSTALL_DIR/spotify_api.conf" "$TMP_DIR/spotify_api.conf.saved"
-    fi
-    SAVED_KEY=""
-    if [ -f "$INSTALL_DIR/start.sh" ]; then
-        SAVED_KEY=$(grep -o 'API_KEY="[^"]*"' "$INSTALL_DIR/start.sh" 2>/dev/null | cut -d'"' -f2 || true)
+        SAVED_CONF=$(cat "$INSTALL_DIR/spotify_api.conf")
     fi
 
-    # Update files
-    printf "Установка обновлений в %s...\n" "$INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/scripts" "$INSTALL_DIR/lib64" "$INSTALL_DIR/data"
+    # Stream download and unpack directly into $INSTALL_DIR (0 MB RAM / 0 MB temp disk usage)
+    printf "Загрузка и потоковая распаковка релиза %s...\n" "$LATEST"
+    if ! "$CURL_BIN" -L -f -s "$DOWNLOAD_URL" | gzip -d -c 2>/dev/null | tar -xf - -C "$INSTALL_DIR" 2>/dev/null; then
+        # Fallback if gzip -d failed: try gunzip
+        if ! "$CURL_BIN" -L -f -s "$DOWNLOAD_URL" | gunzip -c 2>/dev/null | tar -xf - -C "$INSTALL_DIR" 2>/dev/null; then
+            printf "${RED}Ошибка загрузки или распаковки архива с GitHub!${NC}\n"
+            exit 1
+        fi
+    fi
 
-    # Copy new binaries & scripts
-    if [ -f "$TMP_DIR/bin/soloist-bridge" ]; then
-        cp -f "$TMP_DIR/bin/soloist-bridge" "$INSTALL_DIR/bin/soloist-bridge"
-        chmod 755 "$INSTALL_DIR/bin/soloist-bridge"
-    fi
-    if [ -f "$TMP_DIR/bin/curl" ]; then
-        cp -f "$TMP_DIR/bin/curl" "$INSTALL_DIR/bin/curl"
-        chmod 755 "$INSTALL_DIR/bin/curl"
-    fi
-    if [ -f "$TMP_DIR/bin/soloist" ]; then
-        cp -f "$TMP_DIR/bin/soloist" "$INSTALL_DIR/bin/soloist"
-        chmod 755 "$INSTALL_DIR/bin/soloist"
-    fi
-    if [ -d "$TMP_DIR/lib64" ]; then
-        cp -af "$TMP_DIR/lib64/"* "$INSTALL_DIR/lib64/"
-    fi
-    if [ -d "$TMP_DIR/scripts" ]; then
-        cp -rf "$TMP_DIR/scripts/"* "$INSTALL_DIR/scripts/"
-        chmod 755 "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
-    fi
+    # Fix permissions
+    chmod 755 "$INSTALL_DIR/bin/"* "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/soloist-cli" 2>/dev/null || true
 
     # Update CLI itself safely (atomic rename so running script is not truncated)
-    if [ -f "$TMP_DIR/scripts/soloist-cli" ]; then
-        cp -f "$TMP_DIR/scripts/soloist-cli" "$INSTALL_DIR/bin/soloist-cli.new"
+    if [ -f "$INSTALL_DIR/scripts/soloist-cli" ]; then
+        cp -f "$INSTALL_DIR/scripts/soloist-cli" "$INSTALL_DIR/bin/soloist-cli.new"
         chmod 755 "$INSTALL_DIR/bin/soloist-cli.new"
         mv -f "$INSTALL_DIR/bin/soloist-cli.new" "$INSTALL_DIR/bin/soloist-cli"
         ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloist 2>/dev/null || true
@@ -350,19 +314,20 @@ cmd_update() {
     printf "%s\n" "$LATEST" > "$INSTALL_DIR/version"
 
     # Restore conf if needed
-    if [ -f "$TMP_DIR/spotify_api.conf.saved" ]; then
-        cp -f "$TMP_DIR/spotify_api.conf.saved" "$INSTALL_DIR/spotify_api.conf"
+    if [ -n "$SAVED_CONF" ] && [ ! -s "$INSTALL_DIR/spotify_api.conf" ]; then
+        printf "%s\n" "$SAVED_CONF" > "$INSTALL_DIR/spotify_api.conf"
+        chmod 600 "$INSTALL_DIR/spotify_api.conf"
     fi
+
+    # Cleanup any old update debris
+    rm -rf /tmp/soloist_update* /data/local/tmp/soloist* 2>/dev/null || true
 
     # Restart
     printf "Запуск обновлённого Soloist...\n"
     sh "$INSTALL_DIR/start.sh"
 
-    # Cleanup temporary update files
-    rm -rf "$TMP_DIR" "$ARCHIVE" /data/local/tmp/soloist* 2>/dev/null || true
-
     printf "\n${BOLD}${GREEN}Обновление до %s успешно завершено!${NC}\n" "$LATEST"
-    printf "Временный мусор и архив автоматически удалены.\n"
+    printf "Временный мусор и архив автоматически очищены.\n"
 }
 
 # Main entrypoint
