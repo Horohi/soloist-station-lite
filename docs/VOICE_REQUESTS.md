@@ -65,11 +65,29 @@ lock contention; queued commands enter the controller in event order. Queue
 overflow is explicitly logged and the new command is rejected.
 
 Automatic recovery has its own `auto-next` action. It carries the original
-track URI and request generation observed before queueing. The bridge publishes
-its observed track through an atomic file replacement. The worker compares both
-values under the dispatch lock and discards stale recovery without incrementing
-the generation. A successful explicit play also publishes its selected URI
-before unlocking, covering the gap until its WebSocket update arrives.
+track URI and request generation observed before queueing. Only the bridge writes
+the observed `track` record, containing the actual track URI and an observation
+revision. The worker compares URI and generation under the dispatch lock and
+discards stale recovery without incrementing the generation.
+
+Before explicit track, album or artist playback, the controller snapshots the
+observed record into `selection.pending`; only successful playback commits it
+to `selection`. Recovery rejects the unchanged pre-play snapshot. A fresh
+observation can arrive during or after the CLI call, and a context URI never
+overwrites the actual observed track. Same-URI events publish a new revision only
+while the active selection snapshot still matches the observed record; steady
+position updates otherwise cause no writes. URI changes always publish.
+
+Failed playback removes its pending marker without replacing the previous
+selection. A guard preparation failure prevents play. If committing a successful
+play's guard fails, the marker is retained, failure is logged, and automatic
+recovery remains blocked until a later successful selection replaces it. Other
+controllers cannot remove that marker as part of their own cleanup.
+
+An observation revision identifies a fresh WebSocket observation, not a
+player-correlated acknowledgement of the selection. This includes same-URI
+context transitions: a periodic update cannot prove which command the player
+has applied. No time-window heuristic or generation bump is used for this guard.
 Recovery can advance the old track while an explicit search is
 pending, but cannot invalidate that search. User `next` still cancels the search.
 
@@ -145,7 +163,8 @@ byte, and a controller that fails before admission closes it without a byte.
 Neither case blocks the event loop. The bridge also reaps completed workers.
 
 State belongs to one installation under `data/requests/`: generation number,
-observed track, lock files, token/expiry, cooldown and control diagnostics. New files are private to the running user
+observed track/revision, selection snapshots, lock files, token/expiry, cooldown
+and control diagnostics. New files are private to the running user
 (`umask 077`). Closing a process releases its flock locks, including after a
 crash. Do not remove lock files while any controller/search worker is active,
 because a replacement file would represent a different lock.
@@ -221,3 +240,6 @@ termination signals, redacted activation diagnostics, and nonblocking ordered
 bridge admission using the production event-loop admission hook.
 They also check that controller/HTTP helpers receive no library overrides and
 only Soloist receives the bundled library path.
+Context fixtures cover artist/album observations before and after CLI completion,
+unchanged and fresh same-URI snapshots, failed play, retained guard commit errors,
+and avoiding steady-state observation writes.

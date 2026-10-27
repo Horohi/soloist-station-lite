@@ -26,6 +26,13 @@ with tempfile.TemporaryDirectory(prefix="soloist-review-") as temporary:
     (app / "spotify_api.conf").write_text("SPOTIFY_CLIENT_ID=test-client\nSPOTIFY_CLIENT_SECRET=test-secret\n")
     search = app / "scripts/search_and_play.sh"
     search.write_text(search.read_text().replace("/tmp/soloist-search.log", str(app / "search.log")))
+    with (app / "scripts/request_state.sh").open("a") as fixture:
+        fixture.write('''
+mv() {
+    if [ -f "$FIXTURE/fail-selection-commit" ] && [ "${3:-}" = "$STATE_DIR/selection" ]; then return 1; fi
+    command mv "$@"
+}
+''')
     soloist = app / "bin/soloist"
     soloist.write_text('''#!/usr/bin/env python3
 import os,pathlib,signal,sys,time
@@ -48,6 +55,12 @@ if action=='activate':
         (p/'late-activate').touch()
 if action=='now': print((p/'now').read_text())
 if action=='play':
+    if (p/'fail-play').exists(): sys.exit(19)
+    if (p/'observe-during-play').exists():
+        observation=p/'data/requests/track.fixture'
+        observation.write_text((p/'observe-during-play').read_text())
+        observation.replace(p/'data/requests/track')
+        time.sleep(.15)
     if (p/'hang-play').exists():
         signal.signal(signal.SIGTERM,signal.SIG_IGN)
         (p/'cli-pid').write_text(str(os.getpid()))
@@ -80,7 +93,7 @@ print('200',end='')
 
     def reset():
         shutil.rmtree(app / "data/requests", ignore_errors=True)
-        for name in ("controls", "activating", "worker-pid", "fail-activate", "slow-activate", "slow-success", "hang-play", "stall", "cli-pid", "late-activate", "played", "delay", "searching", "release", "search.log"):
+        for name in ("controls", "activating", "worker-pid", "fail-activate", "fail-play", "fail-selection-commit", "observe-during-play", "slow-activate", "slow-success", "hang-play", "stall", "cli-pid", "late-activate", "played", "delay", "searching", "release", "search.log"):
             (app / name).unlink(missing_ok=True)
         (app / "now").write_text('playing spotify:track:OLD')
 
@@ -181,6 +194,68 @@ print('200',end='')
     recovery.wait(timeout=5)
     time.sleep(.3)
     check(" next" not in (app / "controls").read_text(), "queued recovery cannot advance selection before WebSocket catches up")
+
+    for kind in ("album", "artist"):
+        for observation_timing in ("during", "after"):
+            reset()
+            requests = app / "data/requests"
+            requests.mkdir()
+            (requests / "track").write_text("spotify:track:OLD")
+            new_observation = "spotify:track:FIRST"
+            if observation_timing == "during":
+                (app / "observe-during-play").write_text(new_observation)
+            worker = subprocess.Popen(["sh", str(app / "scripts/control.sh"), "play", "spotify:" + kind + ":CONTEXT"], env=env)
+            wait_for("activating")
+            generation = (requests / "generation").read_text().strip()
+            recovery = subprocess.Popen(["sh", str(app / "scripts/control.sh"), "auto-next", "spotify:track:OLD", generation], env=env)
+            worker.wait(timeout=5)
+            recovery.wait(timeout=5)
+            check(" next" not in (app / "controls").read_text(), kind + " rejects queued old recovery with observation " + observation_timing + " CLI")
+            if observation_timing == "after":
+                (requests / "track").write_text(new_observation)
+            check((requests / "track").read_text() == new_observation,
+                  kind + " preserves observed track published " + observation_timing + " CLI")
+            control("auto-next", "spotify:track:FIRST", generation)
+            check((app / "controls").read_text().count(" next") == 1,
+                  kind + " recovers actual first track observed " + observation_timing + " CLI")
+
+    reset()
+    requests = app / "data/requests"
+    requests.mkdir()
+    (requests / "track").write_text("spotify:track:SAME\n1\n")
+    control("play", "spotify:album:CONTEXT")
+    generation = (requests / "generation").read_text().strip()
+    control("auto-next", "spotify:track:SAME", generation)
+    check(" next" not in (app / "controls").read_text(), "unchanged observation cannot acknowledge context selection")
+    (requests / "track").write_text("spotify:track:SAME\n2\n")
+    control("auto-next", "spotify:track:SAME", generation)
+    check((app / "controls").read_text().count(" next") == 1, "fresh same-URI observation releases context selection guard")
+
+    reset()
+    requests = app / "data/requests"
+    requests.mkdir()
+    (requests / "track").write_text("spotify:track:OLD\n1\n")
+    (app / "fail-play").touch()
+    control("play", "spotify:album:CONTEXT")
+    generation = (requests / "generation").read_text().strip()
+    control("auto-next", "spotify:track:OLD", generation)
+    check((app / "controls").read_text().count(" next") == 1 and not (requests / "selection").exists(),
+          "failed context play installs no selection guard and preserves old recovery")
+
+    reset()
+    requests = app / "data/requests"
+    requests.mkdir()
+    (requests / "track").write_text("spotify:track:OLD")
+    (app / "fail-selection-commit").touch()
+    result = control("play", "spotify:album:CONTEXT")
+    generation = (requests / "generation").read_text().strip()
+    control("auto-next", "spotify:track:OLD", generation)
+    control("auto-next", "spotify:track:OLD", generation)
+    diagnostic = requests / "control.log"
+    check(result.returncode != 0 and (requests / "selection.pending").exists()
+          and " next" not in (app / "controls").read_text()
+          and diagnostic.exists() and "stage=selection" in diagnostic.read_text(),
+          "selection commit failure is reported and blocks automatic recovery")
 
     reset()
     (app / "fail-activate").touch()

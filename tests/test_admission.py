@@ -7,6 +7,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "src/soloist-bridge.c").read_text()
 production = source[source.index("static const char *get_controller_sh"):source.index("/* Text and command classification helpers */")]
+production += source[source.index("static int mem_equal"):source.index("/* Word-boundary helpers.")]
+production += source[source.index("static int spotify_is_active"):source.index("static void handle_voice_recognition")]
 loop_start = source.index("    while (1) {", source.index("void _start")) + len("    while (1) {")
 loop_prologue = source[loop_start:source.index("        int64_t now = now_ms();", loop_start)]
 if "service_controllers" not in production:
@@ -70,13 +72,34 @@ int main(void) {
     memset(output,0,sizeof(output));f=fopen("order","r");if(f){fread(output,1,sizeof(output)-1,f);fclose(f);}
     int recovered=!strcmp(output,"shuffle on\n");
     printf("%s child failure before admission does not stall FIFO\n",recovered?"PASS":"FAIL");
-    return !(responsive && ordered && signals && recovered && environment);
+    char first_observation[256]={0}, second_observation[256]={0}, pending_observation[256]={0}, final_observation[256]={0};
+    handle_soloist_ws_json("{\"uri\":\"spotify:track:SAME\"}");
+    f=fopen("data/requests/track","r");if(f){fread(first_observation,1,sizeof(first_observation)-1,f);fclose(f);}
+    handle_soloist_ws_json("{\"uri\":\"spotify:track:SAME\"}");
+    f=fopen("data/requests/track","r");if(f){fread(second_observation,1,sizeof(second_observation)-1,f);fclose(f);}
+    int steady=!strcmp(first_observation,second_observation);
+    f=fopen("data/requests/selection.pending","w");fputs(first_observation,f);fclose(f);
+    handle_soloist_ws_json("{\"uri\":\"spotify:track:SAME\"}");
+    f=fopen("data/requests/track","r");if(f){fread(pending_observation,1,sizeof(pending_observation)-1,f);fclose(f);}
+    unlink("data/requests/selection.pending");
+    f=fopen("data/requests/selection","w");fputs(pending_observation,f);fclose(f);
+    handle_soloist_ws_json("{\"uri\":\"spotify:track:SAME\"}");
+    f=fopen("data/requests/track","r");if(f){fread(final_observation,1,sizeof(final_observation)-1,f);fclose(f);}
+    int fresh=!strncmp(final_observation,"spotify:track:SAME\n",19) && strcmp(first_observation,pending_observation) && strcmp(pending_observation,final_observation);
+    printf("%s same-URI WebSocket event refreshes pending and committed selection snapshots\n",fresh?"PASS":"FAIL");
+    handle_soloist_ws_json("{\"uri\":\"spotify:track:SAME\"}");
+    memset(second_observation,0,sizeof(second_observation));
+    f=fopen("data/requests/track","r");if(f){fread(second_observation,1,sizeof(second_observation)-1,f);fclose(f);}
+    steady=steady && !strcmp(final_observation,second_observation);
+    printf("%s steady same-URI WebSocket updates do not rewrite observed track\n",steady?"PASS":"FAIL");
+    return !(responsive && ordered && signals && recovered && environment && fresh && steady);
 }
 '''
 driver = driver.replace("/* MAIN_LOOP_PROLOGUE */", loop_prologue)
 with tempfile.TemporaryDirectory(prefix="soloist-admission-") as directory:
     temp = pathlib.Path(directory)
     (temp / "scripts").mkdir()
+    (temp / "data").mkdir()
     (temp / "scripts/control.sh").write_text('#!/bin/sh\n[ "$1" != fail ] || exit 7\n[ "$1" != next ] || sleep 1\nprintf "%s %s\\n" "$1" "$2" >> order\nprintf "%s:%s" "${LD_LIBRARY_PATH-unset}" "${LD_PRELOAD-unset}" > environment\nawk \'/^SigIgn:/ {print $2}\' /proc/$$/status > ignored\n[ "${SOLOIST_BRIDGE_ADMISSION:-}" != 1 ] || printf A >&3\n')
     (temp / "test.c").write_text(prefix + production + driver)
     compiler = [sys.argv[1], "cc"] if len(sys.argv) > 1 else ["cc"]

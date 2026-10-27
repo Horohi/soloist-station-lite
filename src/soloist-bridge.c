@@ -286,6 +286,27 @@ static const char *get_censor_path(void) {
 }
 
 static int str_equal(const char *a, const char *b);
+static uint64_t track_observation_revision;
+
+static int selection_needs_observation(void) {
+    const char *pending = is_yam_mode ? "./data/requests/selection.pending" : "/data/opt/soloist/data/requests/selection.pending";
+    const char *selection = is_yam_mode ? "./data/requests/selection" : "/data/opt/soloist/data/requests/selection";
+    const char *track = is_yam_mode ? "./data/requests/track" : "/data/opt/soloist/data/requests/track";
+    int fd = sys_open(pending, 0, 0);
+    if (fd < 0) fd = sys_open(selection, 0, 0);
+    if (fd < 0) return 0;
+    char selected[256], observed[256];
+    long n = sys_read(fd, selected, sizeof(selected));
+    sys_close(fd);
+    if (n <= 0 || n == (long)sizeof(selected)) return 0;
+    fd = sys_open(track, 0, 0);
+    if (fd < 0) return 0;
+    long m = sys_read(fd, observed, sizeof(observed));
+    sys_close(fd);
+    if (n != m) return 0;
+    for (long i = 0; i < n; i++) if (selected[i] != observed[i]) return 0;
+    return 1;
+}
 
 static void publish_track(const char *uri) {
     const char *dir = is_yam_mode ? "./data/requests" : "/data/opt/soloist/data/requests";
@@ -294,9 +315,20 @@ static void publish_track(const char *uri) {
     sys_mkdir(dir, 0700);
     int fd = sys_open(tmp, 577 /* O_WRONLY|O_CREAT|O_TRUNC */, 0600);
     if (fd < 0) return;
-    long written = sys_write(fd, uri, str_len(uri));
+    char record[160], digits[20];
+    unsigned long length = str_len(uri), count = 0;
+    if (length >= 128) { sys_close(fd); return; }
+    for (unsigned long i = 0; i < length; i++) record[i] = uri[i];
+    record[length++] = '\n';
+    uint64_t revision = (uint64_t)now_ms();
+    if (revision <= track_observation_revision) revision = track_observation_revision + 1;
+    track_observation_revision = revision;
+    do { digits[count++] = (char)('0' + revision % 10); revision /= 10; } while (revision);
+    while (count) record[length++] = digits[--count];
+    record[length++] = '\n';
+    long written = sys_write(fd, record, length);
     sys_close(fd);
-    if (written == (long)str_len(uri)) sys_rename(tmp, path);
+    if (written == (long)length) sys_rename(tmp, path);
 }
 
 struct controller_command {
@@ -655,6 +687,8 @@ static void handle_soloist_ws_json(const char *json) {
                 log_msg("[bridge] Current track: ");
                 log_msg(current_track_uri);
                 log_msg("\n");
+            } else if (selection_needs_observation()) {
+                publish_track(current_track_uri);
             }
         }
     }

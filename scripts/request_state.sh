@@ -3,6 +3,7 @@ umask 077
 STATE_DIR="$BASE_DIR/data/requests"
 mkdir -p "$STATE_DIR" || exit 1
 exec 8>"$STATE_DIR/control.lock"
+SELECTION_PENDING=0
 
 request_cleanup() {
     if [ -n "${CLI_PID:-}" ]; then
@@ -12,7 +13,8 @@ request_cleanup() {
         wait "$CLI_PID" 2>/dev/null || true
         CLI_PID=
     fi
-    rm -f "$STATE_DIR/cli.$$" "$STATE_DIR/now.$$" "$STATE_DIR/track.$$" "$STATE_DIR/body.$$" "$STATE_DIR/headers.$$"
+    [ "$SELECTION_PENDING" = 0 ] || rm -f "$STATE_DIR/selection.pending"
+    rm -f "$STATE_DIR/cli.$$" "$STATE_DIR/now.$$" "$STATE_DIR/selection.$$" "$STATE_DIR/body.$$" "$STATE_DIR/headers.$$"
 }
 
 request_traps() {
@@ -29,7 +31,7 @@ request_report() {
 
 # The CLI cannot retain either lock after its worker exits.
 request_cli() {
-    (exec 8>&- 9>&-; LD_LIBRARY_PATH="$BASE_DIR/lib64" exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 "$@") > "$STATE_DIR/cli.$$" 2>/dev/null &
+    (trap - EXIT; exec 8>&- 9>&-; LD_LIBRARY_PATH="$BASE_DIR/lib64" exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 "$@") > "$STATE_DIR/cli.$$" 2>/dev/null &
     CLI_PID=$!
     CLI_TICKS_LEFT=${CLI_TICKS_LEFT:-30}
     cli_timed_out=0
@@ -87,7 +89,13 @@ request_dispatch() {
         return 1
     fi
     if [ "$1" = auto-next ]; then
-        if [ -z "$2" ] || [ "$(cat "$STATE_DIR/track" 2>/dev/null)" != "$2" ]; then
+        observation=$(cat "$STATE_DIR/track" 2>/dev/null)
+        observed_uri=$(printf '%s\n' "$observation" | head -n 1)
+        if [ -z "$2" ] || [ "$observed_uri" != "$2" ] || [ -f "$STATE_DIR/selection.pending" ]; then
+            flock -u 8
+            return 0
+        fi
+        if [ -f "$STATE_DIR/selection" ] && [ "$observation" = "$(cat "$STATE_DIR/selection" 2>/dev/null)" ]; then
             flock -u 8
             return 0
         fi
@@ -119,15 +127,29 @@ request_dispatch() {
         fi
         sleep 0.3 # Allow Alice to release ALSA dmix, as in the bridge's previous play path.
     fi
+    if [ "$1" = play ] && [ -n "${2:-}" ]; then
+        selection_before=$(cat "$STATE_DIR/track" 2>/dev/null)
+        if ! printf '%s\n' "$selection_before" > "$STATE_DIR/selection.$$" ||
+           ! mv -f "$STATE_DIR/selection.$$" "$STATE_DIR/selection.pending"; then
+            request_report "$action" selection 1
+            flock -u 8
+            return 1
+        fi
+        SELECTION_PENDING=1
+    fi
     request_cli "$@" >/dev/null
     result=$?
-    if [ "$result" = 0 ] && [ "$1" = play ] && [ -n "${2:-}" ]; then
-        # Close the gap before the bridge observes the selected track over WebSocket.
-        if ! printf '%s' "$2" > "$STATE_DIR/track.$$" || ! mv -f "$STATE_DIR/track.$$" "$STATE_DIR/track"; then
-            rm -f "$STATE_DIR/track" "$STATE_DIR/track.$$"
-            request_report "$action" track 1
-            result=1
+    if [ "$SELECTION_PENDING" = 1 ]; then
+        if [ "$result" = 0 ]; then
+            if ! mv -f "$STATE_DIR/selection.pending" "$STATE_DIR/selection"; then
+                # Retain pending on commit failure: automatic recovery must fail closed.
+                request_report "$action" selection 1
+                result=1
+            fi
+        else
+            rm -f "$STATE_DIR/selection.pending"
         fi
+        SELECTION_PENDING=0
     fi
     [ "$result" = 0 ] || request_report "$action" dispatch "$result"
     flock -u 8
