@@ -290,7 +290,13 @@ cmd_update() {
     fi
 
     printf "Распаковка обновления...\n"
-    tar -xzf "$ARCHIVE" -C "$TMP_DIR"
+    if gzip -d -c "$ARCHIVE" 2>/dev/null | tar -xf - -C "$TMP_DIR" 2>/dev/null; then
+        :
+    elif gunzip -c "$ARCHIVE" 2>/dev/null | tar -xf - -C "$TMP_DIR" 2>/dev/null; then
+        :
+    else
+        tar -xzf "$ARCHIVE" -C "$TMP_DIR"
+    fi
 
     # Stop current services
     printf "Остановка старых служб...\n"
@@ -331,10 +337,11 @@ cmd_update() {
         chmod 755 "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
     fi
 
-    # Update CLI itself
+    # Update CLI itself safely (atomic rename so running script is not truncated)
     if [ -f "$TMP_DIR/scripts/soloist-cli" ]; then
-        cp -f "$TMP_DIR/scripts/soloist-cli" "$INSTALL_DIR/bin/soloist-cli"
-        chmod 755 "$INSTALL_DIR/bin/soloist-cli"
+        cp -f "$TMP_DIR/scripts/soloist-cli" "$INSTALL_DIR/bin/soloist-cli.new"
+        chmod 755 "$INSTALL_DIR/bin/soloist-cli.new"
+        mv -f "$INSTALL_DIR/bin/soloist-cli.new" "$INSTALL_DIR/bin/soloist-cli"
         ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloist 2>/dev/null || true
         ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
     fi
