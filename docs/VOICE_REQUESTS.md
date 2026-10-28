@@ -1,5 +1,59 @@
 # Voice request lifecycle
 
+## Liked Songs and track radio
+
+Personal commands are recognized before catalog search:
+
+| Say after “Алиса, включи…” | Result |
+| --- | --- |
+| “мои любимые треки”, “любимые треки”, “понравившиеся треки”, “мне нравится” | Play the configured Liked Songs collection. |
+| “избранное”, “мое избранное”, “моё избранное”, “избранные треки” | The same saved collection. |
+| “волну”, “радио”, “волну по этому треку”, “радио по текущему треку” | Start track radio using the current Soloist item. “Этому” and “текущему” work with both “волну” and “радио”. |
+| “волну по треку Кино Группа крови”, “радио по песне Кино Группа крови” | Search for a track, then start radio seeded by that track. |
+
+These commands do not add a song to the library. An explicit song request such
+as “включи песню любимые треки” remains a normal title search.
+
+### Configure Liked Songs once
+
+Use Spotify to start your **Liked Songs** on this Soloist device. Inspect the
+local player state:
+
+```sh
+LD_LIBRARY_PATH=/data/opt/soloist/lib64 /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 now --json
+```
+
+Confirm that `context.decorations.identity.name` identifies Liked Songs, then
+copy **context.uri**, not `item.uri`, into
+`/data/opt/soloist/data/favorites.uri`. The file must contain only that
+`spotify:playlist:` URI with its 22-character alphanumeric ID and an optional
+trailing newline. Keep it private with `chmod 600` and use the same Spotify
+account. No URI is bundled in the repository. Re-capture it after switching
+accounts. This reuses Soloist's account-specific collection context; it does not
+copy or synchronize saved tracks into a new playlist.
+
+Missing, empty, oversized or invalid configuration fails without a catalog
+lookup or changing playback. This avoids playing an unrelated song titled
+“любимые треки”. Liked Songs and current-track radio require no Web API
+credentials or OAuth setup beyond the player's existing login. Named-track
+radio uses the normal search credentials and respects its request timeouts,
+token cache, rate-limit cooldown and censorship when selecting the seed.
+
+Current radio reads `item.uri` from the local `now --json` response rather than
+using a retained bridge observation or the playlist context. A missing item,
+podcast/episode, invalid track ID or CLI failure leaves playback unchanged.
+The small extractor expects the bundled Soloist's compact `item` object with
+`uri` first; if that shape changes it fails closed and must be updated.
+Track-radio `spotify:station:track:` URIs are supported by the bundled player;
+recheck that behavior after changing Soloist itself. Choosing a clean seed does
+not establish that every track subsequently recommended by Spotify is clean.
+
+All playback goes through the existing shared dispatcher. Pause or a newer
+selection cancels an unfinished radio request; shuffle/repeat retain the
+existing behavior. No new daemon, parser dependency or polling loop is added.
+The added tests use fake local playback and HTTP responses; physical voice and
+audio acceptance must be checked separately on the target device.
+
 This change makes request handling deterministic: a complete recognition result
 is considered once, and a superseded search cannot start playback after a newer
 local command has been admitted. It preserves the existing Client Credentials

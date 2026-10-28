@@ -16,7 +16,10 @@ EOF
 cat > "$TEST/app/bin/soloist" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$TEST/controls"
-case "$*" in *' now') cat "$TEST/now_state";; esac
+case "$*" in *' now'|*' now --json')
+    [ ! -f "$TEST/now-failed" ] || exit 19
+    [ ! -f "$TEST/now-delay" ] || { touch "$TEST/started"; while [ ! -f "$TEST/release" ]; do sleep 0.05; done; }
+    cat "$TEST/now_state";; esac
 EOF
 cat > "$TEST/app/bin/curl" <<'EOF'
 #!/bin/sh
@@ -50,6 +53,9 @@ case "$url" in
             denied) code=401; body='{"error":{"status":401}}';;
             malformed) body='not JSON';;
             empty) body='{"tracks":{"items":[]}}';;
+            radio) body='{"tracks":{"items":[{"album":{},"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}]}}';;
+            radio-censor) body='{"tracks":{"items":[{"album":{},"explicit":true,"name":"Test","track_number":1,"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"},{"album":{},"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:BBBBBBBBBBBBBBBBBBBBBB"}]}}';;
+            radio-empty) body='{"tracks":{"items":[]},"artists":{"items":[{"uri":"spotify:artist:BBBBBBBBBBBBBBBBBBBBBB"}]}}';;
             censor) body='{"tracks":{"items":[{"album":{},"artists":[],"explicit":true,"name":"Test","track_number":1,"uri":"spotify:track:EXPLICIT"},{"album":{},"artists":[],"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:CLEAN"}]}}';;
             *) body='{"tracks":{"items":[{"album":{},"artists":[{"name":"Queen"}],"explicit":false,"name":"Don\u0027t Stop Me Now","track_number":1,"uri":"spotify:track:TEST123"}]}}';;
         esac;;
@@ -61,7 +67,7 @@ chmod +x "$TEST/app/bin/"*
 SEARCH="$TEST/app/scripts/search_and_play.sh"
 failures=0
 check() { if "$@"; then printf 'PASS %s\n' "$label"; else printf 'FAIL %s\n' "$label"; failures=$((failures+1)); fi; }
-reset() { rm -f "$TEST/controls" "$TEST/calls" "$TEST/delay" "$TEST/auth-delay" "$TEST/started" "$TEST/release" "$TEST/app/data/censorship"; rm -rf "$TEST/app/data/requests"; rm -f "$TEST/tmp/spotify_token"*; echo ok > "$TEST/mode"; echo paused > "$TEST/now_state"; }
+reset() { rm -f "$TEST/controls" "$TEST/calls" "$TEST/delay" "$TEST/auth-delay" "$TEST/started" "$TEST/release" "$TEST/app/data/censorship" "$TEST/app/data/favorites.uri" "$TEST/now-failed" "$TEST/now-delay"; rm -rf "$TEST/app/data/requests"; rm -f "$TEST/tmp/spotify_token"*; echo ok > "$TEST/mode"; echo paused > "$TEST/now_state"; }
 wait_started() { tries=0; while [ ! -f "$TEST/started" ] && [ "$tries" -lt 100 ]; do sleep 0.05; tries=$((tries+1)); done; }
 control() {
     [ -f "$TEST/app/scripts/control.sh" ] || return 0
@@ -152,6 +158,93 @@ for delayed in delay auth-delay; do
     label="new selection supersedes older $delayed worker"; check test "$(grep -c 'play spotify:' "$TEST/controls")" = 1
     label="concurrent $delayed workers share one token fetch"; check test "$(grep -c 'accounts.spotify.com/api/token' "$TEST/calls")" = 1
 done
+# Personal commands must be resolved before ordinary title search.
+for phrase in 'любимые треки' 'мои любимые треки' 'понравившиеся треки' 'мне нравится' 'избранное' 'мое избранное' 'моё избранное' 'избранные треки'; do
+    reset
+    echo spotify:playlist:BBBBBBBBBBBBBBBBBBBBBB > "$TEST/app/data/favorites.uri"
+    sh "$SEARCH" "включи $phrase" || true
+    label="$phrase plays configured Liked Songs without catalog lookup"
+    check sh -c 'grep -q "play spotify:playlist:BBBBBBBBBBBBBBBBBBBBBB$" "$TEST/controls" && [ ! -s "$TEST/calls" ]'
+done
+for value in missing empty spotify:track:AAAAAAAAAAAAAAAAAAAAAA spotify:playlist:short multiline; do
+    reset
+    case "$value" in
+        missing) :;;
+        empty) : > "$TEST/app/data/favorites.uri";;
+        multiline) printf 'spotify:playlist:BBBBBBBBBBBBBBBBBBBBBB\nextra\n' > "$TEST/app/data/favorites.uri";;
+        *) printf '%s\n' "$value" > "$TEST/app/data/favorites.uri";;
+    esac
+    result=0; sh "$SEARCH" 'включи любимые треки' || result=$?
+    label="$value favorites configuration fails without catalog fallback or playback"
+    check sh -c '[ "$1" != 0 ] && [ ! -s "$TEST/calls" ] && [ ! -s "$TEST/controls" ]' -- "$result"
+done
+reset
+sh "$SEARCH" 'включи песню любимые треки' || true
+label='explicit song title retains ordinary catalog search'; check grep -q 'play spotify:track:TEST123' "$TEST/controls"
+
+for phrase in 'волну' 'радио' 'волну по этому треку' 'волну по текущему треку' 'радио по этому треку' 'радио по текущему треку'; do
+    reset
+    printf '%s\n' '{"type":"playback_state","status":"paused","item":{"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"},"context":{"uri":"spotify:playlist:BBBBBBBBBBBBBBBBBBBBBB"}}' > "$TEST/now_state"
+    sh "$SEARCH" "включи $phrase" || true
+    label="$phrase starts station for actual current item without HTTP"
+    check sh -c 'grep -q "play spotify:station:track:AAAAAAAAAAAAAAAAAAAAAA$" "$TEST/controls" && [ ! -s "$TEST/calls" ]'
+done
+for state in '{"item":null,"context":{"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}}' '{"item":{"uri":"spotify:episode:AAAAAAAAAAAAAAAAAAAAAA"}}' '{"item":{"uri":"spotify:track:short"}}' 'not JSON'; do
+    reset
+    printf '%s\n' "$state" > "$TEST/now_state"
+    result=0; sh "$SEARCH" 'включи волну по этому треку' || result=$?
+    label='missing/non-track/invalid current item cannot start radio or catalog search'
+    check sh -c '[ "$1" != 0 ] && ! grep -q " play" "$TEST/controls" && [ ! -s "$TEST/calls" ]' -- "$result"
+done
+reset
+touch "$TEST/now-failed"
+result=0; sh "$SEARCH" 'включи радио' || result=$?
+label='current-state failure is nonzero without playback'; check sh -c '[ "$1" != 0 ] && ! grep -q " play" "$TEST/controls" && [ ! -s "$TEST/calls" ]' -- "$result"
+
+for phrase in 'волну по треку Test' 'радио по песне Test' 'волну по Test'; do
+    reset
+    echo radio > "$TEST/mode"
+    sh "$SEARCH" "включи $phrase" || true
+    label="$phrase resolves a track and plays its station"
+    check sh -c 'grep -q "q=test&type=track" "$TEST/calls" && grep -q "play spotify:station:track:AAAAAAAAAAAAAAAAAAAAAA$" "$TEST/controls"'
+done
+reset
+echo radio-empty > "$TEST/mode"
+result=0; sh "$SEARCH" 'включи волну по треку Test' || result=$?
+label='named radio never falls back to an artist/album'; check sh -c '[ "$1" != 0 ] && [ ! -s "$TEST/controls" ] && [ "$(wc -l < "$TEST/calls")" = 2 ]' -- "$result"
+reset
+echo radio-censor > "$TEST/mode"
+touch "$TEST/app/data/censorship"
+sh "$SEARCH" 'включи радио по треку Test' || true
+label='named radio preserves censorship when selecting its seed'; check grep -q 'play spotify:station:track:BBBBBBBBBBBBBBBBBBBBBB$' "$TEST/controls"
+for phrase in 'волну по' 'радио по треку'; do
+    reset
+    result=0; sh "$SEARCH" "включи $phrase" || result=$?
+    label='missing radio title fails without search or playback'; check sh -c '[ "$1" != 0 ] && [ ! -s "$TEST/calls" ] && [ ! -s "$TEST/controls" ]' -- "$result"
+done
+reset
+echo radio > "$TEST/mode"
+sh "$SEARCH" 'включи радио по музыку' || true
+label='radio seed named music does not trigger generic resume'; check grep -q 'play spotify:station:track:AAAAAAAAAAAAAAAAAAAAAA$' "$TEST/controls"
+
+for kind in current named; do
+    reset
+    if [ "$kind" = current ]; then
+        touch "$TEST/now-delay"
+        echo '{"item":{"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}}' > "$TEST/now_state"
+        phrase='включи волну по этому треку'
+    else
+        echo radio > "$TEST/mode"; touch "$TEST/delay"
+        phrase='включи радио по треку Test'
+    fi
+    sh "$SEARCH" "$phrase" & older=$!
+    wait_started
+    control pause
+    touch "$TEST/release"
+    wait "$older" || true
+    label="pause supersedes $kind radio before playback"; check sh -c '! grep -q "play spotify:" "$TEST/controls"'
+done
+
 # Hold the first worker immediately before dispatch, while a newer command is
 # admitted. Real flock still performs every lock operation; only scheduling is controlled.
 REAL_FLOCK=$(command -v flock)
