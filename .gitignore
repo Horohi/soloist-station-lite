@@ -5,8 +5,9 @@ spotify_api.conf
 data/
 cache/
 
-# Archives
+# Archives & Build Artifacts
 *.tar.gz
 *.zip
 *.yap
 *.yampkg
+lib64/
