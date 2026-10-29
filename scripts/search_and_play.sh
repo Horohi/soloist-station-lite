@@ -123,7 +123,10 @@ if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
     exit 1
 fi
 
-CURL_OPTS="--resolve api.spotify.com:443:5.175.161.40 --resolve accounts.spotify.com:443:5.175.161.40 -sS --connect-timeout 5 --max-time 15"
+CURL_OPTS="-sS --connect-timeout 5 --max-time 15"
+if grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
+    CURL_OPTS="--resolve api.spotify.com:443:5.175.161.40 --resolve accounts.spotify.com:443:5.175.161.40 $CURL_OPTS"
+fi
 
 # A separate API lock serializes token refresh and cooldown without blocking pause.
 exec 9>"$STATE_DIR/api.lock"
