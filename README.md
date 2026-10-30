@@ -3,7 +3,7 @@
 > **Полноценный Spotify Connect клиент на базе официального движка Spotify Soloist (ARM64)**  
 > Поддерживает все умные колонки Яндекс с 64-битным ядром Linux (`aarch64`):
 > - **Станция Лайт 1 & 2** (`yandexmicro`, `plum`)
-> - **Станция Мини 1, 2, 3, 3 Про** (`station-mini`, `station-mini2`, `bergamot`, `pickle`)
+> - **Станция Мини 2, 3, 3 Про** (`station-mini2`, `bergamot`, `pickle`)
 > - **Станция 2** (`station-midi` в DT)
 > - **Станция Миди** (`cucumber`)
 
