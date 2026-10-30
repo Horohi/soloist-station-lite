@@ -221,6 +221,16 @@ chmod 755 "$INSTALL_DIR/bin/soloist" "$INSTALL_DIR/lib64/ld-linux-aarch64.so.1"
 chmod 755 "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh"
 
 # 9. SSL Certificates & Hosts SNI Proxy (bypass 403 country restrictions)
+ENABLE_SNI_PROXY="${ENABLE_SNI_PROXY:-}"
+if [ -z "$ENABLE_SNI_PROXY" ]; then
+    printf "Включить встроенный SNI-прокси для обхода блокировок? [Y/n]: "
+    read PROXY_CHOICE
+    case "$PROXY_CHOICE" in
+        [nN]|[nN][oO]) ENABLE_SNI_PROXY="0" ;;
+        *)            ENABLE_SNI_PROXY="1" ;;
+    esac
+fi
+
 echo "Настройка SSL-сертификатов и сети..."
 mount -o remount,rw / 2>/dev/null || true
 # Always put the rootfs back to read-only, even if a later step fails (set -e)
@@ -233,8 +243,9 @@ if [ ! -f "/etc/ssl/certs/ca-certificates.crt" ]; then
     fi
 fi
 
-if ! grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
-    cat << 'HOSTS_EOF' >> /etc/hosts
+if [ "$ENABLE_SNI_PROXY" = "1" ]; then
+    if ! grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
+        cat << 'HOSTS_EOF' >> /etc/hosts
 
 # Spotify SNI Proxy (Bypass 403 geoblock)
 5.175.161.40 accounts.spotify.com
@@ -242,6 +253,9 @@ if ! grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
 5.175.161.40 open.spotify.com
 5.175.161.40 spclient.wg.spotify.com
 HOSTS_EOF
+    fi
+else
+    sed -i -e '/^# Spotify SNI Proxy/d' -e '/^5\.175\.161\.40[[:space:]]/d' /etc/hosts 2>/dev/null || true
 fi
 
 # 10. Generate start.sh
