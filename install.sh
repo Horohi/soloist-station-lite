@@ -283,6 +283,7 @@ sleep 2
 
 export APULSE_PLAYBACK_DEVICE=plug:default
 export APULSE_DIAG=0
+export ALSA_PLUGIN_DIR=/data/opt/soloist/lib64/alsa-lib
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export MALLOC_ARENA_MAX=1
