@@ -813,6 +813,78 @@ static inline void set_led_visualizer(int enable) { set_led_visualizer_impl(enab
 static inline void set_led_visualizer(int enable) { (void)enable; }
 #endif
 
+static int is_web_or_culinary_intent(const char *lower) {
+    if (!lower) return 0;
+
+    // Explicit music/Spotify markers take absolute priority for music playback
+    if (str_contains(lower, "песн") ||
+        str_contains(lower, "трек") ||
+        str_contains(lower, "музык") ||
+        str_contains(lower, "альбом") ||
+        str_contains(lower, "плейлист") ||
+        str_contains(lower, "радио") ||
+        str_contains(lower, "спотифай") ||
+        str_contains(lower, "spotify") ||
+        str_contains(lower, "исполнител") ||
+        str_contains(lower, "групп")) {
+        return 0;
+    }
+
+    // Web search and general Yandex cloud intents (delegate to Yandex cloud Alice)
+    if (str_contains(lower, "интернет") ||
+        str_contains(lower, "яндекс") ||
+        str_contains(lower, "гугл") ||
+        str_contains(lower, "google") ||
+        str_contains(lower, "в поиске") ||
+        str_contains(lower, "поищи") ||
+        str_contains(lower, "в сети") ||
+        str_contains(lower, "информаци") ||
+        str_contains(lower, "новост") ||
+        str_contains(lower, "погод") ||
+        str_contains(lower, "пробк") ||
+        str_contains(lower, "курс") ||
+        str_contains(lower, "перевод") ||
+        str_contains(lower, "фильм") ||
+        str_contains(lower, "кино") ||
+        str_contains(lower, "сериал") ||
+        str_contains(lower, "видео") ||
+        str_contains(lower, "аптек") ||
+        str_contains(lower, "магазин") ||
+        str_contains(lower, "найди как") ||
+        str_contains(lower, "найди где") ||
+        str_contains(lower, "найди что") ||
+        str_contains(lower, "найди кто") ||
+        str_contains(lower, "найди почему") ||
+        str_contains(lower, "найди сколько") ||
+        str_contains(lower, "найди куда") ||
+        str_contains(lower, "найди когда") ||
+        str_contains(lower, "поищи как") ||
+        str_contains(lower, "поищи где") ||
+        str_contains(lower, "расскажи") ||
+        str_contains(lower, "объясни")) {
+        return 1;
+    }
+
+    // Culinary, cooking, and Mealie recipe intents (delegate to Quasar Bridge & Mealie)
+    if (str_contains(lower, "рецепт") ||
+        str_contains(lower, "ингредиент") ||
+        str_contains(lower, "приготов") ||
+        str_contains(lower, "готовк") ||
+        str_contains(lower, "кулинар") ||
+        str_contains(lower, "блюд") ||
+        str_contains(lower, "шаг") ||
+        str_contains(lower, "мили") ||
+        str_contains(lower, "mealie") ||
+        str_contains(lower, "граммовк") ||
+        str_contains(lower, "пропорци") ||
+        str_contains(lower, "покупк") ||
+        str_contains(lower, "духовк")) {
+        return 1;
+    }
+
+    return 0;
+}
+
 static void handle_voice_recognition(int quasar_fd, const char *text, unsigned long text_len) {
     char lower_buf[512];
     char raw_buf[512];
@@ -825,6 +897,11 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     log_msg("[bridge] Voice command triggered: \"");
     log_msg(lower_buf);
     log_msg("\"\n");
+
+    if (is_web_or_culinary_intent(lower_buf)) {
+        log_msg("[bridge] Web search or culinary intent, leaving for Alice / Quasar Bridge\n");
+        return;
+    }
 
     // An explicit catalog search ("включи песню ...") must not be hijacked by control words in the title
     if (!is_explicit_search(lower_buf)) {
@@ -1667,9 +1744,15 @@ void _start(void) {
                         unsigned long state_len = 0;
                         if (voice_state_payload(frame_body, frame_len, &state_payload, &state_len)) {
                             uint64_t alice_state = 0;
-                            if (find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state) &&
-                                alice_state != 0 && now < cancel_alice_until_ms) {
-                                send_cancel_alice(quasar_fd);
+                            if (find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state)) {
+                                if (alice_state == 1) {
+                                    // User said "Alice" (wake-word spotted): clear suppression window immediately
+                                    // so the dialog is not killed and user can speak.
+                                    cancel_alice_until_ms = 0;
+                                } else if ((alice_state == 2 || alice_state == 3) && now < cancel_alice_until_ms) {
+                                    // Suppress Alice cloud processing or TTS response from a hijacked Spotify command
+                                    send_cancel_alice(quasar_fd);
+                                }
                             }
                         }
                         const uint8_t *text_bytes = 0;
