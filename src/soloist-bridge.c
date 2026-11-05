@@ -638,6 +638,26 @@ static int json_find_str(const char *json, const char *key, char *out, unsigned 
     return 0;
 }
 
+static int json_find_bool(const char *json, const char *key, int *val) {
+    if (!json || !key || !val) return 0;
+    unsigned long klen = str_len(key);
+    for (unsigned long i = 0; json[i]; i++) {
+        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
+            unsigned long idx = i + 1 + klen + 1;
+            while (json[idx] == ' ' || json[idx] == ':') idx++;
+            if (mem_equal(json + idx, "true", 4)) {
+                *val = 1;
+                return 1;
+            }
+            if (mem_equal(json + idx, "false", 5)) {
+                *val = 0;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int json_find_uint64(const char *json, const char *key, uint64_t *val) {
     if (!json || !key || !val) return 0;
     unsigned long klen = str_len(key);
@@ -739,6 +759,7 @@ static int is_explicit_search(const char *lower) {
 }
 
 static int spotify_is_active = 0;
+static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify Connect device
 static char current_track_uri[128] = {0};
 static char last_auto_next_uri[128] = {0};
 static int playback_status = 0; // 0=stopped, 1=playing, 2=paused, 3=buffering
@@ -768,6 +789,11 @@ static void handle_soloist_ws_json(const char *json) {
             spotify_is_active = 0;
             run_controller("clean-cache-full", 0);
         }
+    }
+
+    int active_bool = 0;
+    if (json_find_bool(json, "is_active", &active_bool)) {
+        spotify_device_is_active = active_bool;
     }
 
     uint64_t dur = 0;
@@ -1404,7 +1430,7 @@ static void led_visualizer_tick(void) {
     }
     if (!g_led_hw.detected) return;
 
-    if (playback_status != 1) {
+    if (playback_status != 1 || !spotify_device_is_active) {
         if (g_led_last_active) {
             audio_shm_detach();
             led_all_off();
@@ -1931,7 +1957,7 @@ void _start(void) {
 
         // Auto-Next Watchdog (Issue #4): Detect track end stall caused by apulse missing underflow callback
         if (soloist_ws_fd >= 0 && soloist_ws_handshake) {
-            if ((playback_status == 1 || playback_status == 3) && track_duration_ms > 2000) {
+            if (spotify_device_is_active && (playback_status == 1 || playback_status == 3) && track_duration_ms > 2000) {
                 uint64_t current_pos = base_position_ms;
                 if (playback_speed == 1 && local_recorded_ms > 0) {
                     int64_t elapsed = now - local_recorded_ms;
