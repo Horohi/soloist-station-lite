@@ -1256,6 +1256,7 @@ static int64_t local_recorded_ms = 0;
 static int playback_speed = 0;
 static int64_t stuck_since_ms = 0;
 static int64_t last_auto_next_time = 0;
+static int64_t last_cache_clean_ms = 0;
 
 static void append_artist_name(char *dst, unsigned long max_dst, const char *name) {
     if (!name || !*name) return;
@@ -1401,6 +1402,7 @@ static void handle_soloist_ws_json(const char *json) {
             playback_status = 0;
             playback_speed = 0;
             spotify_is_active = 0;
+            last_cache_clean_ms = now_ms();
             run_controller("clean-cache-full", 0);
         }
     }
@@ -1427,12 +1429,34 @@ static void handle_soloist_ws_json(const char *json) {
     }
 
     char uri_buf[128];
-    if (json_find_str(json, "uri", uri_buf, sizeof(uri_buf))) {
+    int got_uri = 0;
+    if (json && *json == '{') {
+        const char *root_end = json_span_end(json, 0);
+        const char *item_val = json_find_key_in_obj(json, root_end, "item");
+        if (item_val && *item_val == '{') {
+            const char *item_end = json_span_end(item_val, root_end);
+            got_uri = json_find_str_bounded(item_val, item_end, "uri", uri_buf, sizeof(uri_buf));
+        }
+    }
+    if (!got_uri) {
+        got_uri = json_find_str(json, "uri", uri_buf, sizeof(uri_buf));
+    }
+    if (got_uri) {
         if (uri_buf[0] == 's' && uri_buf[1] == 'p' && uri_buf[2] == 'o' && uri_buf[3] == 't') {
-            if (!str_equal(current_track_uri, uri_buf)) {
-                if (current_track_uri[0] != 0) {
+            int is_track_uri = (str_len(uri_buf) >= 14 && mem_equal(uri_buf, "spotify:track:", 14));
+            if (is_track_uri && !str_equal(current_track_uri, uri_buf)) {
+                int64_t cnow = now_ms();
+                if (current_track_uri[0] != 0 && (cnow - last_cache_clean_ms >= 20000)) {
+                    last_cache_clean_ms = cnow;
                     run_controller("clean-cache", 0);
                 }
+                str_copy(current_track_uri, uri_buf, sizeof(current_track_uri));
+                publish_track(current_track_uri);
+                stuck_since_ms = 0;
+                log_msg("[bridge] Current track: ");
+                log_msg(current_track_uri);
+                log_msg("\n");
+            } else if (!is_track_uri && current_track_uri[0] == 0) {
                 str_copy(current_track_uri, uri_buf, sizeof(current_track_uri));
                 publish_track(current_track_uri);
                 stuck_since_ms = 0;
@@ -3060,7 +3084,13 @@ void _start(void) {
             }
         }
 
-        // 5. LED Visualizer / Equalizer update & request processing
+        // 5. Periodic tmpfs audio cache trim (keeps cache <16MB on 238MB RAM devices)
+        if (playback_status == 1 && (now_sync - last_cache_clean_ms >= 45000)) {
+            last_cache_clean_ms = now_sync;
+            run_controller("clean-cache", 0);
+        }
+
+        // 6. LED Visualizer / Equalizer update & request processing
         check_led_request();
         led_visualizer_tick(now_ms());
     }

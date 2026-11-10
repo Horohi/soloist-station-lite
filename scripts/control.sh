@@ -32,15 +32,29 @@ if [ "${SOLOIST_BRIDGE_ADMISSION:-}" = 1 ]; then
     printf A >&3 || exit 1
     exec 3>&-
 fi
+CACHE_DIR="${SOLOIST_CACHE_DIR:-/tmp/soloist_cache/cache}"
+if [ -n "${YAM_RUN:-}" ] && [ -z "${SOLOIST_CACHE_DIR:-}" ] && [ -d "$YAM_RUN/soloist_cache/cache" ]; then
+    CACHE_DIR="$YAM_RUN/soloist_cache/cache"
+fi
 if [ "$1" = clean-cache ]; then
-    if [ -d /tmp/soloist_cache/cache ]; then
-        find /tmp/soloist_cache/cache -type f -amin +1 -delete 2>/dev/null || true
-        find /tmp/soloist_cache/cache -type f -mmin +1 -delete 2>/dev/null || true
+    if [ -d "$CACHE_DIR" ]; then
+        # BusyBox find lacks -amin and -delete; use -mmin +1 -exec rm -f {} +
+        find "$CACHE_DIR" -type f -mmin +1 -exec rm -f {} + 2>/dev/null || true
+        CACHE_KB=$(du -sk "$CACHE_DIR" 2>/dev/null | awk '{print $1}')
+        if [ "${CACHE_KB:-0}" -gt 16384 ]; then
+            for f in $(find "$CACHE_DIR" -type f -exec ls -1t {} + 2>/dev/null | tail -n +4); do
+                rm -f "$f" 2>/dev/null || true
+            done
+        fi
+        CACHE_KB=$(du -sk "$CACHE_DIR" 2>/dev/null | awk '{print $1}')
+        if [ "${CACHE_KB:-0}" -gt 24576 ]; then
+            rm -rf "$CACHE_DIR"/* 2>/dev/null || true
+        fi
     fi
     exit 0
 elif [ "$1" = clean-cache-full ]; then
-    if [ -d /tmp/soloist_cache/cache ]; then
-        rm -rf /tmp/soloist_cache/cache/* 2>/dev/null || true
+    if [ -d "$CACHE_DIR" ]; then
+        rm -rf "$CACHE_DIR"/* 2>/dev/null || true
     fi
     exit 0
 elif [ "$1" = volume ]; then

@@ -224,9 +224,11 @@ cmd_clean() {
         fi
     done
 
-    # 3. Clean old audio stream chunks from cache
-    if [ -d /tmp/soloist_cache/cache ]; then
-        find /tmp/soloist_cache/cache -type f -amin +15 -delete 2>/dev/null || true
+    # 3. Clean old audio stream chunks from cache (BusyBox find compatible)
+    if [ -x "$INSTALL_DIR/scripts/control.sh" ]; then
+        sh "$INSTALL_DIR/scripts/control.sh" clean-cache 2>/dev/null || true
+    elif [ -d /tmp/soloist_cache/cache ]; then
+        find /tmp/soloist_cache/cache -type f -mmin +1 -exec rm -f {} + 2>/dev/null || true
     fi
 
     # 4. Clean update leftovers in /bkupgrade

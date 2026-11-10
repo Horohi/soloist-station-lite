@@ -200,7 +200,7 @@ if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
     ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
 fi
 
-printf "v1.3.5.1\n" > "$INSTALL_DIR/version"
+printf "v1.3.5.2\n" > "$INSTALL_DIR/version"
 
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
@@ -358,17 +358,16 @@ fi
         fi
     done
 
-    # 2. RAM guard: keep audio stream cache under 20MB so tmpfs never exhausts RAM
+    # 2. RAM guard: keep audio stream cache under 16MB so tmpfs never exhausts RAM / zram
     while true; do
-        sleep 120
-        if [ -d /tmp/soloist_cache/cache ]; then
+        sleep 30
+        if [ -f /data/opt/soloist/scripts/control.sh ]; then
+            sh /data/opt/soloist/scripts/control.sh clean-cache >/dev/null 2>&1 || true
+        elif [ -d /tmp/soloist_cache/cache ]; then
+            find /tmp/soloist_cache/cache -type f -mmin +1 -exec rm -f {} + 2>/dev/null || true
             CACHE_KB=\$(du -sk /tmp/soloist_cache/cache 2>/dev/null | awk '{print \$1}')
-            if [ "\${CACHE_KB:-0}" -gt 20480 ]; then
-                find /tmp/soloist_cache/cache -type f -amin +10 -delete 2>/dev/null || true
-                CACHE_KB_AFTER=\$(du -sk /tmp/soloist_cache/cache 2>/dev/null | awk '{print \$1}')
-                if [ "\${CACHE_KB_AFTER:-0}" -gt 20480 ]; then
-                    rm -rf /tmp/soloist_cache/cache/* 2>/dev/null || true
-                fi
+            if [ "\${CACHE_KB:-0}" -gt 16384 ]; then
+                rm -rf /tmp/soloist_cache/cache/* 2>/dev/null || true
             fi
         fi
     done

@@ -121,22 +121,45 @@ with tempfile.TemporaryDirectory() as td:
         run_res = subprocess.run([str(bin_file)])
         check(run_res.returncode == 0, "LED voice triggers match correctly and preserve smart home lighting")
 
-# 2. Control script cache cleanup tests
+# 2. Control script cache cleanup tests (BusyBox find -mmin + size cap)
 with tempfile.TemporaryDirectory() as td:
     tpath = pathlib.Path(td)
-    cache_dir = tpath / "tmp_cache" / "cache"
+    cache_dir = tpath / "tmp_cache" / "cache" / "ab"
     cache_dir.mkdir(parents=True)
     old_file = cache_dir / "old_chunk.dat"
     old_file.write_text("old")
     os.utime(old_file, (os.path.getatime(old_file) - 120, os.path.getmtime(old_file) - 120))
+    fresh_file = cache_dir / "fresh_chunk.dat"
+    fresh_file.write_text("fresh")
 
     ctrl_sh = ROOT / "scripts/control.sh"
     env = os.environ.copy()
+    env["SOLOIST_CACHE_DIR"] = str(tpath / "tmp_cache" / "cache")
     proc = subprocess.run(["sh", str(ctrl_sh), "clean-cache"], env=env, capture_output=True)
     check(proc.returncode == 0, "control.sh clean-cache exits with code 0")
+    check(not old_file.exists(), "control.sh clean-cache removes >1m old chunks without -amin/-delete")
+    check(fresh_file.exists(), "control.sh clean-cache keeps recent chunk under 16MB")
+
+    # Exceed 16MB with fresh files and verify oldest are trimmed
+    for idx in range(5):
+        f = cache_dir / f"big_{idx}.file"
+        f.write_bytes(b"\0" * (4 * 1024 * 1024))
+        os.utime(f, (1000000 + idx * 10, 1000000 + idx * 10))
+    # Touch fresh_file as newest? No, use recent mtime so -mmin +1 keeps them for size-cap test
+    import time
+    base_t = time.time() - 5
+    for idx in range(5):
+        f = cache_dir / f"big_{idx}.file"
+        os.utime(f, (base_t + idx, base_t + idx))
+    os.utime(fresh_file, (base_t + 10, base_t + 10))
+    proc_cap = subprocess.run(["sh", str(ctrl_sh), "clean-cache"], env=env, capture_output=True)
+    check(proc_cap.returncode == 0, "control.sh clean-cache enforces 16MB cap exits 0")
+    remaining = sorted(p.name for p in cache_dir.iterdir())
+    check(len(remaining) <= 3 and "big_0.file" not in remaining, f"control.sh trims excess >16MB chunks ({remaining})")
 
     proc_full = subprocess.run(["sh", str(ctrl_sh), "clean-cache-full"], env=env, capture_output=True)
     check(proc_full.returncode == 0, "control.sh clean-cache-full exits with code 0")
+    check(not list((tpath / "tmp_cache" / "cache").iterdir()), "control.sh clean-cache-full clears cache directory")
 
 # 3. Soloist CLI tests
 cli_sh = ROOT / "scripts/soloist-cli"
