@@ -406,9 +406,12 @@ static void send_cancel_alice(int quasar_fd) {
 }
 
 static struct soloist_duck_shm *g_duck_shm = 0;
+static int g_ducking_active = 0;
 static int g_alsa_yield_active = 0;
 static int64_t g_alsa_yield_since_ms = 0;
 static int64_t g_tts_hold_until_ms = 0;
+static uint64_t g_alice_state = 0;
+static int64_t g_led_alice_yield_until_ms = 0;
 
 static void duck_shm_init(void) {
     sys_unlink(SOLOIST_YIELD_DEFAULT_PATH);
@@ -426,6 +429,7 @@ static void duck_shm_init(void) {
 }
 
 static void set_ducking(int active, int64_t now) {
+    g_ducking_active = active ? 1 : 0;
     if (!g_duck_shm) return;
     if (active) {
         __atomic_store_n(&g_duck_shm->until_ms, now + 60000, __ATOMIC_RELEASE);
@@ -433,6 +437,18 @@ static void set_ducking(int active, int64_t now) {
     } else {
         __atomic_store_n(&g_duck_shm->active, 0, __ATOMIC_RELEASE);
     }
+}
+
+static inline int is_alice_visual_state(uint64_t st) {
+    return (st == 1 || st == 2 || st == 3 || st == 5);
+}
+
+/* Yield /sys/class/leds whenever maind renders Alice listening/thinking/speaking LEDs */
+static inline int alice_owns_leds(int64_t now) {
+    return is_alice_visual_state(g_alice_state) ||
+           g_ducking_active ||
+           now < g_tts_hold_until_ms ||
+           now < g_led_alice_yield_until_ms;
 }
 
 static void set_alsa_yield(int enable, int64_t now) {
@@ -550,6 +566,9 @@ static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
     g_tts_hold_until_ms = 0;
     set_ducking(0, tnow);
     set_alsa_yield(0, tnow);
+    if (is_alice_visual_state(g_alice_state) && g_led_alice_yield_until_ms < tnow + 450) {
+        g_led_alice_yield_until_ms = tnow + 450;
+    }
     send_cancel_alice(quasar_fd);
 }
 
@@ -1821,6 +1840,9 @@ static int g_led_color_mode = 0;    // 0=white (Nothing Phone style), 1=rainbow,
 static int g_led_brightness = 180;  // 1-255, default 180
 static uint64_t g_led_frame = 0;
 static int g_led_last_active = 0;
+static int64_t g_last_led_tick_ms = 0;
+static uint8_t g_led_last_rgb[24][3] = {{0}};
+static int g_led_rgb_cache_valid = 0;
 static uint32_t g_bass_level = 0;
 static uint32_t g_treble_level = 0;
 static int32_t *g_audio_shm_ptr = 0;
@@ -1879,16 +1901,16 @@ static uint32_t compute_band_energy(int band_idx, uint32_t e, uint32_t total_rms
 
     // Floor tracks sustained signal slowly up and faster down
     if (e < fl) {
-        fl = (uint32_t)(((uint64_t)fl * 82 + (uint64_t)e * 18) / 100);
+        fl = (uint32_t)(((uint64_t)fl * 86 + (uint64_t)e * 14) / 100);
     } else {
-        fl = (uint32_t)(((uint64_t)fl * 93 + (uint64_t)e * 7) / 100);
+        fl = (uint32_t)(((uint64_t)fl * 95 + (uint64_t)e * 5) / 100);
     }
 
-    // Peak tracks beats instantaneously up and decays cleanly toward floor
+    // Peak tracks beats instantaneously up and decays smoothly toward floor
     if (e > pk) {
         pk = e;
     } else {
-        uint32_t dec = ((uint64_t)fl * 3 < (uint64_t)pk) ? 94 : 97;
+        uint32_t dec = ((uint64_t)fl * 3 < (uint64_t)pk) ? 95 : 98;
         pk = (uint32_t)(((uint64_t)pk * dec + (uint64_t)fl * (100 - dec)) / 100);
     }
 
@@ -1906,13 +1928,13 @@ static uint32_t compute_band_energy(int band_idx, uint32_t e, uint32_t total_rms
     uint32_t ex = (e > fl) ? (e - fl) : 0;
     uint32_t norm = (ex >= span) ? 255 : (uint32_t)(((uint64_t)ex * 255) / span);
 
-    // 28% deadzone keeps sustained pads dark so only genuine peaks stand out
-    if (norm <= 72) return 0;
+    // 25% deadzone keeps sustained beds dark while blending quad/cubic gamma smoothly
+    if (norm <= 64) return 0;
 
-    uint32_t scaled = ((norm - 72) * 255) / (255 - 72);
-    // Cubic gamma curve matches human LED brightness perception and emphasizes peaks
+    uint32_t scaled = ((norm - 64) * 255) / (255 - 64);
     uint32_t sq = (scaled * scaled) / 255;
-    return (sq * scaled) / 255;
+    uint32_t cb = (sq * scaled) / 255;
+    return (sq + cb * 2) / 3;
 }
 
 // Fixed-point (<<8) 3-band 2-pole crossover across Left channel dmix buffer (7680 frames @ 48kHz)
@@ -2090,15 +2112,27 @@ static void led_probe(void) {
     }
 }
 
-static void led_all_off(void) {
+static void led_reset_internal_state(void) {
     audio_shm_detach();
-    for (int i = 0; i < 24; i++) g_prev_zone_val[i] = 0;
+    for (int i = 0; i < 24; i++) {
+        g_prev_zone_val[i] = 0;
+        g_led_last_rgb[i][0] = 0;
+        g_led_last_rgb[i][1] = 0;
+        g_led_last_rgb[i][2] = 0;
+    }
     for (int k = 0; k < 3; k++) {
         g_band_floor[k] = 0;
         g_band_peak[k] = 0;
         g_band_init[k] = 0;
     }
     g_shm_is_32bit = 0;
+    g_led_last_active = 0;
+    g_led_rgb_cache_valid = 0;
+    g_last_led_tick_ms = 0;
+}
+
+static void led_all_off(void) {
+    led_reset_internal_state();
     if (!g_led_hw.detected) return;
     int start = g_led_hw.is_zero_indexed ? 0 : 1;
     int end = start + g_led_hw.num_zones;
@@ -2124,15 +2158,17 @@ static void led_all_off(void) {
             write_sysfs_str(tpath, "led_ring_fb\n");
         }
     }
-    g_led_last_active = 0;
 }
 
 static void set_led_visualizer_impl(int enable) {
     led_probe();
     g_led_enabled = enable ? 1 : 0;
     if (!g_led_enabled) {
-        audio_shm_detach();
-        led_all_off();
+        if (alice_owns_leds(now_ms())) {
+            led_reset_internal_state();
+        } else {
+            led_all_off();
+        }
     }
     const char *state_path = is_yam_mode ? "./data/requests/led_state" : "/data/opt/soloist/data/requests/led_state";
     int fd = sys_open(state_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
@@ -2212,23 +2248,48 @@ static void check_led_request(void) {
     }
 }
 
-static void led_visualizer_tick(void) {
-    if (!g_led_enabled) {
-        if (g_led_last_active) {
-            audio_shm_detach();
-            led_all_off();
-        }
-        return;
+static void write_zone_rgb_if_changed(int i, int z, int r, int g, int b) {
+    char path[80];
+    if (!g_led_rgb_cache_valid || g_led_last_rgb[i][0] != (uint8_t)r) {
+        build_led_path(path, sizeof(path), "red", z);
+        write_sysfs_int(path, r);
+        g_led_last_rgb[i][0] = (uint8_t)r;
     }
+    if (!g_led_rgb_cache_valid || g_led_last_rgb[i][1] != (uint8_t)g) {
+        build_led_path(path, sizeof(path), "green", z);
+        write_sysfs_int(path, g);
+        g_led_last_rgb[i][1] = (uint8_t)g;
+    }
+    if (!g_led_rgb_cache_valid || g_led_last_rgb[i][2] != (uint8_t)b) {
+        build_led_path(path, sizeof(path), "blue", z);
+        write_sysfs_int(path, b);
+        g_led_last_rgb[i][2] = (uint8_t)b;
+    }
+}
+
+static void led_visualizer_tick(int64_t now) {
     if (!g_led_hw.detected) return;
 
-    if (playback_status != 1 || !spotify_device_is_active) {
+    // Protect Alice listening/thinking/speaking LED animations from overwrite or zero-clearing
+    if (alice_owns_leds(now)) {
+        if (g_led_last_active || g_audio_shm_ptr) {
+            led_reset_internal_state();
+        }
+        return;
+    }
+
+    if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
         if (g_led_last_active) {
-            audio_shm_detach();
             led_all_off();
         }
         return;
     }
+
+    // Pace DSP analysis & sysfs LED updates cleanly (~30 FPS) regardless of socket wakeup bursts
+    if (g_last_led_tick_ms != 0 && (now - g_last_led_tick_ms) < 30) {
+        return;
+    }
+    g_last_led_tick_ms = now;
 
     g_led_last_active = 1;
     g_led_frame++;
@@ -2265,7 +2326,6 @@ static void led_visualizer_tick(void) {
 
     int n_zones = g_led_hw.num_zones;
     int start = g_led_hw.is_zero_indexed ? 0 : 1;
-    char path[80];
 
     for (int i = 0; i < n_zones; i++) {
         int z = start + i;
@@ -2291,12 +2351,12 @@ static void led_visualizer_tick(void) {
 
         if (target_energy > 255) target_energy = 255;
 
-        // Smooth decay / instant attack
+        // Smooth rise and exponential release prevent harsh strobe flashes at 30 FPS
         uint32_t prev = g_prev_zone_val[i];
         if (target_energy > prev) {
-            g_prev_zone_val[i] = target_energy; // Instant attack on beat
+            g_prev_zone_val[i] = (prev * 50 + target_energy * 50) / 100;
         } else {
-            g_prev_zone_val[i] = (prev * 42 + target_energy * 58) / 100; // Snappy beat fade-out
+            g_prev_zone_val[i] = (prev * 85 + target_energy * 15) / 100;
         }
 
         uint32_t val = (g_prev_zone_val[i] * (uint32_t)g_led_brightness) / 255;
@@ -2305,7 +2365,7 @@ static void led_visualizer_tick(void) {
         if (g_led_color_mode == 0) {
             r = val; g = val; b = val;
         } else if (g_led_color_mode == 1) {
-            uint32_t hue = (g_led_frame * 3 + (uint32_t)i * (64 / (uint32_t)n_zones)) % 64;
+            uint32_t hue = (g_led_frame * 2 + (uint32_t)i * (64 / (uint32_t)n_zones)) % 64;
             r = (sin64[hue] * val) / 255;
             g = (sin64[(hue + 21) % 64] * val) / 255;
             b = (sin64[(hue + 42) % 64] * val) / 255;
@@ -2323,13 +2383,9 @@ static void led_visualizer_tick(void) {
             r = val; g = val; b = 0;
         }
 
-        build_led_path(path, sizeof(path), "red", z);
-        write_sysfs_int(path, r);
-        build_led_path(path, sizeof(path), "green", z);
-        write_sysfs_int(path, g);
-        build_led_path(path, sizeof(path), "blue", z);
-        write_sysfs_int(path, b);
+        write_zone_rgb_if_changed(i, z, r, g, b);
     }
+    g_led_rgb_cache_valid = 1;
 }
 
 static uint8_t quasar_buf[65536];
@@ -2531,7 +2587,8 @@ void _start(void) {
 
         struct timespec tmo;
         tmo.tv_sec = 0;
-        tmo.tv_nsec = 50000000; // 50ms
+        int led_running = (g_led_enabled && g_led_hw.detected && playback_status == 1 && spotify_device_is_active && !alice_owns_leds(now));
+        tmo.tv_nsec = led_running ? 33000000 : 50000000;
 
         int ret = sys_ppoll(pfd, nfds, &tmo, 0, 0);
         if (ret > 0) {
@@ -2543,6 +2600,8 @@ void _start(void) {
                     sys_close(quasar_fd);
                     quasar_fd = -1;
                     quasar_buf_pos = 0;
+                    g_alice_state = 0;
+                    g_led_alice_yield_until_ms = 0;
                     g_tts_hold_until_ms = 0;
                     set_alsa_yield(0, now);
                     set_ducking(0, now);
@@ -2572,34 +2631,47 @@ void _start(void) {
                         if (voice_state_payload(frame_body, frame_len, &state_payload, &state_len)) {
                             uint64_t alice_state = 0;
                             if (find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state)) {
+                                int64_t st_now = now_ms();
+                                if (is_alice_visual_state(alice_state)) {
+                                    g_alice_state = alice_state;
+                                    if (g_led_alice_yield_until_ms < st_now + 450) {
+                                        g_led_alice_yield_until_ms = st_now + 450;
+                                    }
+                                    led_reset_internal_state();
+                                } else {
+                                    if (is_alice_visual_state(g_alice_state) && g_led_alice_yield_until_ms < st_now + 450) {
+                                        g_led_alice_yield_until_ms = st_now + 450;
+                                    }
+                                    g_alice_state = alice_state;
+                                }
                                 if (alice_state == 1) {
                                     // User said "Alice" (wake-word spotted): clear suppression window immediately
                                     // so the dialog is not killed and user can speak; duck Spotify audio to 20%.
                                     cancel_alice_until_ms = 0;
                                     g_tts_hold_until_ms = 0;
-                                    set_alsa_yield(0, now);
-                                    set_ducking(1, now);
+                                    set_alsa_yield(0, st_now);
+                                    set_ducking(1, st_now);
                                 } else if (alice_state == 2 || alice_state == 3) {
-                                    if (now < cancel_alice_until_ms) {
+                                    if (st_now < cancel_alice_until_ms) {
                                         // Suppress Alice cloud processing or TTS response from a hijacked Spotify command
                                         send_cancel_alice(quasar_fd);
-                                        set_alsa_yield(0, now);
-                                        set_ducking(0, now);
+                                        set_alsa_yield(0, st_now);
+                                        set_ducking(0, st_now);
                                     } else {
                                         if (alice_state == 2) g_tts_hold_until_ms = 0;
-                                        set_ducking(1, now);
-                                        set_alsa_yield(1, now);
+                                        set_ducking(1, st_now);
+                                        set_alsa_yield(1, st_now);
                                     }
                                 } else if (alice_state == 5) {
-                                    if (now >= cancel_alice_until_ms) {
-                                        set_ducking(1, now);
-                                        set_alsa_yield(1, now);
+                                    if (st_now >= cancel_alice_until_ms) {
+                                        set_ducking(1, st_now);
+                                        set_alsa_yield(1, st_now);
                                     }
                                 } else if (alice_state == 0 || alice_state == 6) {
-                                    if (now >= g_tts_hold_until_ms) {
+                                    if (st_now >= g_tts_hold_until_ms) {
                                         g_tts_hold_until_ms = 0;
-                                        set_alsa_yield(0, now);
-                                        set_ducking(0, now);
+                                        set_alsa_yield(0, st_now);
+                                        set_ducking(0, st_now);
                                     }
                                 }
                             }
@@ -2675,6 +2747,8 @@ void _start(void) {
                 sys_close(quasar_fd);
                 quasar_fd = -1;
                 quasar_buf_pos = 0;
+                g_alice_state = 0;
+                g_led_alice_yield_until_ms = 0;
                 g_tts_hold_until_ms = 0;
                 set_alsa_yield(0, now);
                 set_ducking(0, now);
@@ -2988,6 +3062,6 @@ void _start(void) {
 
         // 5. LED Visualizer / Equalizer update & request processing
         check_led_request();
-        led_visualizer_tick();
+        led_visualizer_tick(now_ms());
     }
 }

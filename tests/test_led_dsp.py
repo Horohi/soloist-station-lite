@@ -176,6 +176,149 @@ int main(int argc, char **argv) {{
 }}
 """
 
+LED_TICK_HARNESS = f"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int64_t g_mock_now = 1000;
+static int g_mock_shmid = -1;
+static int32_t g_mock_shm[7680 * 2];
+static int g_led_writes = 0;
+static int g_zero_writes = 0;
+static int g_last_r1 = -1;
+
+static int64_t now_ms(void) {{ return g_mock_now; }}
+static int sys_shmget(int k, int sz, int flg) {{ (void)k; (void)sz; (void)flg; return g_mock_shmid; }}
+static void *sys_shmat(int id, const void *addr, int flg) {{ (void)id; (void)addr; (void)flg; return g_mock_shm; }}
+static int sys_shmdt(const void *p) {{ (void)p; return 0; }}
+static void str_copy(char *d, const char *s, unsigned long m) {{
+    if (!m) return;
+    strncpy(d, s ? s : "", m - 1);
+    d[m - 1] = 0;
+}}
+static void write_sysfs_int(const char *path, int val) {{
+    g_led_writes++;
+    if (val == 0) g_zero_writes++;
+    if (strstr(path, "red:ring1")) g_last_r1 = val;
+}}
+static void write_sysfs_str(const char *path, const char *str) {{ (void)path; (void)str; g_led_writes++; }}
+static int playback_status = 1;
+static int spotify_device_is_active = 1;
+static int g_ducking_active = 0;
+static int64_t g_tts_hold_until_ms = 0;
+static uint64_t g_alice_state = 0;
+static int64_t g_led_alice_yield_until_ms = 0;
+
+static inline int is_alice_visual_state(uint64_t st) {{
+    return (st == 1 || st == 2 || st == 3 || st == 5);
+}}
+static inline int alice_owns_leds(int64_t now) {{
+    return is_alice_visual_state(g_alice_state) ||
+           g_ducking_active ||
+           now < g_tts_hold_until_ms ||
+           now < g_led_alice_yield_until_ms;
+}}
+
+{slice_between(SRC, "static const uint8_t sin64[64] = {", "static void write_sysfs_int(")}
+static void build_led_path(char *dst, unsigned long max, const char *color, int zone_idx) {{
+    snprintf(dst, max, "%s%s:ring%d/brightness", g_led_hw.prefix, color, zone_idx);
+}}
+{slice_between(SRC, "static void led_reset_internal_state(void) {", "static void set_led_visualizer_impl(")}
+{slice_between(SRC, "static void write_zone_rgb_if_changed(", "static uint8_t quasar_buf[65536];")}
+
+int main(void) {{
+    g_led_hw.probed = 1;
+    g_led_hw.detected = 1;
+    g_led_hw.num_zones = 3;
+    strcpy(g_led_hw.prefix, "/sys/class/leds/micro:");
+    g_led_enabled = 1;
+
+    // 1. Pacing: multiple wakeups within <30ms only write once; dirty-check suppresses identical steady zero writes
+    led_visualizer_tick(1000);
+    int w_after_first = g_led_writes;
+    if (w_after_first == 0) return 10;
+    led_visualizer_tick(1005);
+    led_visualizer_tick(1015);
+    led_visualizer_tick(1025);
+    if (g_led_writes != w_after_first) {{
+        fprintf(stderr, "FAIL pacing: wrote %d times inside <30ms window\\n", g_led_writes - w_after_first);
+        return 11;
+    }}
+
+    // 2. Fallback silence simulation produces smooth attack on bass hit (NOT instant 180 strobe)
+    // g_led_frame starts at 1; simulate beat hit by picking fallback bar_pos==10 (frame=10)
+    g_led_frame = 9;
+    led_visualizer_tick(1040);
+    // Attack uses (prev*50 + target*50)/100 -> first hit of 255 ramps ~127 -> val ~89 (NOT 180)
+    if (g_last_r1 <= 0 || g_last_r1 >= 140) {{
+        fprintf(stderr, "FAIL smooth attack expected gradual ramp, got r1=%d\\n", g_last_r1);
+        return 12;
+    }}
+    int peak_r1 = g_last_r1;
+    led_visualizer_tick(1075);
+    // Smooth exponential release (>= 80% retained per frame instead of -58% strobe collapse)
+    if (g_last_r1 < (peak_r1 * 78) / 100) {{
+        fprintf(stderr, "FAIL smooth release dropped too steeply: prev=%d now=%d\\n", peak_r1, g_last_r1);
+        return 13;
+    }}
+
+    // 3. Yielding to Alice visual states (BUSY=3 thinking, LISTENING=1, SPEAKING=2) must NOT call led_all_off / zero writes
+    g_led_writes = 0;
+    g_zero_writes = 0;
+    g_alice_state = 3; // BUSY ("цвета рассуждений Алисы")
+    led_visualizer_tick(1110);
+    g_alice_state = 2; // SPEAKING
+    led_visualizer_tick(1145);
+    g_alice_state = 1; // LISTENING
+    led_visualizer_tick(1180);
+    // Transition back to IDLE within 450ms settle tail
+    g_alice_state = 0;
+    g_led_alice_yield_until_ms = 1180 + 450;
+    led_visualizer_tick(1300);
+    if (g_led_writes != 0 || g_zero_writes != 0) {{
+        fprintf(stderr, "FAIL Alice LED collision: writes=%d zeros=%d during Alice/settle\\n",
+                g_led_writes, g_zero_writes);
+        return 14;
+    }}
+
+    // 4. Also protects Alice even if playback pauses mid-dialog
+    playback_status = 2;
+    g_alice_state = 3;
+    led_visualizer_tick(1400);
+    if (g_led_writes != 0) {{
+        fprintf(stderr, "FAIL pause during Alice wrote over LEDs: writes=%d\\n", g_led_writes);
+        return 15;
+    }}
+
+    // 5. After settle tail + resuming playback, equalizer resumes cleanly
+    playback_status = 1;
+    g_alice_state = 0;
+    g_led_alice_yield_until_ms = 1500;
+    g_led_frame = 9;
+    led_visualizer_tick(1700);
+    if (g_led_writes == 0 || g_last_r1 <= 0) {{
+        fprintf(stderr, "FAIL equalizer failed to resume after Alice settle tail: writes=%d r1=%d\\n",
+                g_led_writes, g_last_r1);
+        return 16;
+    }}
+
+    // 6. Dirty check skips sysfs writes when all channels stay steady zero on SHM silence
+    memset(g_mock_shm, 0, sizeof(g_mock_shm));
+    g_mock_shmid = 1;
+    for (int t = 1800; t <= 4000; t += 40) led_visualizer_tick(t);
+    int w_steady = g_led_writes;
+    led_visualizer_tick(4040);
+    led_visualizer_tick(4080);
+    if (g_led_writes != w_steady) {{
+        fprintf(stderr, "FAIL dirty-check wrote unchanged zero LEDs (%d -> %d)\\n", w_steady, g_led_writes);
+        return 17;
+    }}
+    return 0;
+}}
+"""
+
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
@@ -198,7 +341,22 @@ def main() -> int:
         if run.returncode != 0:
             print(run.stderr, file=sys.stderr)
             return run.returncode
+
+        src2 = pathlib.Path(td) / "test_led_tick.c"
+        exe2 = pathlib.Path(td) / "test_led_tick"
+        src2.write_text(LED_TICK_HARNESS, encoding="utf-8")
+        comp2 = subprocess.run(
+            ["cc", "-O2", "-Wall", "-Wextra", str(src2), "-lm", "-o", str(exe2)],
+            capture_output=True,
+            text=True,
+        )
+        assert comp2.returncode == 0, f"LED tick test compile failed:\n{comp2.stderr}"
+        run2 = subprocess.run([str(exe2)], capture_output=True, text=True)
+        if run2.returncode != 0:
+            print(run2.stderr, file=sys.stderr)
+            return run2.returncode
     print("PASS: All 3-band DSP crossover, envelope & cubic curve tests succeeded.")
+    print("PASS: Alice LED yield, 30ms pacing, dirty-check & smooth attack/decay tests succeeded.")
     return 0
 
 
