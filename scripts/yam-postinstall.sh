@@ -106,7 +106,8 @@ INIT_EOF
     fi
 
     if grep -q '^API_KEY=""' "$CONF_DIR/config.env" 2>/dev/null; then
-        echo "[horohi/soloist] Set API_KEY in $CONF_DIR/config.env (and optional SPOTIFY_CLIENT_ID/SECRET in $CONF_DIR/spotify_api.conf), then run: soloist restart"
+        echo "[horohi/soloist] Запустите интерактивную настройку: soloist setup"
+        echo "[horohi/soloist] (или вручную пропишите API_KEY в $CONF_DIR/config.env и выполните: soloist restart)"
     fi
 fi
 

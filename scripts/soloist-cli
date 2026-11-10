@@ -83,6 +83,7 @@ cmd_help() {
     printf "${BOLD}${GREEN}Spotify Soloist CLI для Яндекс Станции${NC}\n"
     printf "Использование: ${CYAN}soloist <команда>${NC}\n\n"
     printf "${BOLD}Команды управления:${NC}\n"
+    printf "  ${CYAN}setup${NC}        Интерактивный мастер настройки ключей API, имени колонки и SNI-прокси\n"
     printf "  ${CYAN}status${NC}       Статус плеера, моста, памяти, подсветки и текущего трека\n"
     printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|status]  Управление эквалайзером подсветки\n"
     printf "  ${CYAN}restart${NC}      Перезапустить службу Spotify и мост управления\n"
@@ -410,8 +411,324 @@ cmd_update() {
     printf "Временный мусор и архив автоматически очищены.\n"
 }
 
+trim_ws() {
+    printf '%s\n' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+detect_station_model() {
+    _compat=""
+    if [ -f /proc/device-tree/compatible ]; then
+        _compat=$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null || true)
+    fi
+    case "${YAM_PLATFORM:-}$_compat" in
+        *yandexmicro*|*station-micro*|*micro*) printf 'Yandex Station Lite\n' ;;
+        *yandexplum*|*plum*) printf 'Yandex Station Lite 2\n' ;;
+        *yandexmini_2*|*station-mini2*) printf 'Yandex Station Mini 2\n' ;;
+        *bergamot*|*station-mini3*) printf 'Yandex Station Mini 3\n' ;;
+        *pickle*) printf 'Yandex Station Mini 3 Pro\n' ;;
+        *yandexmini*|*station-mini*) printf 'Yandex Station Mini\n' ;;
+        *yandexmidi*|*cucumber*|*amlogic,a5*|*amlogic,\ a5*) printf 'Yandex Station Midi\n' ;;
+        *yandexstation_2*|*station-midi*|*midi*) printf 'Yandex Station 2\n' ;;
+        *orion*) printf 'Yandex Station Max\n' ;;
+        *) printf 'Yandex Station\n' ;;
+    esac
+}
+
+normalize_playlist_uri() {
+    _raw=$(trim_ws "$1")
+    case "$_raw" in
+        spotify:playlist:*)
+            _pid="${_raw#spotify:playlist:}"
+            _pid="${_pid%%\?*}"
+            ;;
+        *open.spotify.com/playlist/*)
+            _pid="${_raw#*open.spotify.com/playlist/}"
+            _pid="${_pid%%\?*}"
+            _pid="${_pid%%/*}"
+            ;;
+        *) return 1 ;;
+    esac
+    case "$_pid" in
+        ''|*[!A-Za-z0-9]*) return 1 ;;
+    esac
+    [ "${#_pid}" -eq 22 ] || return 1
+    printf 'spotify:playlist:%s\n' "$_pid"
+}
+
+update_hosts_sni() {
+    _enable="$1"
+    _hosts="${SOLOIST_HOSTS_FILE:-/etc/hosts}"
+    [ -e "$_hosts" ] || return 0
+
+    _remounted=0
+    if [ "$_hosts" = "/etc/hosts" ]; then
+        mount -o remount,rw / 2>/dev/null && _remounted=1 || true
+        if [ ! -f /etc/ssl/certs/ca-certificates.crt ] && [ -f /system/vendor/quasar/ca-certificates.crt ]; then
+            mkdir -p /etc/ssl/certs
+            ln -sf /system/vendor/quasar/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+        fi
+    fi
+
+    if [ "$_enable" = "1" ]; then
+        if ! grep -q "5.175.161.40" "$_hosts" 2>/dev/null; then
+            cat << 'HOSTS_EOF' >> "$_hosts"
+
+# Spotify SNI Proxy (Bypass 403 geoblock)
+5.175.161.40 accounts.spotify.com
+5.175.161.40 api.spotify.com
+5.175.161.40 open.spotify.com
+5.175.161.40 spclient.wg.spotify.com
+HOSTS_EOF
+        fi
+    else
+        sed -e '/^# Spotify SNI Proxy/d' -e '/^5\.175\.161\.40[[:space:]]/d' "$_hosts" > "$_hosts.tmp" 2>/dev/null \
+            && chmod 644 "$_hosts.tmp" 2>/dev/null \
+            && mv "$_hosts.tmp" "$_hosts" || rm -f "$_hosts.tmp"
+    fi
+
+    [ "$_remounted" = 0 ] || mount -o remount,ro / 2>/dev/null || true
+}
+
+cmd_setup() {
+    printf "${BOLD}${GREEN}=== Мастер настройки Spotify Soloist ===${NC}\n\n"
+
+    CURR_API_KEY=""
+    CURR_DEVICE_NAME=""
+    if [ "$IS_YAM" = 1 ] && [ -f "$CONF_DIR/config.env" ]; then
+        . "$CONF_DIR/config.env" 2>/dev/null || true
+        CURR_API_KEY="${API_KEY:-}"
+        CURR_DEVICE_NAME="${DEVICE_NAME:-}"
+    elif [ -f "$INSTALL_DIR/start.sh" ]; then
+        CURR_API_KEY=$(grep -o 'API_KEY="[^"]*"' "$INSTALL_DIR/start.sh" 2>/dev/null | head -n 1 | cut -d'"' -f2 || true)
+        CURR_DEVICE_NAME=$(grep -o -- '-n "[^"]*"' "$INSTALL_DIR/start.sh" 2>/dev/null | head -n 1 | cut -d'"' -f2 || true)
+    fi
+    [ "$CURR_API_KEY" != "dummy" ] || CURR_API_KEY=""
+
+    CURR_CID=""
+    CURR_CSECRET=""
+    if [ -f "$CONF_DIR/spotify_api.conf" ]; then
+        . "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
+        CURR_CID="${SPOTIFY_CLIENT_ID:-}"
+        CURR_CSECRET="${SPOTIFY_CLIENT_SECRET:-}"
+    fi
+
+    CURR_FAV=""
+    if [ -f "$DATA_ROOT/favorites.uri" ]; then
+        CURR_FAV=$(trim_ws "$(cat "$DATA_ROOT/favorites.uri" 2>/dev/null || true)")
+    fi
+
+    # 1. Soloist API Key
+    printf "${BOLD}1. Soloist API Key (Spotify Connect)${NC}\n"
+    printf "   Получить можно (нужен Spotify Premium): ${CYAN}https://developer.spotify.com/dashboard/soloist${NC}\n"
+    while true; do
+        if [ -n "$CURR_API_KEY" ]; then
+            _preview=$(printf '%s' "$CURR_API_KEY" | cut -c1-8)
+            printf "   Введите API Key [Enter — оставить %s...]: " "$_preview"
+        else
+            printf "   Введите ваш API Key (spak_...): "
+        fi
+        _read_ok=1
+        IFS= read -r _in_key || _read_ok=0
+        _in_key=$(trim_ws "${_in_key:-}")
+        if [ -z "$_in_key" ]; then
+            if [ -n "$CURR_API_KEY" ]; then
+                NEW_API_KEY="$CURR_API_KEY"
+                break
+            fi
+            if [ "$_read_ok" = 0 ]; then
+                printf "\n${RED}Ошибка: API Key не задан (EOF).${NC}\n" >&2
+                exit 1
+            fi
+            printf "${RED}   API Key не может быть пустым.${NC}\n"
+            continue
+        fi
+        case "$_in_key" in
+            *[!A-Za-z0-9_-]*)
+                printf "${RED}   Недопустимые символы в API Key (разрешены латиница, цифры, _ и -).${NC}\n"
+                continue
+                ;;
+        esac
+        NEW_API_KEY="$_in_key"
+        break
+    done
+    printf "\n"
+
+    # 2. Device Name
+    DEFAULT_DEV="${CURR_DEVICE_NAME:-$(detect_station_model)}"
+    printf "${BOLD}2. Имя колонки в приложении Spotify${NC}\n"
+    while true; do
+        printf "   Имя устройства [%s]: " "$DEFAULT_DEV"
+        _read_ok=1
+        IFS= read -r _in_dev || _read_ok=0
+        _in_dev=$(trim_ws "${_in_dev:-}")
+        [ -n "$_in_dev" ] || _in_dev="$DEFAULT_DEV"
+        case "$_in_dev" in
+            *[\"\$\`\\]*)
+                if [ "$_read_ok" = 0 ]; then
+                    printf "\n${RED}Ошибка: некорректное имя устройства (EOF).${NC}\n" >&2
+                    exit 1
+                fi
+                printf "${RED}   Имя не должно содержать символы \" \$ \` или \\.${NC}\n"
+                continue
+                ;;
+        esac
+        NEW_DEVICE_NAME="$_in_dev"
+        break
+    done
+    printf "\n"
+
+    # 3. Spotify Web API Keys
+    printf "${BOLD}3. Ключи Spotify Web API (для голосового поиска Алисы, опционально)${NC}\n"
+    printf "   Создайте приложение на: ${CYAN}https://developer.spotify.com/dashboard${NC}\n"
+    NEW_CID="$CURR_CID"
+    NEW_CSECRET="$CURR_CSECRET"
+    if [ -n "$CURR_CID" ] && [ -n "$CURR_CSECRET" ]; then
+        _cid_prev=$(printf '%s' "$CURR_CID" | cut -c1-8)
+        printf "   Client ID [Enter — оставить %s..., или 'clear' для очистки]: " "$_cid_prev"
+    else
+        printf "   Client ID [Enter — пропустить]: "
+    fi
+    IFS= read -r _in_cid || true
+    _in_cid=$(trim_ws "${_in_cid:-}")
+    if [ "$_in_cid" = "clear" ] || [ "$_in_cid" = "-" ]; then
+        NEW_CID=""
+        NEW_CSECRET=""
+    elif [ -n "$_in_cid" ]; then
+        case "$_in_cid" in
+            *[!A-Za-z0-9_-]*)
+                printf "${RED}   Некорректный Client ID — сохранён предыдущий.${NC}\n"
+                ;;
+            *)
+                printf "   Client Secret: "
+                IFS= read -r _in_sec || true
+                _in_sec=$(trim_ws "${_in_sec:-}")
+                case "$_in_sec" in
+                    ''|*[!A-Za-z0-9_-]*)
+                        printf "${YELLOW}   Некорректный или пустой Client Secret — Web API ключи не изменены.${NC}\n"
+                        ;;
+                    *)
+                        NEW_CID="$_in_cid"
+                        NEW_CSECRET="$_in_sec"
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+    if [ -z "$NEW_CID" ] || [ -z "$NEW_CSECRET" ]; then
+        printf "${YELLOW}   [!] Без ключей Web API голосовой поиск («Алиса, включи песню...») не работает,${NC}\n"
+        printf "${YELLOW}       но воспроизведение через приложение Spotify (Connect) будет работать.${NC}\n"
+    fi
+    printf "\n"
+
+    # 4. Liked Songs playlist URI
+    printf "${BOLD}4. Плейлист «Любимые треки» / «Мне нравится» (опционально)${NC}\n"
+    printf "   Можно вставить ссылку https://open.spotify.com/playlist/... или URI spotify:playlist:...\n"
+    NEW_FAV="$CURR_FAV"
+    while true; do
+        if [ -n "$CURR_FAV" ]; then
+            printf "   URI/ссылка [Enter — оставить %s, или 'clear']: " "$CURR_FAV"
+        else
+            printf "   URI/ссылка [Enter — пропустить]: "
+        fi
+        _read_ok=1
+        IFS= read -r _in_fav || _read_ok=0
+        _in_fav=$(trim_ws "${_in_fav:-}")
+        if [ -z "$_in_fav" ]; then
+            break
+        elif [ "$_in_fav" = "clear" ] || [ "$_in_fav" = "-" ]; then
+            NEW_FAV=""
+            break
+        elif _norm=$(normalize_playlist_uri "$_in_fav"); then
+            NEW_FAV="$_norm"
+            break
+        else
+            if [ "$_read_ok" = 0 ]; then
+                printf "\n${RED}Ошибка: некорректный URI плейлиста (EOF).${NC}\n" >&2
+                exit 1
+            fi
+            printf "${RED}   Не удалось распознать playlist URI/ссылку (нужен 22-символьный ID).${NC}\n"
+        fi
+    done
+    printf "\n"
+
+    # 5. SNI Proxy
+    _hosts_file="${SOLOIST_HOSTS_FILE:-/etc/hosts}"
+    _sni_on=0
+    grep -q "5.175.161.40" "$_hosts_file" 2>/dev/null && _sni_on=1 || true
+    printf "${BOLD}5. Встроенный SNI-прокси для обхода блокировки 403 (/etc/hosts)${NC}\n"
+    if [ "$_sni_on" = 1 ]; then
+        printf "   Сейчас прокси включён. Оставить включённым? [Y/n]: "
+    else
+        printf "   Включить встроенный SNI-прокси? [Y/n]: "
+    fi
+    IFS= read -r _in_sni || true
+    case "$(trim_ws "${_in_sni:-}")" in
+        [nN]|[nN][oO]|н|Н|нет|Нет) NEW_SNI=0 ;;
+        *) NEW_SNI=1 ;;
+    esac
+    printf "\n"
+
+    # Apply settings
+    mkdir -p "$CONF_DIR" "$DATA_ROOT/requests"
+    chmod 700 "$DATA_ROOT/requests" 2>/dev/null || true
+
+    if [ "$IS_YAM" = 0 ] && [ -f "$INSTALL_DIR/start.sh" ]; then
+        NEW_API_KEY="$NEW_API_KEY" NEW_DEVICE_NAME="$NEW_DEVICE_NAME" awk '
+            /^API_KEY="/ { print "API_KEY=\"" ENVIRON["NEW_API_KEY"] "\""; next }
+            /^[[:space:]]*-n ".*" \\$/ { sub(/-n "[^"]*"/, "-n \"" ENVIRON["NEW_DEVICE_NAME"] "\""); print; next }
+            { print }
+        ' "$INSTALL_DIR/start.sh" > "$INSTALL_DIR/start.sh.tmp" && \
+            chmod 755 "$INSTALL_DIR/start.sh.tmp" && \
+            mv -f "$INSTALL_DIR/start.sh.tmp" "$INSTALL_DIR/start.sh"
+    else
+        (
+            umask 077
+            cat > "$CONF_DIR/config.env" << EOF
+API_KEY="$NEW_API_KEY"
+DEVICE_NAME="$NEW_DEVICE_NAME"
+EOF
+            chmod 600 "$CONF_DIR/config.env" 2>/dev/null || true
+        )
+    fi
+
+    if [ -n "$NEW_CID" ] && [ -n "$NEW_CSECRET" ]; then
+        (
+            umask 077
+            cat > "$CONF_DIR/spotify_api.conf" << EOF
+SPOTIFY_CLIENT_ID='$NEW_CID'
+SPOTIFY_CLIENT_SECRET='$NEW_CSECRET'
+EOF
+            chmod 600 "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
+        )
+    elif [ "$_in_cid" = "clear" ] || [ "$_in_cid" = "-" ]; then
+        rm -f "$CONF_DIR/spotify_api.conf"
+    fi
+
+    if [ -n "$NEW_FAV" ]; then
+        printf '%s\n' "$NEW_FAV" > "$DATA_ROOT/favorites.uri"
+        chmod 600 "$DATA_ROOT/favorites.uri" 2>/dev/null || true
+    else
+        rm -f "$DATA_ROOT/favorites.uri"
+    fi
+
+    update_hosts_sni "$NEW_SNI"
+
+    printf "${GREEN}Настройки сохранены!${NC}\n"
+    printf "  Конфиг:  %s\n" "$CONF_DIR"
+    printf "  Данные:  %s\n" "$DATA_ROOT"
+
+    if [ "${SOLOIST_SETUP_NO_RESTART:-0}" != 1 ]; then
+        printf "\n"
+        cmd_restart
+    fi
+    printf "\nПроверить работу: ${CYAN}soloist status${NC}\n"
+}
+
 # Main entrypoint
 case "${1:-}" in
+    setup|configure|wizard)
+        cmd_setup
+        ;;
     status|st)
         cmd_status
         ;;

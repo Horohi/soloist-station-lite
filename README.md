@@ -84,6 +84,7 @@ English guide: [Voice request lifecycle, configuration and tests](docs/VOICE_REQ
 
 На колонке доступна удобная консольная утилита:
 ```bash
+soloist setup        # Интерактивный мастер: API-ключ, имя колонки, Web API, SNI-прокси
 soloist status       # Статус демона, памяти, VmRSS, моста и текущего трека
 soloist led on       # Включить светомузыку (белый цвет Nothing Phone)
 soloist led off      # Выключить светомузыку
@@ -134,13 +135,16 @@ adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 # Сборка .yampkg на ПК с помощью yam-publish (или make pack-yam YAM_TARGET=yandexmicro):
 ./scripts/pack-yam.sh yandexmicro
 
-# Локальная установка .yampkg на колонке с установленным YAM v2:
-yam install horohi-soloist-1.3.6-yandexmicro.yampkg
-
-# Или установка из репозитория после публикации namespace:
+# Установка из официального каталога YAM v2:
 yam install horohi/soloist
+
+# Интерактивная первичная настройка (ключи, имя колонки, плейлист, SNI-прокси):
+soloist setup
+
+# Или локальная установка скачанного .yampkg:
+yam install horohi-soloist-1.3.7-yandexmicro.yampkg
 ```
-После установки укажите `API_KEY` в `/data/yam/etc/horohi.soloist/config.env` (при миграции с `/data/opt/soloist` конфиги переносятся автоматически) и перезапустите службу: `soloist restart`. Автозапуск настраивается через `/etc/init.d/S98soloist`.
+При миграции со старого `/data/opt/soloist` `yam-postinstall` перенесёт ключи и конфиги автоматически; автозапуск настраивается через `/etc/init.d/S98soloist`. Для новой установки достаточно выполнить `soloist setup` после `yam install` (или вручную отредактировать `/data/yam/etc/horohi.soloist/config.env` и выполнить `soloist restart`).
 
 ### 3. Подключение приложения
 Откройте приложение Spotify на смартфоне или компьютере, нажмите на значок устройств в плеере и выберите **«Yandex Station Lite»**.

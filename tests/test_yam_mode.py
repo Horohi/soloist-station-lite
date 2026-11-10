@@ -230,7 +230,128 @@ def test_shell_yam_layout():
         print("PASS shell YAM v2 sandbox postinstall, CLI symlink, control.sh, and favorites.uri tests")
 
 
+def test_soloist_setup():
+    with tempfile.TemporaryDirectory(prefix="soloist-setup-test-") as d:
+        tmp = pathlib.Path(d)
+        yam_root = tmp / "yam"
+        pkg_dir = yam_root / "pkgs/horohi/soloist/1.3.7"
+        pkg_share = pkg_dir / "share/horohi.soloist"
+        (pkg_dir / "bin").mkdir(parents=True)
+        (pkg_share / "bin").mkdir(parents=True)
+        (pkg_share / "scripts").mkdir(parents=True)
+        (pkg_share / "lib64").mkdir(parents=True)
+        (yam_root / "bin").mkdir(parents=True)
+        (yam_root / "share").mkdir(parents=True)
+        (yam_root / "etc/horohi.soloist").mkdir(parents=True)
+        (yam_root / "var/horohi.soloist/requests").mkdir(parents=True)
+
+        (pkg_share / "bin/soloist").write_text("#!/bin/sh\nexit 0\n")
+        (pkg_share / "bin/soloist").chmod(0o755)
+        (pkg_dir / "bin/soloist").write_text((ROOT / "scripts/soloist-cli").read_text())
+        (pkg_dir / "bin/soloist").chmod(0o755)
+        (pkg_share / "scripts/soloist-cli").write_text((ROOT / "scripts/soloist-cli").read_text())
+        (pkg_share / "scripts/soloist-cli").chmod(0o755)
+        (yam_root / "bin/soloist").symlink_to(pkg_dir / "bin/soloist")
+        (yam_root / "share/horohi.soloist").symlink_to(pkg_share)
+
+        hosts_file = tmp / "hosts"
+        hosts_file.write_text("127.0.0.1 localhost\n")
+
+        setup_env = {
+            "PATH": "/bin:/usr/bin",
+            "SOLOIST_HOSTS_FILE": str(hosts_file),
+            "SOLOIST_SETUP_NO_RESTART": "1",
+        }
+
+        # 1. EOF with no configured key must exit non-zero cleanly without hanging
+        res_eof = subprocess.run(
+            [str(yam_root / "bin/soloist"), "setup"],
+            env=setup_env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert res_eof.returncode != 0, res_eof.stdout + res_eof.stderr
+
+        # 2. First interactive setup: invalid key rejected -> valid key accepted, Spotify URL normalized, hosts updated
+        wizard_input = "\n".join([
+            "bad key!",
+            "spak_test123456",
+            "Гостиная Станция",
+            "cid_abc123",
+            "sec_xyz789",
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=demo",
+            "y",
+            "",
+        ])
+        res = subprocess.run(
+            [str(yam_root / "bin/soloist"), "setup"],
+            env=setup_env,
+            input=wizard_input,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "Недопустимые символы" in res.stdout, res.stdout
+        cfg = (yam_root / "etc/horohi.soloist/config.env").read_text()
+        assert cfg == 'API_KEY="spak_test123456"\nDEVICE_NAME="Гостиная Станция"\n', cfg
+        assert ((yam_root / "etc/horohi.soloist/config.env").stat().st_mode & 0o777) == 0o600
+        api_cfg = (yam_root / "etc/horohi.soloist/spotify_api.conf").read_text()
+        assert api_cfg == "SPOTIFY_CLIENT_ID='cid_abc123'\nSPOTIFY_CLIENT_SECRET='sec_xyz789'\n", api_cfg
+        assert ((yam_root / "etc/horohi.soloist/spotify_api.conf").stat().st_mode & 0o777) == 0o600
+        assert (yam_root / "var/horohi.soloist/favorites.uri").read_text() == "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M\n"
+        hosts_txt = hosts_file.read_text()
+        assert "5.175.161.40 accounts.spotify.com" in hosts_txt, hosts_txt
+
+        # 3. Re-run keeping existing secrets via Enter, and disabling SNI proxy
+        rerun_input = "\n".join(["", "", "", "", "n", ""])
+        subprocess.run(
+            [str(yam_root / "bin/soloist"), "setup"],
+            env=setup_env,
+            input=rerun_input,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert (yam_root / "etc/horohi.soloist/config.env").read_text() == cfg
+        assert (yam_root / "etc/horohi.soloist/spotify_api.conf").read_text() == api_cfg
+        assert (yam_root / "var/horohi.soloist/favorites.uri").read_text() == "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M\n"
+        hosts_after = hosts_file.read_text()
+        assert "5.175.161.40" not in hosts_after and "127.0.0.1 localhost" in hosts_after, hosts_after
+        assert (hosts_file.stat().st_mode & 0o777) == 0o644
+
+        # 4. Standalone /data/opt/soloist start.sh update mode
+        sa_dir = tmp / "standalone"
+        (sa_dir / "bin").mkdir(parents=True)
+        (sa_dir / "scripts").mkdir(parents=True)
+        (sa_dir / "data/requests").mkdir(parents=True)
+        (sa_dir / "bin/soloist").write_text("#!/bin/sh\nexit 0\n")
+        (sa_dir / "scripts/soloist-cli").write_text((ROOT / "scripts/soloist-cli").read_text())
+        (sa_dir / "scripts/soloist-cli").chmod(0o755)
+        (sa_dir / "start.sh").write_text(
+            '#!/bin/sh\nAPI_KEY="spak_oldkey"\nnohup /data/opt/soloist/bin/soloist \\\n    -n "Old Model" \\\n    -k "$API_KEY" &\n'
+        )
+        (sa_dir / "start.sh").chmod(0o755)
+        sa_env = dict(setup_env)
+        sa_env["INSTALL_DIR"] = str(sa_dir)
+        subprocess.run(
+            [str(sa_dir / "scripts/soloist-cli"), "setup"],
+            env=sa_env,
+            input="spak_newkey\nNew Station\n\n\nn\n",
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        new_start = (sa_dir / "start.sh").read_text()
+        assert 'API_KEY="spak_newkey"' in new_start, new_start
+        assert '-n "New Station" \\' in new_start, new_start
+        assert '-k "$API_KEY"' in new_start, new_start
+        print("PASS soloist setup interactive wizard (YAM v2 + Standalone + EOF + preserve)")
+
+
 if __name__ == "__main__":
     test_c_yam_paths()
     test_shell_yam_layout()
+    test_soloist_setup()
     print("ALL YAM V2 MODE TESTS PASSED!")

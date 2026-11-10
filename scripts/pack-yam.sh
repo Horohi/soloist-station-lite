@@ -101,7 +101,7 @@ chmod 644 "$STAGE_DIR/config.env.example" "$STAGE_DIR/spotify_api.conf.example" 
 
 mkdir -p "$OUT_DIR"
 
-AARCH64_TARGETS="yandexmicro plum yandexplum yandexmini yandexmini_2 bergamot pickle cucumber yandexmidi yandexstation yandexstation_2 orion saturn"
+AARCH64_TARGETS="yandexmicro plum yandexplum yandexmini yandexmini_2 bergamot pickle cucumber yandexmidi yandexstation yandexstation_2 orion"
 if [ "$TARGET" = "all" ]; then
     TARGETS_TO_BUILD="$AARCH64_TARGETS"
 else
