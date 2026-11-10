@@ -31,6 +31,12 @@ static void run_soloist_cmd(const char *s) { (void)s; }
 static void run_soloist_cmd2(const char *s, const char *a) { (void)s; (void)a; }
 static void run_search_and_play(const char *s) { (void)s; }
 static const char *get_censor_path(void) { return "/tmp/censor"; }
+static int is_web_or_culinary_intent(const char *s) { (void)s; return 0; }
+static int is_yandex_music_preference(const char *s) { (void)s; return 0; }
+static int send_alice_tts(int fd, const char *s) { (void)fd; (void)s; return 0; }
+static int playback_status = 0;
+static char current_track_name[128] = {0};
+static char current_artist_name[128] = {0};
 static int sys_open(const char *p, int f, int m) { (void)p; (void)f; (void)m; return -1; }
 static void sys_close(int fd) { (void)fd; }
 static int sys_unlink(const char *p) { (void)p; return 0; }

@@ -22,7 +22,7 @@ case "$1" in
         GENERATION=$3
         case "$GENERATION" in ''|*[!0-9]*) exit 2;; esac
         request_lock 8 50 || exit 1;;
-    clean-cache|clean-cache-full)
+    clean-cache|clean-cache-full|volume|what-is-playing)
         ;;
     *) exit 2;;
 esac
@@ -42,6 +42,15 @@ elif [ "$1" = clean-cache-full ]; then
     if [ -d /tmp/soloist_cache/cache ]; then
         rm -rf /tmp/soloist_cache/cache/* 2>/dev/null || true
     fi
+    exit 0
+elif [ "$1" = volume ]; then
+    vol="${2:-50}"
+    amixer set Master "${vol}%" >/dev/null 2>&1 || \
+    amixer set 'Master Playback Volume' "${vol}%" >/dev/null 2>&1 || \
+    amixer sset Master "${vol}%" >/dev/null 2>&1 || true
+    exit 0
+elif [ "$1" = what-is-playing ]; then
+    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 now 2>/dev/null || echo "Nothing is playing"
     exit 0
 fi
 if [ "$1" = search ]; then

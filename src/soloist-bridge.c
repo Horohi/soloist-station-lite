@@ -374,6 +374,91 @@ static void send_cancel_alice(int quasar_fd) {
     }
 }
 
+/* Sends Alice START_VOCALIZE directive so Alice speaks natively on the speaker */
+static int send_alice_tts(int quasar_fd, const char *text) {
+    if (quasar_fd < 0 || !text || !*text) return -1;
+    unsigned long text_len = str_len(text);
+    if (text_len > 350) text_len = 350;
+
+    // Build TVocalizeDirective:
+    // field 1 (wire 2): text
+    // field 2 (varint): 2 (Interrupt)
+    // field 3 (varint): 1 (applyOnMusic)
+    uint8_t voc_dir[400];
+    unsigned long v_pos = 0;
+    voc_dir[v_pos++] = 0x0a; // tag 1 wire 2
+    if (text_len >= 128) {
+        voc_dir[v_pos++] = (uint8_t)((text_len & 0x7f) | 0x80);
+        voc_dir[v_pos++] = (uint8_t)(text_len >> 7);
+    } else {
+        voc_dir[v_pos++] = (uint8_t)text_len;
+    }
+    for (unsigned long i = 0; i < text_len; i++) voc_dir[v_pos++] = (uint8_t)text[i];
+    voc_dir[v_pos++] = 0x10; // tag 2 wire 0
+    voc_dir[v_pos++] = 0x02; // value 2 (Interrupt)
+    voc_dir[v_pos++] = 0x18; // tag 3 wire 0
+    voc_dir[v_pos++] = 0x01; // value 1 (applyOnMusic)
+
+    // AliceCapabilityMethod:
+    // field 1: method = 18 (tag 0x08, val 0x12)
+    // field 13: vocalize_directive (tag (13<<3)|2 = 106 = 0x6a)
+    uint8_t meth_msg[450];
+    unsigned long m_pos = 0;
+    meth_msg[m_pos++] = 0x08;
+    meth_msg[m_pos++] = 0x12; // 18: START_VOCALIZE
+    meth_msg[m_pos++] = 0x6a; // field 13 wire 2
+    if (v_pos >= 128) {
+        meth_msg[m_pos++] = (uint8_t)((v_pos & 0x7f) | 0x80);
+        meth_msg[m_pos++] = (uint8_t)(v_pos >> 7);
+    } else {
+        meth_msg[m_pos++] = (uint8_t)v_pos;
+    }
+    for (unsigned long i = 0; i < v_pos; i++) meth_msg[m_pos++] = voc_dir[i];
+
+    // Remoting:
+    // field 7: "AliceCapability" (tag 0x3a, len 15)
+    // field 8: meth_msg (tag 0x42)
+    uint8_t remoting[500];
+    unsigned long r_pos = 0;
+    remoting[r_pos++] = 0x3a;
+    remoting[r_pos++] = 15;
+    const char *cap = "AliceCapability";
+    for (int i = 0; i < 15; i++) remoting[r_pos++] = (uint8_t)cap[i];
+    remoting[r_pos++] = 0x42;
+    if (m_pos >= 128) {
+        remoting[r_pos++] = (uint8_t)((m_pos & 0x7f) | 0x80);
+        remoting[r_pos++] = (uint8_t)(m_pos >> 7);
+    } else {
+        remoting[r_pos++] = (uint8_t)m_pos;
+    }
+    for (unsigned long i = 0; i < m_pos; i++) remoting[r_pos++] = meth_msg[i];
+
+    // Build frame for field 210:
+    // tag 210 (wire 2): 0x92, 0x0d
+    uint8_t f210[600];
+    unsigned long p210_pos = 4;
+    f210[p210_pos++] = 0x92;
+    f210[p210_pos++] = 0x0d;
+    if (r_pos >= 128) {
+        f210[p210_pos++] = (uint8_t)((r_pos & 0x7f) | 0x80);
+        f210[p210_pos++] = (uint8_t)(r_pos >> 7);
+    } else {
+        f210[p210_pos++] = (uint8_t)r_pos;
+    }
+    for (unsigned long i = 0; i < r_pos; i++) f210[p210_pos++] = remoting[i];
+    uint32_t body_len = (uint32_t)(p210_pos - 4);
+    f210[0] = (uint8_t)(body_len & 0xff);
+    f210[1] = (uint8_t)((body_len >> 8) & 0xff);
+    f210[2] = (uint8_t)((body_len >> 16) & 0xff);
+    f210[3] = (uint8_t)((body_len >> 24) & 0xff);
+
+    long n = sys_write(quasar_fd, f210, p210_pos);
+    log_msg("[bridge] Sent Alice TTS START_VOCALIZE: ");
+    log_msg(text);
+    log_msg("\n");
+    return (n == (long)p210_pos) ? 0 : -1;
+}
+
 static int64_t cancel_alice_until_ms = 0;
 
 static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
@@ -761,6 +846,10 @@ static int is_explicit_search(const char *lower) {
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify Connect device
 static char current_track_uri[128] = {0};
+static char current_track_name[128] = {0};
+static char current_artist_name[128] = {0};
+static int current_volume = -1;
+static int64_t last_volume_sync_time = 0;
 static char last_auto_next_uri[128] = {0};
 static int playback_status = 0; // 0=stopped, 1=playing, 2=paused, 3=buffering
 static uint64_t track_duration_ms = 0;
@@ -770,7 +859,79 @@ static int playback_speed = 0;
 static int64_t stuck_since_ms = 0;
 static int64_t last_auto_next_time = 0;
 
+static void extract_track_info(const char *json) {
+    char name_buf[128] = {0};
+    char artist_buf[128] = {0};
+
+    // 1. Direct name / artist keys if present
+    if (json_find_str(json, "name", name_buf, sizeof(name_buf))) {
+        if (!str_contains(json, "\"device_name\"") || str_contains(json, "\"item\"")) {
+            str_copy(current_track_name, name_buf, sizeof(current_track_name));
+        }
+    }
+    if (json_find_str(json, "artist", artist_buf, sizeof(artist_buf))) {
+        str_copy(current_artist_name, artist_buf, sizeof(current_artist_name));
+    }
+
+    // 2. Nested "identity":{"name":"..."}
+    const char *id1 = 0;
+    for (unsigned long i = 0; json[i]; i++) {
+        if (json[i] == '"' && mem_equal(json + i + 1, "identity", 8) && json[i + 9] == '"') {
+            id1 = json + i + 10;
+            break;
+        }
+    }
+    if (id1) {
+        char n1[128];
+        if (json_find_str(id1, "name", n1, sizeof(n1))) {
+            str_copy(current_track_name, n1, sizeof(current_track_name));
+        }
+        const char *id2 = 0;
+        for (unsigned long i = 0; id1[i]; i++) {
+            if (id1[i] == '"' && mem_equal(id1 + i + 1, "identity", 8) && id1[i + 9] == '"') {
+                id2 = id1 + i + 10;
+                break;
+            }
+        }
+        if (id2) {
+            char n2[128];
+            if (json_find_str(id2, "name", n2, sizeof(n2))) {
+                str_copy(current_artist_name, n2, sizeof(current_artist_name));
+            }
+        }
+    }
+}
+
 static void handle_soloist_ws_json(const char *json) {
+    extract_track_info(json);
+
+    int vol = -1;
+    if (json_find_int(json, "volume", &vol)) {
+        if (vol >= 0 && vol <= 100 && vol != current_volume) {
+            current_volume = vol;
+            int64_t now_vol = now_ms();
+            if (now_vol - last_volume_sync_time >= 150) {
+                last_volume_sync_time = now_vol;
+                char vol_str[8];
+                char *p = vol_str;
+                if (vol == 0) {
+                    *p++ = '0';
+                } else {
+                    int temp = vol;
+                    char digits[8];
+                    int dcnt = 0;
+                    while (temp > 0) {
+                        digits[dcnt++] = (char)('0' + (temp % 10));
+                        temp /= 10;
+                    }
+                    while (dcnt > 0) *p++ = digits[--dcnt];
+                }
+                *p = 0;
+                run_controller("volume", vol_str);
+            }
+        }
+    }
+
     char status_str[32];
     if (json_find_str(json, "status", status_str, sizeof(status_str))) {
         if (str_equal(status_str, "playing")) {
@@ -911,6 +1072,20 @@ static int is_web_or_culinary_intent(const char *lower) {
     return 0;
 }
 
+static int is_yandex_music_preference(const char *lower) {
+    if (!lower) return 0;
+    if (str_contains(lower, "яндекс") ||
+        str_contains(lower, "я.музык") ||
+        str_contains(lower, "моя волна") ||
+        str_contains(lower, "моей волн") ||
+        str_contains(lower, "радио") ||
+        str_contains(lower, "фм") ||
+        str_contains(lower, "fm")) {
+        return 1;
+    }
+    return 0;
+}
+
 static void handle_voice_recognition(int quasar_fd, const char *text, unsigned long text_len) {
     char lower_buf[512];
     char raw_buf[512];
@@ -926,6 +1101,46 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 
     if (is_web_or_culinary_intent(lower_buf)) {
         log_msg("[bridge] Web search or culinary intent, leaving for Alice / Quasar Bridge\n");
+        return;
+    }
+
+    if (is_yandex_music_preference(lower_buf)) {
+        log_msg("[bridge] Yandex Music/Radio preference requested, leaving to native Alice\n");
+        return;
+    }
+
+    // Check "что играет" / track info query
+    if (str_contains(lower_buf, "что играет") ||
+        str_contains(lower_buf, "что сейчас играет") ||
+        str_contains(lower_buf, "какой трек") ||
+        str_contains(lower_buf, "какая песня") ||
+        str_contains(lower_buf, "что за трек") ||
+        str_contains(lower_buf, "что за песня") ||
+        str_contains(lower_buf, "кто поет") ||
+        str_contains(lower_buf, "кто это поет") ||
+        str_contains(lower_buf, "назови трек") ||
+        str_contains(lower_buf, "назови песню") ||
+        str_contains(lower_buf, "текущий трек")) {
+        log_msg("[bridge] Action: WHAT IS PLAYING (TTS)\n");
+        trigger_alice_suppression(quasar_fd, 4000);
+        char phrase[320];
+        if (playback_status == 1 && current_track_name[0] != 0) {
+            char *p = phrase;
+            const char *pref = "Сейчас играет ";
+            while (*pref) *p++ = *pref++;
+            const char *t = current_track_name;
+            while (*t && (p - phrase) < 180) *p++ = *t++;
+            if (current_artist_name[0] != 0) {
+                const char *mid = ", исполнитель ";
+                while (*mid) *p++ = *mid++;
+                const char *a = current_artist_name;
+                while (*a && (p - phrase) < 280) *p++ = *a++;
+            }
+            *p = 0;
+        } else {
+            str_copy(phrase, "Сейчас ничего не играет", sizeof(phrase));
+        }
+        send_alice_tts(quasar_fd, phrase);
         return;
     }
 
@@ -1105,7 +1320,18 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             str_has_word_prefix(lower_buf, "таймер") ||
             str_has_word_prefix(lower_buf, "будильник") ||
             str_has_word_prefix(lower_buf, "блютуз") ||
-            str_has_word_prefix(lower_buf, "bluetooth")) {
+            str_has_word_prefix(lower_buf, "bluetooth") ||
+            str_has_word_prefix(lower_buf, "увлажнител") ||
+            str_has_word_prefix(lower_buf, "очистител") ||
+            str_has_word_prefix(lower_buf, "обогревател") ||
+            str_has_word_prefix(lower_buf, "вентилятор") ||
+            str_has_word_prefix(lower_buf, "робот") ||
+            str_has_word_prefix(lower_buf, "кофеварк") ||
+            str_has_word_prefix(lower_buf, "кофемашин") ||
+            str_has_word_prefix(lower_buf, "карниз") ||
+            str_has_word_prefix(lower_buf, "штор") ||
+            str_has_word_prefix(lower_buf, "выключател") ||
+            str_has_word_prefix(lower_buf, "реле")) {
             log_msg("[bridge] Household smart command, ignoring\n");
             return;
         }
@@ -1195,8 +1421,12 @@ static void audio_shm_detach(void) {
 }
 
 static inline uint32_t apply_audio_curve(uint32_t raw_rms, uint32_t max_ref) {
-    // Noise gate: below 35% of peak/max_ref, keep completely dark
-    uint32_t gate = (max_ref * 35) / 100;
+    if (max_ref == 0) return 0;
+
+    // Adaptive noise gate: normal gate is 35%.
+    // At low volume (max_ref < 60, e.g. 5% volume), reduce gate to 12% so quiet playback is visible.
+    uint32_t gate_pct = (max_ref < 60) ? 12 : 35;
+    uint32_t gate = (max_ref * gate_pct) / 100;
     if (raw_rms <= gate) return 0;
 
     uint32_t span = max_ref - gate;
@@ -1207,6 +1437,12 @@ static inline uint32_t apply_audio_curve(uint32_t raw_rms, uint32_t max_ref) {
 
     // Normalize to 0..255
     uint32_t norm = (diff * 255) / span;
+
+    if (max_ref < 60) {
+        // Boost sensitivity at low volumes: milder curve (norm + norm^2) / 2
+        uint32_t quad = (norm * norm) / 255;
+        return (norm + quad) / 2;
+    }
 
     // Non-linear quadratic curve: norm^2 / 255
     // Quiet sounds are suppressed/nearly invisible, loud peaks flare up sharply
@@ -1484,7 +1720,7 @@ static void led_visualizer_tick(void) {
             } else {
                 g_auto_max_rms = (g_auto_max_rms * 98) / 100;
             }
-            if (g_auto_max_rms < 50) g_auto_max_rms = 50;
+            if (g_auto_max_rms < 2) g_auto_max_rms = 2;
 
             bass_energy = apply_audio_curve(bass_rms, g_auto_max_rms);
             mid_energy = apply_audio_curve(mid_rms, g_auto_max_rms);
@@ -1643,6 +1879,7 @@ void _start(void) {
     int touch_down_start = 0;
     int64_t touch_down_time = 0;
     int touch_is_down = 0;
+    int64_t last_touch_release_time = 0;
 
     while (1) {
         service_controllers();
@@ -1787,6 +2024,58 @@ void _start(void) {
                             handle_voice_recognition(quasar_fd, (const char *)text_bytes, text_len);
                         }
 
+                        // Parse Remoting messages: CommandSpotterCapability (quick commands without "Алиса")
+                        // and PlaybackControlCapability (hand gestures / physical panel controls over IPC)
+                        const uint8_t *remoting_body = 0;
+                        unsigned long remoting_len = 0;
+                        uint64_t rem_type = 0;
+                        if (find_field(frame_body, frame_len, 210, 2, &remoting_body, &remoting_len, 0)) {
+                            // Direct field 210
+                        } else if (find_field(frame_body, frame_len, 253, 0, 0, 0, &rem_type) && rem_type == 210) {
+                            find_field(frame_body, frame_len, 252, 2, &remoting_body, &remoting_len, 0);
+                        }
+                        if (remoting_body && remoting_len > 0) {
+                            const uint8_t *cap_name = 0;
+                            unsigned long cap_len = 0;
+                            if (find_field(remoting_body, remoting_len, 7, 2, &cap_name, &cap_len, 0)) {
+                                if (cap_len == 24 && mem_equal(cap_name, "CommandSpotterCapability", 24)) {
+                                    const uint8_t *method_body = 0;
+                                    unsigned long method_len = 0;
+                                    if (find_field(remoting_body, remoting_len, 15, 2, &method_body, &method_len, 0)) {
+                                        uint64_t m_id = 0;
+                                        if (find_field(method_body, method_len, 1, 0, 0, 0, &m_id) && m_id == 2) {
+                                            const uint8_t *phrase = 0;
+                                            unsigned long phrase_len = 0;
+                                            if (find_field(method_body, method_len, 3, 2, &phrase, &phrase_len, 0)) {
+                                                log_msg("[bridge] Quick spotter phrase spotted: \"");
+                                                sys_write(2, phrase, phrase_len);
+                                                log_msg("\"\n");
+                                                handle_voice_recognition(quasar_fd, (const char *)phrase, phrase_len);
+                                            }
+                                        }
+                                    }
+                                } else if (cap_len == 25 && mem_equal(cap_name, "PlaybackControlCapability", 25)) {
+                                    const uint8_t *method_body = 0;
+                                    unsigned long method_len = 0;
+                                    if (find_field(remoting_body, remoting_len, 13, 2, &method_body, &method_len, 0)) {
+                                        uint64_t m_id = 0;
+                                        if (find_field(method_body, method_len, 1, 0, 0, 0, &m_id)) {
+                                            log_msg("[bridge] Gesture PlaybackControlCapability received\n");
+                                            if (m_id == 1) { // PAUSE
+                                                handle_voice_recognition(quasar_fd, "пауза", 10);
+                                            } else if (m_id == 2) { // PLAY / RESUME
+                                                handle_voice_recognition(quasar_fd, "играй", 10);
+                                            } else if (m_id == 3) { // NEXT
+                                                handle_voice_recognition(quasar_fd, "дальше", 12);
+                                            } else if (m_id == 4) { // PREV
+                                                handle_voice_recognition(quasar_fd, "назад", 10);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         unsigned long total_consumed = 4 + frame_len;
                         unsigned long remaining = quasar_buf_pos - total_consumed;
                         for (unsigned long i = 0; i < remaining; i++) {
@@ -1826,39 +2115,71 @@ void _start(void) {
                             int is_touch_voice_key = (ev.code == 0x246 /* KEY_VOICECOMMAND */ ||
                                                       ev.code == 0x100 /* BTN_0 */ ||
                                                       ev.code == 353   /* KEY_SELECT */);
+                            int is_next_key = (ev.code == 163 /* KEY_NEXTSONG */ ||
+                                               ev.code == 159 /* KEY_FORWARD */ ||
+                                               ev.code == 208 /* KEY_FASTFORWARD */);
+                            int is_prev_key = (ev.code == 165 /* KEY_PREVIOUSSONG */ ||
+                                               ev.code == 158 /* KEY_BACK */ ||
+                                               ev.code == 168 /* KEY_REWIND */);
 
-                            if (ev.type == 1 /* EV_KEY */ && (is_play_pause_key || is_touch_voice_key)) {
-                                if (ev.value == 1) { // Press
-                                    touch_down_start = 1;
-                                    touch_down_time = now_ms();
-                                    touch_is_down = 1;
-                                    // Suppress Alice immediately on press down
-                                    trigger_alice_suppression(quasar_fd, 4000);
-                                } else if (ev.value == 0) { // Release
-                                    if (touch_down_start) {
-                                        int64_t dur = now_ms() - touch_down_time;
-                                        // Dedicated keys always trigger; touch/voice keys trigger on short tap (< 700ms)
-                                        if (is_play_pause_key || dur < 700) {
-                                            log_msg("[bridge] Button / Touch TAP detected -> TOGGLE PLAY/PAUSE\n");
-                                            trigger_alice_suppression(quasar_fd, 4000);
-                                            if (playback_status == 1) {
-                                                log_msg("[bridge] Instant action: PAUSE\n");
-                                                spotify_is_active = 0;
-                                                run_soloist_cmd("pause");
-                                            } else if (playback_status == 2) {
-                                                log_msg("[bridge] Instant action: PLAY\n");
-                                                spotify_is_active = 1;
-                                                run_soloist_cmd("play");
+                            if (ev.type == 1 /* EV_KEY */) {
+                                if (is_next_key && ev.value == 1) {
+                                    log_msg("[bridge] Hardware key NEXT pressed\n");
+                                    trigger_alice_suppression(quasar_fd, 3000);
+                                    spotify_is_active = 1;
+                                    run_soloist_cmd("next");
+                                    continue;
+                                }
+                                if (is_prev_key && ev.value == 1) {
+                                    log_msg("[bridge] Hardware key PREV pressed\n");
+                                    trigger_alice_suppression(quasar_fd, 3000);
+                                    spotify_is_active = 1;
+                                    run_soloist_cmd("prev");
+                                    continue;
+                                }
+                                if (is_play_pause_key || is_touch_voice_key) {
+                                    if (ev.value == 1) { // Press
+                                        touch_down_start = 1;
+                                        touch_down_time = now_ms();
+                                        touch_is_down = 1;
+                                        // Suppress Alice immediately on press down
+                                        trigger_alice_suppression(quasar_fd, 4000);
+                                    } else if (ev.value == 0) { // Release
+                                        if (touch_down_start) {
+                                            int64_t dur = now_ms() - touch_down_time;
+                                            if (is_play_pause_key || dur < 700) {
+                                                int64_t now_tap = now_ms();
+                                                if (now_tap - last_touch_release_time < 380) {
+                                                    // Double tap -> NEXT TRACK!
+                                                    log_msg("[bridge] Double-tap detected -> NEXT TRACK\n");
+                                                    last_touch_release_time = 0;
+                                                    trigger_alice_suppression(quasar_fd, 3000);
+                                                    spotify_is_active = 1;
+                                                    run_soloist_cmd("next");
+                                                } else {
+                                                    last_touch_release_time = now_tap;
+                                                    log_msg("[bridge] Button / Touch TAP detected -> TOGGLE PLAY/PAUSE\n");
+                                                    trigger_alice_suppression(quasar_fd, 4000);
+                                                    if (playback_status == 1) {
+                                                        log_msg("[bridge] Instant action: PAUSE\n");
+                                                        spotify_is_active = 0;
+                                                        run_soloist_cmd("pause");
+                                                    } else if (playback_status == 2) {
+                                                        log_msg("[bridge] Instant action: PLAY\n");
+                                                        spotify_is_active = 1;
+                                                        run_soloist_cmd("play");
+                                                    } else {
+                                                        run_toggle();
+                                                    }
+                                                }
                                             } else {
-                                                run_toggle();
+                                                log_msg("[bridge] Button / Touch HOLD -> ALICE TRIGGER\n");
+                                                cancel_alice_until_ms = 0;
                                             }
-                                        } else {
-                                            log_msg("[bridge] Button / Touch HOLD -> ALICE TRIGGER\n");
-                                            cancel_alice_until_ms = 0;
                                         }
+                                        touch_down_start = 0;
+                                        touch_is_down = 0;
                                     }
-                                    touch_down_start = 0;
-                                    touch_is_down = 0;
                                 }
                             }
                         }

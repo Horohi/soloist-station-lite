@@ -200,7 +200,7 @@ if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
     ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
 fi
 
-printf "v1.2.0\n" > "$INSTALL_DIR/version"
+printf "v1.3.0\n" > "$INSTALL_DIR/version"
 
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
@@ -295,7 +295,15 @@ for i in \$(seq 1 45); do
 done
 sleep 2
 
-export APULSE_PLAYBACK_DEVICE=plug:default
+CARD_NAME=\$(cat /proc/asound/cards 2>/dev/null | awk '/\\[/{print \$2; exit}' || echo "default")
+case "$DT_COMPAT" in
+    *plum*)
+        export APULSE_PLAYBACK_DEVICE="sysdefault:CARD=\$CARD_NAME"
+        ;;
+    *)
+        export APULSE_PLAYBACK_DEVICE="plug:default"
+        ;;
+esac
 export APULSE_DIAG=0
 export ALSA_PLUGIN_DIR=/data/opt/soloist/lib64/alsa-lib
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt

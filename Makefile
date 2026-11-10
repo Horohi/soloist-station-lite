@@ -1,9 +1,9 @@
 ifeq ($(shell which aarch64-linux-gnu-gcc 2>/dev/null),)
-  CC ?= clang --target=aarch64-linux-gnu -fuse-ld=lld
-  STRIP ?= llvm-strip
+  CC = clang --target=aarch64-linux-gnu -fuse-ld=lld
+  STRIP = llvm-strip
 else
-  CC ?= aarch64-linux-gnu-gcc
-  STRIP ?= aarch64-linux-gnu-strip
+  CC = aarch64-linux-gnu-gcc
+  STRIP = aarch64-linux-gnu-strip
 endif
 CFLAGS ?= -O2 -nostdlib -static -fno-stack-protector -fno-builtin
 

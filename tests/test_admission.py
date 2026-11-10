@@ -43,6 +43,7 @@ static int sys_pipe(int f[2]) {if(pipe(f)<0)return -1;fcntl(f[0],F_SETFL,O_NONBL
 static int sys_dup3(int from,int to) {return dup2(from,to);}
 static unsigned long str_len(const char *s) {return s?strlen(s):0;}
 static int str_equal(const char *a,const char *b) {return !strcmp(a,b);}
+static int str_contains(const char *h,const char *n) {return (h&&n&&strstr(h,n))?1:0;}
 static void log_msg(const char *s) {fputs(s,stderr);}
 static int64_t now_ms(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec*1000+t.tv_nsec/1000000;}
 '''

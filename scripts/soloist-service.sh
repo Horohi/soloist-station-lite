@@ -68,7 +68,15 @@ if [ -z "$DEVICE_NAME" ]; then
 fi
 
 # Audio and memory allocation tuning
-export APULSE_PLAYBACK_DEVICE=plug:default
+CARD_NAME=$(cat /proc/asound/cards 2>/dev/null | awk '/\[/{print $2; exit}' || echo "default")
+case "$COMPAT" in
+    *plum*)
+        export APULSE_PLAYBACK_DEVICE="sysdefault:CARD=$CARD_NAME"
+        ;;
+    *)
+        export APULSE_PLAYBACK_DEVICE=plug:default
+        ;;
+esac
 export APULSE_DIAG=0
 export ALSA_PLUGIN_DIR="$PKG_DIR/lib64/alsa-lib"
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
