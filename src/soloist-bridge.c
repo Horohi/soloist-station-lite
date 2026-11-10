@@ -466,6 +466,179 @@ static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
     send_cancel_alice(quasar_fd);
 }
 
+/* Format unsigned int into decimal ASCII; returns character count written (excluding NUL). */
+static unsigned long format_uint_ascii(char *dst, int val) {
+    if (val <= 0) {
+        dst[0] = '0';
+        dst[1] = 0;
+        return 1;
+    }
+    char digits[12];
+    int dcnt = 0;
+    int temp = val;
+    while (temp > 0 && dcnt < 12) {
+        digits[dcnt++] = (char)('0' + (temp % 10));
+        temp /= 10;
+    }
+    unsigned long len = 0;
+    while (dcnt > 0) dst[len++] = digits[--dcnt];
+    dst[len] = 0;
+    return len;
+}
+
+/* Pure bitwise IEEE-754 float <-> int (0..100) conversions without libm/libgcc. */
+static uint32_t int_to_f32_bits(int v) {
+    if (v <= 0) return 0;
+    if (v > 100) v = 100;
+    uint32_t u = (uint32_t)v;
+    int msb = 0;
+    uint32_t tmp = u;
+    while (tmp >>= 1) msb++;
+    uint32_t mant = (u << (23 - msb)) & 0x7fffffu;
+    uint32_t exp = (uint32_t)(127 + msb);
+    return (exp << 23) | mant;
+}
+
+static int f32_bits_to_int(uint32_t bits) {
+    if (bits & 0x80000000u) return 0;
+    int exp = (int)((bits >> 23) & 0xffu) - 127;
+    if (exp < -1) return 0;
+    if (exp == -1) return 1;
+    if (exp > 7) return 100;
+    uint32_t sig = (1u << 23) | (bits & 0x7fffffu);
+    int shift = 23 - exp;
+    int val = (int)((sig + (1u << (shift - 1))) >> shift);
+    if (val > 100) val = 100;
+    return val;
+}
+
+static int find_fixed32(const uint8_t *data, unsigned long len, uint32_t field_num, uint32_t *val_out) {
+    unsigned long offset = 0;
+    while (offset < len) {
+        uint64_t tag = parse_varint(data, len, &offset);
+        uint32_t fnum = (uint32_t)(tag >> 3);
+        int wire = (int)(tag & 7);
+        if (fnum == 0) return 0;
+        if (wire == 0) {
+            parse_varint(data, len, &offset);
+        } else if (wire == 2) {
+            uint64_t flen = parse_varint(data, len, &offset);
+            if (flen > len - offset) return 0;
+            offset += flen;
+        } else if (wire == 1) {
+            if (8 > len - offset) return 0;
+            offset += 8;
+        } else if (wire == 5) {
+            if (4 > len - offset) return 0;
+            if (fnum == field_num) {
+                if (val_out) {
+                    *val_out = (uint32_t)data[offset] |
+                               ((uint32_t)data[offset + 1] << 8) |
+                               ((uint32_t)data[offset + 2] << 16) |
+                               ((uint32_t)data[offset + 3] << 24);
+                }
+                return 1;
+            }
+            offset += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/* Parse Quasar StereoPair (field 198 -> 1 -> 11 VolumeManager.State) on port 9921. */
+static int parse_quasar_vol_frame(const uint8_t *frame, unsigned long frame_len, int *vol_out, uint64_t *src_out) {
+    const uint8_t *sp_body = 0;
+    unsigned long sp_len = 0;
+    uint64_t msg_type = 0;
+    if (!find_field(frame, frame_len, 198, 2, &sp_body, &sp_len, 0)) {
+        if (!find_field(frame, frame_len, 253, 0, 0, 0, &msg_type) || msg_type != 198 ||
+            !find_field(frame, frame_len, 252, 2, &sp_body, &sp_len, 0)) {
+            return 0;
+        }
+    }
+    const uint8_t *state_body = 0;
+    unsigned long state_len = 0;
+    if (!find_field(sp_body, sp_len, 1, 2, &state_body, &state_len, 0)) return 0;
+
+    const uint8_t *vol_body = 0;
+    unsigned long vol_len = 0;
+    if (!find_field(state_body, state_len, 11, 2, &vol_body, &vol_len, 0)) return 0;
+
+    uint32_t pct_bits = 0;
+    int has_pct = find_fixed32(vol_body, vol_len, 6, &pct_bits);
+    uint64_t is_muted = 0;
+    int has_mute = find_field(vol_body, vol_len, 3, 0, 0, 0, &is_muted);
+    if (!has_pct && !has_mute) return 0;
+
+    uint64_t src = 0;
+    find_field(vol_body, vol_len, 7, 0, 0, 0, &src);
+
+    int v = (has_mute && is_muted) ? 0 : (has_pct ? f32_bits_to_int(pct_bits) : 0);
+    if (vol_out) *vol_out = v;
+    if (src_out) *src_out = src;
+    return 1;
+}
+
+/* Send silent volume_set directive (ESourceOther=1000, IsLedSilent=1) via Quasar iohub_clients (port 9910). */
+static int send_quasar_volume(int io_fd, int vol_pct) {
+    if (io_fd < 0) return -1;
+    if (vol_pct < 0) vol_pct = 0;
+    if (vol_pct > 100) vol_pct = 100;
+
+    uint32_t fbits = int_to_f32_bits(vol_pct);
+
+    // PayloadRaw = TVolumeSetDirective { 1: float PercentLevel, 2: Mode=0, 3: Source=1000 }
+    // Wrapped inside TDirective -> DirectiveList -> ExternalDirectives -> IOControlCommand(95) -> QuasarMessage(88)
+    uint8_t frame[57] = {
+        53, 0x00, 0x00, 0x00, // frame length = 53 bytes
+        0xc2, 0x05, 50,       // QuasarMessage field 88 (io_control), len 50
+        0xfa, 0x05, 47,       // IOControlCommand field 95 (external_directives), len 47
+        0x0a, 45,             // ExternalDirectives field 1 (directive_list), len 45
+        0x0a, 43,             // DirectiveList field 1 (directives), len 43
+        0x0a, 13, 'c','l','i','e','n','t','_','a','c','t','i','o','n', // TDirective.Type
+        0x12, 10, 'v','o','l','u','m','e','_','s','e','t',             // TDirective.Name
+        0x20, 0x01,           // TDirective.IgnoreAnswer = 1
+        0x40, 0x01,           // TDirective.IsLedSilent = 1
+        0x7a, 10,             // TDirective.PayloadRaw, len 10
+        0x0d,                 // TVolumeSetDirective field 1 (PercentLevel, wire 5)
+        (uint8_t)(fbits & 0xff),
+        (uint8_t)((fbits >> 8) & 0xff),
+        (uint8_t)((fbits >> 16) & 0xff),
+        (uint8_t)((fbits >> 24) & 0xff),
+        0x10, 0x00,           // TVolumeSetDirective field 2 (Mode = 0 Default)
+        0x18, 0xe8, 0x07      // TVolumeSetDirective field 3 (Source = 1000 ESourceOther)
+    };
+
+    long n = sys_write(io_fd, frame, sizeof(frame));
+    return (n == (long)sizeof(frame)) ? 0 : -1;
+}
+
+/* Send masked WebSocket set_volume JSON frame to Soloist WS (port 9090). */
+static int send_soloist_ws_volume(int ws_fd, int vol_pct) {
+    if (ws_fd < 0) return -1;
+    if (vol_pct < 0) vol_pct = 0;
+    if (vol_pct > 100) vol_pct = 100;
+
+    char json[64];
+    const char *hdr = "{\"type\":\"command\",\"command\":\"set_volume\",\"volume\":";
+    unsigned long pos = 0;
+    while (hdr[pos]) { json[pos] = hdr[pos]; pos++; }
+    pos += format_uint_ascii(json + pos, vol_pct);
+    json[pos++] = '}';
+
+    uint8_t frame[72];
+    frame[0] = 0x81; // FIN + text frame
+    frame[1] = (uint8_t)(0x80 | pos); // MASK + payload length (<126)
+    static const uint8_t mask[4] = { 0x12, 0x34, 0x56, 0x78 };
+    for (int i = 0; i < 4; i++) frame[2 + i] = mask[i];
+    for (unsigned long i = 0; i < pos; i++) frame[6 + i] = (uint8_t)json[i] ^ mask[i & 3];
+
+    long n = sys_write(ws_fd, frame, 6 + pos);
+    return (n == (long)(6 + pos)) ? 0 : -1;
+}
+
 static int is_yam_mode = 0;
 
 static const char *get_controller_sh(void) {
@@ -848,8 +1021,58 @@ static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify C
 static char current_track_uri[128] = {0};
 static char current_track_name[128] = {0};
 static char current_artist_name[128] = {0};
-static int current_volume = -1;
-static int64_t last_volume_sync_time = 0;
+static int quasar_vol = -1;
+static int quasar_vol_known = 0;
+static int last_quasar_reported_vol = -1;
+static int current_soloist_vol = -1;
+static int ws_initial_vol_synced = 0;
+static int need_soloist_vol_sync = 0;
+static int pending_quasar_vol = -1;
+static int64_t pending_quasar_vol_due_ms = 0;
+static int last_sent_to_quasar_vol = -1;
+static int64_t last_sent_to_quasar_ms = 0;
+static int last_sent_to_soloist_vol = -1;
+static int64_t last_sent_to_soloist_ms = 0;
+static int64_t last_user_ws_vol_ms = 0;
+
+static int abs_diff_int(int a, int b) {
+    return a >= b ? (a - b) : (b - a);
+}
+
+static void on_quasar_volume_state(int qvol, uint64_t src, int64_t now) {
+    if (qvol < 0) qvol = 0;
+    if (qvol > 100) qvol = 100;
+
+    if (!quasar_vol_known) {
+        quasar_vol_known = 1;
+        quasar_vol = qvol;
+        last_quasar_reported_vol = qvol;
+        if (last_user_ws_vol_ms == 0 && (current_soloist_vol != qvol || !ws_initial_vol_synced)) {
+            need_soloist_vol_sync = 1;
+        }
+        return;
+    }
+
+    quasar_vol = qvol;
+    if (qvol == last_quasar_reported_vol) {
+        return;
+    }
+    last_quasar_reported_vol = qvol;
+
+    int is_our_echo = (src == 1000 &&
+                       last_sent_to_quasar_vol >= 0 &&
+                       last_sent_to_quasar_ms > 0 &&
+                       (now - last_sent_to_quasar_ms) < 1200 &&
+                       abs_diff_int(qvol, last_sent_to_quasar_vol) <= 6);
+    if (!is_our_echo) {
+        if (pending_quasar_vol >= 0 && now >= pending_quasar_vol_due_ms - 60) {
+            pending_quasar_vol = -1;
+        }
+        if (qvol != current_soloist_vol) {
+            need_soloist_vol_sync = 1;
+        }
+    }
+}
 static char last_auto_next_uri[128] = {0};
 static int playback_status = 0; // 0=stopped, 1=playing, 2=paused, 3=buffering
 static uint64_t track_duration_ms = 0;
@@ -905,29 +1128,32 @@ static void extract_track_info(const char *json) {
 static void handle_soloist_ws_json(const char *json) {
     extract_track_info(json);
 
+    char msg_type[32] = {0};
+    json_find_str(json, "type", msg_type, sizeof(msg_type));
+
     int vol = -1;
-    if (json_find_int(json, "volume", &vol)) {
-        if (vol >= 0 && vol <= 100 && vol != current_volume) {
-            current_volume = vol;
-            int64_t now_vol = now_ms();
-            if (now_vol - last_volume_sync_time >= 150) {
-                last_volume_sync_time = now_vol;
-                char vol_str[8];
-                char *p = vol_str;
-                if (vol == 0) {
-                    *p++ = '0';
-                } else {
-                    int temp = vol;
-                    char digits[8];
-                    int dcnt = 0;
-                    while (temp > 0) {
-                        digits[dcnt++] = (char)('0' + (temp % 10));
-                        temp /= 10;
-                    }
-                    while (dcnt > 0) *p++ = digits[--dcnt];
+    if (json_find_int(json, "volume", &vol) && vol >= 0 && vol <= 100) {
+        current_soloist_vol = vol;
+        if (str_equal(msg_type, "playback_state")) {
+            if (!ws_initial_vol_synced) {
+                ws_initial_vol_synced = 1;
+                if (quasar_vol_known && quasar_vol != vol) {
+                    need_soloist_vol_sync = 1;
                 }
-                *p = 0;
-                run_controller("volume", vol_str);
+            }
+        } else if (str_equal(msg_type, "volume_changed")) {
+            ws_initial_vol_synced = 1;
+            int64_t now_vol = now_ms();
+            int is_our_echo = (last_sent_to_soloist_vol >= 0 &&
+                               vol == last_sent_to_soloist_vol &&
+                               last_sent_to_soloist_ms > 0 &&
+                               (now_vol - last_sent_to_soloist_ms) < 1200);
+            if (!is_our_echo) {
+                last_user_ws_vol_ms = now_vol;
+                pending_quasar_vol = vol;
+                pending_quasar_vol_due_ms = (last_sent_to_quasar_ms == 0 || now_vol - last_sent_to_quasar_ms >= 60)
+                                            ? now_vol
+                                            : (last_sent_to_quasar_ms + 60);
             }
         }
     }
@@ -1819,9 +2045,24 @@ static void led_visualizer_tick(void) {
 
 static uint8_t quasar_buf[65536];
 static unsigned long quasar_buf_pos = 0;
+static uint8_t quasar_vol_buf[16384];
+static unsigned long quasar_vol_buf_pos = 0;
 static uint8_t ws_buf[8192];
 static unsigned long ws_buf_pos = 0;
 static struct voice_request_state voice_requests;
+
+static int connect_local_tcp(uint16_t port_be) {
+    int fd = sys_socket(2 /* AF_INET */, 1 /* SOCK_STREAM */, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in addr;
+    addr.sin_family = 2;
+    addr.sin_port = port_be;
+    addr.sin_addr = 0x0100007f; // 127.0.0.1
+    for (int i = 0; i < 8; i++) addr.sin_zero[i] = 0;
+    if (sys_connect(fd, &addr, sizeof(addr)) == 0) return fd;
+    sys_close(fd);
+    return -1;
+}
 
 #define MAX_INPUT_DEVS 8
 static int input_fds[MAX_INPUT_DEVS];
@@ -1861,20 +2102,24 @@ void _start(void) {
     if (test_fd >= 0) {
         sys_close(test_fd);
         is_yam_mode = 1;
-        log_msg("[bridge] soloist-bridge v14 started (YAM plugin mode: relative paths)\n");
+        log_msg("[bridge] soloist-bridge v15 started (YAM plugin mode: relative paths)\n");
     } else {
-        log_msg("[bridge] soloist-bridge v14 started (Standalone mode: /data/opt/soloist)\n");
+        log_msg("[bridge] soloist-bridge v15 started (Standalone mode: /data/opt/soloist)\n");
     }
 
     read_led_config();
     led_probe();
 
     int quasar_fd = -1;
+    int quasar_io_fd = -1;
+    int quasar_vol_fd = -1;
     int soloist_ws_fd = -1;
     int soloist_ws_handshake = 0;
-    int64_t last_quasar_retry = 0;
-    int64_t last_input_retry = 0;
-    int64_t last_soloist_ws_retry = 0;
+    int64_t last_quasar_retry = -2000;
+    int64_t last_quasar_io_retry = -5000;
+    int64_t last_quasar_vol_retry = -5000;
+    int64_t last_input_retry = -2000;
+    int64_t last_soloist_ws_retry = -3000;
 
     int touch_down_start = 0;
     int64_t touch_down_time = 0;
@@ -1886,24 +2131,31 @@ void _start(void) {
 
         int64_t now = now_ms();
 
-        // 1. Ensure Quasar connection
+        // 1. Ensure Quasar connections (9875 aliced, 9910 iohub_clients, 9921 stereo_pair volume)
         if (quasar_fd < 0 && now - last_quasar_retry >= 2000) {
             last_quasar_retry = now;
-            int fd = sys_socket(2, 1, 0);
+            int fd = connect_local_tcp(0x9326); // 9875 in big-endian
             if (fd >= 0) {
-                struct sockaddr_in addr;
-                addr.sin_family = 2;
-                addr.sin_port = 0x9326; // 9875 in big-endian
-                addr.sin_addr = 0x0100007f; // 127.0.0.1
-                for (int i = 0; i < 8; i++) addr.sin_zero[i] = 0;
-
-                if (sys_connect(fd, &addr, sizeof(addr)) == 0) {
-                    quasar_fd = fd;
-                    quasar_buf_pos = 0;
-                    log_msg("[bridge] Connected to Quasar on 127.0.0.1:9875\n");
-                } else {
-                    sys_close(fd);
-                }
+                quasar_fd = fd;
+                quasar_buf_pos = 0;
+                log_msg("[bridge] Connected to Quasar on 127.0.0.1:9875\n");
+            }
+        }
+        if (quasar_io_fd < 0 && now - last_quasar_io_retry >= 5000) {
+            last_quasar_io_retry = now;
+            int fd = connect_local_tcp(0xb626); // 9910 in big-endian
+            if (fd >= 0) {
+                quasar_io_fd = fd;
+                log_msg("[bridge] Connected to Quasar IOHub on 127.0.0.1:9910\n");
+            }
+        }
+        if (quasar_vol_fd < 0 && now - last_quasar_vol_retry >= 5000) {
+            last_quasar_vol_retry = now;
+            int fd = connect_local_tcp(0xc126); // 9921 in big-endian
+            if (fd >= 0) {
+                quasar_vol_fd = fd;
+                quasar_vol_buf_pos = 0;
+                log_msg("[bridge] Connected to Quasar Volume state on 127.0.0.1:9921\n");
             }
         }
 
@@ -1916,37 +2168,45 @@ void _start(void) {
         // 3. Ensure Soloist WS connection
         if (soloist_ws_fd < 0 && now - last_soloist_ws_retry >= 3000) {
             last_soloist_ws_retry = now;
-            int fd = sys_socket(2 /* AF_INET */, 1 /* SOCK_STREAM */, 0);
+            int fd = connect_local_tcp(0x8223); // 9090 in big-endian
             if (fd >= 0) {
-                struct sockaddr_in addr;
-                addr.sin_family = 2;
-                addr.sin_port = 0x8223; // 9090 in big-endian
-                addr.sin_addr = 0x0100007f; // 127.0.0.1
-                for (int i = 0; i < 8; i++) addr.sin_zero[i] = 0;
-
-                if (sys_connect(fd, &addr, sizeof(addr)) == 0) {
-                    soloist_ws_fd = fd;
-                    soloist_ws_handshake = 0;
-                    ws_buf_pos = 0;
-                    const char *req = "GET / HTTP/1.1\r\nHost: 127.0.0.1:9090\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
-                    sys_write(soloist_ws_fd, req, str_len(req));
-                    log_msg("[bridge] Connected to Soloist WS on 127.0.0.1:9090\n");
-                } else {
-                    sys_close(fd);
-                }
+                soloist_ws_fd = fd;
+                soloist_ws_handshake = 0;
+                ws_initial_vol_synced = 0;
+                current_soloist_vol = -1;
+                ws_buf_pos = 0;
+                const char *req = "GET / HTTP/1.1\r\nHost: 127.0.0.1:9090\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+                sys_write(soloist_ws_fd, req, str_len(req));
+                log_msg("[bridge] Connected to Soloist WS on 127.0.0.1:9090\n");
             }
         }
 
         // 4. Poll on available fds
-        struct pollfd pfd[2 + MAX_INPUT_DEVS];
+        struct pollfd pfd[4 + MAX_INPUT_DEVS];
         int nfds = 0;
         int quasar_idx = -1;
+        int quasar_io_idx = -1;
+        int quasar_vol_idx = -1;
         int soloist_ws_idx = -1;
         int input_start_idx = -1;
 
         if (quasar_fd >= 0) {
             quasar_idx = nfds;
             pfd[nfds].fd = quasar_fd;
+            pfd[nfds].events = 0x0001; // POLLIN
+            pfd[nfds].revents = 0;
+            nfds++;
+        }
+        if (quasar_io_fd >= 0) {
+            quasar_io_idx = nfds;
+            pfd[nfds].fd = quasar_io_fd;
+            pfd[nfds].events = 0x0001; // POLLIN
+            pfd[nfds].revents = 0;
+            nfds++;
+        }
+        if (quasar_vol_fd >= 0) {
+            quasar_vol_idx = nfds;
+            pfd[nfds].fd = quasar_vol_fd;
             pfd[nfds].events = 0x0001; // POLLIN
             pfd[nfds].revents = 0;
             nfds++;
@@ -2091,6 +2351,51 @@ void _start(void) {
                 quasar_buf_pos = 0;
             }
 
+            // Drain incoming IOEvents from Quasar IOHub (9910)
+            if (quasar_io_idx >= 0 && (pfd[quasar_io_idx].revents & (0x0001 | 0x0008 | 0x0010 | 0x0020))) {
+                uint8_t drain[4096];
+                long n = (pfd[quasar_io_idx].revents & 0x0001) ? sys_read(quasar_io_fd, drain, sizeof(drain)) : -1;
+                if (n <= 0) {
+                    sys_close(quasar_io_fd);
+                    quasar_io_fd = -1;
+                }
+            }
+
+            // Read Quasar Volume state stream (9921 stereo_pair)
+            if (quasar_vol_idx >= 0 && (pfd[quasar_vol_idx].revents & 0x0001)) {
+                long n = sys_read(quasar_vol_fd, quasar_vol_buf + quasar_vol_buf_pos, sizeof(quasar_vol_buf) - quasar_vol_buf_pos);
+                if (n <= 0) {
+                    sys_close(quasar_vol_fd);
+                    quasar_vol_fd = -1;
+                    quasar_vol_buf_pos = 0;
+                } else {
+                    quasar_vol_buf_pos += n;
+                    while (quasar_vol_buf_pos >= 4) {
+                        uint32_t fl = (uint32_t)quasar_vol_buf[0] |
+                                      ((uint32_t)quasar_vol_buf[1] << 8) |
+                                      ((uint32_t)quasar_vol_buf[2] << 16) |
+                                      ((uint32_t)quasar_vol_buf[3] << 24);
+                        if (fl > sizeof(quasar_vol_buf) - 4) {
+                            quasar_vol_buf_pos = 0;
+                            break;
+                        }
+                        if (quasar_vol_buf_pos < 4 + fl) break;
+                        int qvol = 0;
+                        uint64_t qsrc = 0;
+                        if (parse_quasar_vol_frame(quasar_vol_buf + 4, fl, &qvol, &qsrc)) {
+                            on_quasar_volume_state(qvol, qsrc, now);
+                        }
+                        unsigned long rem = quasar_vol_buf_pos - (4 + fl);
+                        for (unsigned long i = 0; i < rem; i++) quasar_vol_buf[i] = quasar_vol_buf[4 + fl + i];
+                        quasar_vol_buf_pos = rem;
+                    }
+                }
+            } else if (quasar_vol_idx >= 0 && (pfd[quasar_vol_idx].revents & (0x0008 | 0x0010 | 0x0020))) {
+                sys_close(quasar_vol_fd);
+                quasar_vol_fd = -1;
+                quasar_vol_buf_pos = 0;
+            }
+
             // Check Input devices (Multi-device monitoring across all Stations)
             if (input_start_idx >= 0) {
                 for (int i = 0; i < num_input_fds; i++) {
@@ -2200,6 +2505,8 @@ void _start(void) {
                     sys_close(soloist_ws_fd);
                     soloist_ws_fd = -1;
                     soloist_ws_handshake = 0;
+                    ws_initial_vol_synced = 0;
+                    current_soloist_vol = -1;
                     ws_buf_pos = 0;
                 } else {
                     ws_buf_pos += n;
@@ -2272,7 +2579,43 @@ void _start(void) {
                 sys_close(soloist_ws_fd);
                 soloist_ws_fd = -1;
                 soloist_ws_handshake = 0;
+                ws_initial_vol_synced = 0;
+                current_soloist_vol = -1;
                 ws_buf_pos = 0;
+            }
+        }
+
+        // Bidirectional Speaker/Alice <-> Soloist Volume Synchronization
+        int64_t now_sync = now_ms();
+        if (pending_quasar_vol >= 0 && now_sync >= pending_quasar_vol_due_ms) {
+            int target = pending_quasar_vol;
+            pending_quasar_vol = -1;
+            last_sent_to_quasar_vol = target;
+            last_sent_to_quasar_ms = now_sync;
+            if (quasar_io_fd >= 0) {
+                if (send_quasar_volume(quasar_io_fd, target) < 0) {
+                    sys_close(quasar_io_fd);
+                    quasar_io_fd = -1;
+                }
+            } else {
+                char vol_str[12];
+                format_uint_ascii(vol_str, target);
+                run_controller("volume", vol_str);
+            }
+        }
+        if (need_soloist_vol_sync && quasar_vol_known && soloist_ws_fd >= 0 && soloist_ws_handshake) {
+            need_soloist_vol_sync = 0;
+            if (quasar_vol >= 0 && quasar_vol != current_soloist_vol) {
+                last_sent_to_soloist_vol = quasar_vol;
+                last_sent_to_soloist_ms = now_sync;
+                current_soloist_vol = quasar_vol;
+                if (send_soloist_ws_volume(soloist_ws_fd, quasar_vol) < 0) {
+                    sys_close(soloist_ws_fd);
+                    soloist_ws_fd = -1;
+                    soloist_ws_handshake = 0;
+                    ws_initial_vol_synced = 0;
+                    current_soloist_vol = -1;
+                }
             }
         }
 

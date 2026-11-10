@@ -78,12 +78,21 @@ case "$COMPAT" in
         ;;
 esac
 export APULSE_DIAG=0
+export APULSE_EXTERNAL_VOLUME=1
 export ALSA_PLUGIN_DIR="$PKG_DIR/lib64/alsa-lib"
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export MALLOC_ARENA_MAX=1
 export MALLOC_TRIM_THRESHOLD_=131072
 export MALLOC_MMAP_THRESHOLD_=131072
+
+# Sync initial Soloist volume with current speaker/Alice ALSA Master level
+INIT_VOL=$(amixer get Master 2>/dev/null | awk -F'[][]' '/%/ { gsub(/%/, "", $2); print $2; exit }' || true)
+if [ -z "$INIT_VOL" ]; then
+    INIT_VOL=$(amixer get 'Master Playback Volume' 2>/dev/null | awk -F'[][]' '/%/ { gsub(/%/, "", $2); print $2; exit }' || true)
+fi
+case "$INIT_VOL" in ''|*[!0-9]*) INIT_VOL=20 ;; esac
+[ "$INIT_VOL" -le 100 ] || INIT_VOL=100
 
 export LD_LIBRARY_PATH="$PKG_DIR/lib64"
 exec "$PKG_DIR/bin/soloist" \
@@ -92,4 +101,4 @@ exec "$PKG_DIR/bin/soloist" \
     -D "$DATA_DIR" \
     -C "$CACHE_DIR" \
     -w 127.0.0.1:9090 \
-    --initial-volume 100
+    --initial-volume "$INIT_VOL"
