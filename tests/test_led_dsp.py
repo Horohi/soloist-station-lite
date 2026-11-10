@@ -257,12 +257,21 @@ int main(void) {{
         return 12;
     }}
     int peak_r1 = g_last_r1;
+    // Force pure release on SHM silence (target_energy == 0) to verify ~79%/frame crisp tail (-30% decay time)
+    memset(g_mock_shm, 0, sizeof(g_mock_shm));
+    g_mock_shmid = 1;
     led_visualizer_tick(1075);
-    // Smooth exponential release (>= 80% retained per frame instead of -58% strobe collapse)
-    if (g_last_r1 < (peak_r1 * 78) / 100) {{
-        fprintf(stderr, "FAIL smooth release dropped too steeply: prev=%d now=%d\\n", peak_r1, g_last_r1);
+    if (g_last_r1 < (peak_r1 * 74) / 100 || g_last_r1 > (peak_r1 * 83) / 100) {{
+        fprintf(stderr, "FAIL crisp release out of expected 79%% range: prev=%d now=%d\\n", peak_r1, g_last_r1);
         return 13;
     }}
+    for (int f = 1; f < 5; f++) led_visualizer_tick(1075 + f * 35);
+    if (g_last_r1 > (peak_r1 * 38) / 100) {{
+        fprintf(stderr, "FAIL fast-track decay still muddy after 5 frames: prev=%d now=%d\\n", peak_r1, g_last_r1);
+        return 18;
+    }}
+    g_mock_shmid = -1;
+    led_reset_internal_state();
 
     // 3. Yielding to Alice visual states (BUSY=3 thinking, LISTENING=1, SPEAKING=2) must NOT call led_all_off / zero writes
     g_led_writes = 0;

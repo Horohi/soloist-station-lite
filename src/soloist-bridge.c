@@ -2351,12 +2351,12 @@ static void led_visualizer_tick(int64_t now) {
 
         if (target_energy > 255) target_energy = 255;
 
-        // Smooth rise and exponential release prevent harsh strobe flashes at 30 FPS
+        // Smooth rise and crisp 30%-faster exponential release prevent strobing without blurring fast tracks
         uint32_t prev = g_prev_zone_val[i];
         if (target_energy > prev) {
             g_prev_zone_val[i] = (prev * 50 + target_energy * 50) / 100;
         } else {
-            g_prev_zone_val[i] = (prev * 85 + target_energy * 15) / 100;
+            g_prev_zone_val[i] = (prev * 79 + target_energy * 21) / 100;
         }
 
         uint32_t val = (g_prev_zone_val[i] * (uint32_t)g_led_brightness) / 255;
