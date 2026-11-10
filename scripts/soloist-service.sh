@@ -79,6 +79,7 @@ case "$COMPAT" in
 esac
 export APULSE_DIAG=0
 export APULSE_EXTERNAL_VOLUME=1
+export APULSE_YIELD_PATH=/tmp/soloist.yield
 export ALSA_PLUGIN_DIR="$PKG_DIR/lib64/alsa-lib"
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

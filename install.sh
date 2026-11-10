@@ -200,7 +200,7 @@ if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
     ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
 fi
 
-printf "v1.3.3\n" > "$INSTALL_DIR/version"
+printf "v1.3.4\n" > "$INSTALL_DIR/version"
 
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
@@ -306,6 +306,7 @@ case "$DT_COMPAT" in
 esac
 export APULSE_DIAG=0
 export APULSE_EXTERNAL_VOLUME=1
+export APULSE_YIELD_PATH=/tmp/soloist.yield
 export ALSA_PLUGIN_DIR=/data/opt/soloist/lib64/alsa-lib
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

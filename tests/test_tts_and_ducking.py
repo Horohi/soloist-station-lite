@@ -71,16 +71,20 @@ static int sys_unlink(const char *p) {{ (void)p; return 0; }}
 static int cancel_calls = 0;
 static int suppressed_calls = 0;
 static int duck_active_state = 0;
+static int yield_active_state = 0;
+static int64_t g_tts_hold_until_ms = 0;
 static int64_t cancel_alice_until_ms = 0;
 static int spotify_is_active = 0;
 static int playback_status = 0;
 static char current_track_name[128] = {{0}};
 static char current_artist_name[128] = {{0}};
 
+static void sys_msleep(long ms) {{ mock_now += ms; }}
 static void send_cancel_alice(int fd) {{ (void)fd; cancel_calls++; }}
 static void set_ducking(int active, int64_t now) {{ (void)now; duck_active_state = active; }}
+static void set_alsa_yield(int enable, int64_t now) {{ (void)now; yield_active_state = enable; }}
 static void trigger_alice_suppression(int fd, int ms) {{
-    (void)fd; suppressed_calls++; cancel_alice_until_ms = mock_now + ms; set_ducking(0, mock_now);
+    (void)fd; suppressed_calls++; g_tts_hold_until_ms = 0; cancel_alice_until_ms = mock_now + ms; set_ducking(0, mock_now); set_alsa_yield(0, mock_now);
 }}
 static void set_led_visualizer(int enable) {{ (void)enable; }}
 static void run_soloist_cmd(const char *a) {{ (void)a; }}
@@ -137,6 +141,8 @@ int main(void) {{
     CHECK(suppressed_calls == 0, "what-is-playing does not arm suppression window");
     CHECK(cancel_alice_until_ms == 0, "send_alice_tts clears suppression timer so own TTS is not killed");
     CHECK(duck_active_state == 1, "send_alice_tts engages ducking");
+    CHECK(yield_active_state == 1, "send_alice_tts engages ALSA yield for 32-bit Alice TTS");
+    CHECK(g_tts_hold_until_ms > mock_now, "send_alice_tts holds yield across transient cancelled IDLE");
     CHECK(written_len > 20, "START_VOCALIZE frame written");
     CHECK(memmem(written_frames, written_len, "AliceCapability", 15) != NULL, "frame targets AliceCapability");
     const char *exp_play = "Сейчас играет Song \\"Live\\", исполнитель ArtistOne, ArtistTwo";

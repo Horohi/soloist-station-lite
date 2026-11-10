@@ -5,6 +5,7 @@
 
 #define SOLOIST_DUCK_MAGIC 0x5344554BU /* "SDUK" */
 #define SOLOIST_DUCK_DEFAULT_PATH "/tmp/soloist_duck"
+#define SOLOIST_YIELD_DEFAULT_PATH "/tmp/soloist.yield"
 #define SOLOIST_DUCK_SHM_SIZE 64
 
 struct soloist_duck_shm {

@@ -406,8 +406,12 @@ static void send_cancel_alice(int quasar_fd) {
 }
 
 static struct soloist_duck_shm *g_duck_shm = 0;
+static int g_alsa_yield_active = 0;
+static int64_t g_alsa_yield_since_ms = 0;
+static int64_t g_tts_hold_until_ms = 0;
 
 static void duck_shm_init(void) {
+    sys_unlink(SOLOIST_YIELD_DEFAULT_PATH);
     if (g_duck_shm) return;
     int fd = sys_open(SOLOIST_DUCK_DEFAULT_PATH, 0100 | 02 /* O_CREAT | O_RDWR */, 0644);
     if (fd < 0) return;
@@ -431,6 +435,21 @@ static void set_ducking(int active, int64_t now) {
     }
 }
 
+static void set_alsa_yield(int enable, int64_t now) {
+    if (enable) {
+        if (!g_alsa_yield_active) {
+            int fd = sys_open(SOLOIST_YIELD_DEFAULT_PATH, 0100 | 01 /* O_CREAT | O_WRONLY */, 0644);
+            if (fd >= 0) sys_close(fd);
+            g_alsa_yield_active = 1;
+        }
+        if (g_alsa_yield_since_ms == 0) g_alsa_yield_since_ms = now;
+    } else if (g_alsa_yield_active || g_alsa_yield_since_ms != 0) {
+        sys_unlink(SOLOIST_YIELD_DEFAULT_PATH);
+        g_alsa_yield_active = 0;
+        g_alsa_yield_since_ms = 0;
+    }
+}
+
 static int64_t cancel_alice_until_ms = 0;
 
 /* Sends Alice START_VOCALIZE directive so Alice speaks natively on the speaker */
@@ -438,10 +457,15 @@ static int send_alice_tts(int quasar_fd, const char *text) {
     if (quasar_fd < 0 || !text || !*text) return -1;
 
     // Cancel any in-flight cloud dialog so Alice won't also answer from Yandex Music,
-    // and clear suppression window so our own START_VOCALIZE speech isn't aborted.
+    // clear suppression window so our START_VOCALIZE speech isn't aborted, duck PCM,
+    // and yield /dev/snd/pcmC0D0p so 32-bit Alice can open dmix cleanly while playing.
     send_cancel_alice(quasar_fd);
     cancel_alice_until_ms = 0;
-    set_ducking(1, now_ms());
+    int64_t tnow = now_ms();
+    g_tts_hold_until_ms = tnow + 1500;
+    set_ducking(1, tnow);
+    set_alsa_yield(1, tnow);
+    sys_msleep(80);
 
     unsigned long text_len = str_len(text);
     if (text_len > 350) text_len = 350;
@@ -521,8 +545,11 @@ static int send_alice_tts(int quasar_fd, const char *text) {
 }
 
 static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
-    cancel_alice_until_ms = now_ms() + duration_ms;
-    set_ducking(0, now_ms());
+    int64_t tnow = now_ms();
+    cancel_alice_until_ms = tnow + duration_ms;
+    g_tts_hold_until_ms = 0;
+    set_ducking(0, tnow);
+    set_alsa_yield(0, tnow);
     send_cancel_alice(quasar_fd);
 }
 
@@ -2394,6 +2421,17 @@ void _start(void) {
 
         int64_t now = now_ms();
 
+        // Fail-safe release if TTS/SPEAKING completion event was ever dropped
+        if (g_tts_hold_until_ms > 0 && now >= g_tts_hold_until_ms) {
+            g_tts_hold_until_ms = 0;
+            set_alsa_yield(0, now);
+            set_ducking(0, now);
+        }
+        if (g_alsa_yield_since_ms > 0 && now - g_alsa_yield_since_ms >= 30000) {
+            set_alsa_yield(0, now);
+            set_ducking(0, now);
+        }
+
         // 1. Ensure Quasar connections (9875 aliced, 9910 iohub_clients, 9921 stereo_pair volume)
         if (quasar_fd < 0 && now - last_quasar_retry >= 2000) {
             last_quasar_retry = now;
@@ -2505,6 +2543,8 @@ void _start(void) {
                     sys_close(quasar_fd);
                     quasar_fd = -1;
                     quasar_buf_pos = 0;
+                    g_tts_hold_until_ms = 0;
+                    set_alsa_yield(0, now);
                     set_ducking(0, now);
                 } else {
                     quasar_buf_pos += n;
@@ -2534,21 +2574,33 @@ void _start(void) {
                             if (find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state)) {
                                 if (alice_state == 1) {
                                     // User said "Alice" (wake-word spotted): clear suppression window immediately
-                                    // so the dialog is not killed and user can speak; duck Spotify audio.
+                                    // so the dialog is not killed and user can speak; duck Spotify audio to 20%.
                                     cancel_alice_until_ms = 0;
+                                    g_tts_hold_until_ms = 0;
+                                    set_alsa_yield(0, now);
                                     set_ducking(1, now);
                                 } else if (alice_state == 2 || alice_state == 3) {
                                     if (now < cancel_alice_until_ms) {
                                         // Suppress Alice cloud processing or TTS response from a hijacked Spotify command
                                         send_cancel_alice(quasar_fd);
+                                        set_alsa_yield(0, now);
                                         set_ducking(0, now);
                                     } else {
+                                        if (alice_state == 2) g_tts_hold_until_ms = 0;
                                         set_ducking(1, now);
+                                        set_alsa_yield(1, now);
                                     }
                                 } else if (alice_state == 5) {
-                                    if (now >= cancel_alice_until_ms) set_ducking(1, now);
+                                    if (now >= cancel_alice_until_ms) {
+                                        set_ducking(1, now);
+                                        set_alsa_yield(1, now);
+                                    }
                                 } else if (alice_state == 0 || alice_state == 6) {
-                                    set_ducking(0, now);
+                                    if (now >= g_tts_hold_until_ms) {
+                                        g_tts_hold_until_ms = 0;
+                                        set_alsa_yield(0, now);
+                                        set_ducking(0, now);
+                                    }
                                 }
                             }
                         }
@@ -2623,6 +2675,8 @@ void _start(void) {
                 sys_close(quasar_fd);
                 quasar_fd = -1;
                 quasar_buf_pos = 0;
+                g_tts_hold_until_ms = 0;
+                set_alsa_yield(0, now);
                 set_ducking(0, now);
             }
 
