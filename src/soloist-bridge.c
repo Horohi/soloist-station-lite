@@ -746,24 +746,59 @@ static int send_soloist_ws_volume(int ws_fd, int vol_pct) {
 }
 
 static int is_yam_mode = 0;
+static char g_ctrl_sh[320] = {0};
+static char g_censor_path[320] = {0};
+static char g_req_dir[320] = {0};
+static char g_sel_pending_path[320] = {0};
+static char g_sel_path[320] = {0};
+static char g_track_path[320] = {0};
+static char g_track_tmp_path[320] = {0};
+static char g_gen_path[320] = {0};
+static char g_conf_path[320] = {0};
+static char g_led_state_path[320] = {0};
+static char g_led_req_path[320] = {0};
+static char g_yam_env[5][280];
+static int g_yam_env_count = 0;
 
 static const char *get_controller_sh(void) {
+    if (g_ctrl_sh[0]) return g_ctrl_sh;
     int fd = sys_open("./bin/control.sh", 0 /* O_RDONLY */, 0);
     if (fd >= 0) { sys_close(fd); return "./bin/control.sh"; }
     return is_yam_mode ? "./scripts/control.sh" : "/data/opt/soloist/scripts/control.sh";
 }
 
 static const char *get_censor_path(void) {
+    if (g_censor_path[0]) return g_censor_path;
     return is_yam_mode ? "./data/censorship" : "/data/opt/soloist/data/censorship";
+}
+
+static const char *get_requests_dir(void) {
+    if (g_req_dir[0]) return g_req_dir;
+    return is_yam_mode ? "./data/requests" : "/data/opt/soloist/data/requests";
+}
+
+static const char *get_conf_path(void) {
+    if (g_conf_path[0]) return g_conf_path;
+    return is_yam_mode ? "./spotify_api.conf" : "/data/opt/soloist/spotify_api.conf";
+}
+
+static const char *get_led_state_path(void) {
+    if (g_led_state_path[0]) return g_led_state_path;
+    return is_yam_mode ? "./data/requests/led_state" : "/data/opt/soloist/data/requests/led_state";
+}
+
+static const char *get_led_req_path(void) {
+    if (g_led_req_path[0]) return g_led_req_path;
+    return is_yam_mode ? "./data/requests/led" : "/data/opt/soloist/data/requests/led";
 }
 
 static int str_equal(const char *a, const char *b);
 static uint64_t track_observation_revision;
 
 static int selection_needs_observation(void) {
-    const char *pending = is_yam_mode ? "./data/requests/selection.pending" : "/data/opt/soloist/data/requests/selection.pending";
-    const char *selection = is_yam_mode ? "./data/requests/selection" : "/data/opt/soloist/data/requests/selection";
-    const char *track = is_yam_mode ? "./data/requests/track" : "/data/opt/soloist/data/requests/track";
+    const char *pending = g_sel_pending_path[0] ? g_sel_pending_path : (is_yam_mode ? "./data/requests/selection.pending" : "/data/opt/soloist/data/requests/selection.pending");
+    const char *selection = g_sel_path[0] ? g_sel_path : (is_yam_mode ? "./data/requests/selection" : "/data/opt/soloist/data/requests/selection");
+    const char *track = g_track_path[0] ? g_track_path : (is_yam_mode ? "./data/requests/track" : "/data/opt/soloist/data/requests/track");
     int fd = sys_open(pending, 0, 0);
     if (fd < 0) fd = sys_open(selection, 0, 0);
     if (fd < 0) return 0;
@@ -781,9 +816,9 @@ static int selection_needs_observation(void) {
 }
 
 static void publish_track(const char *uri) {
-    const char *dir = is_yam_mode ? "./data/requests" : "/data/opt/soloist/data/requests";
-    const char *tmp = is_yam_mode ? "./data/requests/track.tmp" : "/data/opt/soloist/data/requests/track.tmp";
-    const char *path = is_yam_mode ? "./data/requests/track" : "/data/opt/soloist/data/requests/track";
+    const char *dir = get_requests_dir();
+    const char *tmp = g_track_tmp_path[0] ? g_track_tmp_path : (is_yam_mode ? "./data/requests/track.tmp" : "/data/opt/soloist/data/requests/track.tmp");
+    const char *path = g_track_path[0] ? g_track_path : (is_yam_mode ? "./data/requests/track" : "/data/opt/soloist/data/requests/track");
     sys_mkdir(dir, 0700);
     int fd = sys_open(tmp, 577 /* O_WRONLY|O_CREAT|O_TRUNC */, 0600);
     if (fd < 0) return;
@@ -852,11 +887,15 @@ static void service_controllers(void) {
         const char *argv[] = { "/bin/sh", get_controller_sh(), command->action,
             command->arg[0] ? command->arg : 0,
             command->generation[0] ? command->generation : 0, 0 };
-        const char *envp[] = {
-            "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
-            "SOLOIST_BRIDGE_ADMISSION=1",
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt", 0
-        };
+        const char *envp[9];
+        int ei = 0;
+        envp[ei++] = "PATH=/bin:/usr/bin:/sbin:/usr/sbin";
+        envp[ei++] = "SOLOIST_BRIDGE_ADMISSION=1";
+        envp[ei++] = "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt";
+        for (int k = 0; k < g_yam_env_count && ei < 8; k++) {
+            envp[ei++] = g_yam_env[k];
+        }
+        envp[ei] = 0;
         sys_execve("/bin/sh", argv, envp);
         sys_exit(1);
     }
@@ -884,7 +923,7 @@ static void run_controller(const char *action, const char *arg) {
     command->arg[arg_len] = 0;
     command->generation[0] = 0;
     if (str_equal(action, "auto-next")) { // Observe intent before waiting in the queue.
-        const char *path = is_yam_mode ? "./data/requests/generation" : "/data/opt/soloist/data/requests/generation";
+        const char *path = g_gen_path[0] ? g_gen_path : (is_yam_mode ? "./data/requests/generation" : "/data/opt/soloist/data/requests/generation");
         int fd = sys_open(path, 0, 0);
         long n = fd < 0 ? 0 : sys_read(fd, command->generation, sizeof(command->generation) - 1);
         if (fd >= 0) sys_close(fd);
@@ -2194,7 +2233,7 @@ static void set_led_visualizer_impl(int enable) {
             led_all_off();
         }
     }
-    const char *state_path = is_yam_mode ? "./data/requests/led_state" : "/data/opt/soloist/data/requests/led_state";
+    const char *state_path = get_led_state_path();
     int fd = sys_open(state_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
     if (fd >= 0) {
         if (g_led_enabled) {
@@ -2208,7 +2247,7 @@ static void set_led_visualizer_impl(int enable) {
 }
 
 static void read_led_config(void) {
-    const char *conf_path = is_yam_mode ? "./spotify_api.conf" : "/data/opt/soloist/spotify_api.conf";
+    const char *conf_path = get_conf_path();
     int fd = sys_open(conf_path, 0, 0);
     if (fd >= 0) {
         char buf[1024];
@@ -2231,7 +2270,7 @@ static void read_led_config(void) {
         }
     }
 
-    const char *state_path = is_yam_mode ? "./data/requests/led_state" : "/data/opt/soloist/data/requests/led_state";
+    const char *state_path = get_led_state_path();
     int sfd = sys_open(state_path, 0, 0);
     if (sfd >= 0) {
         char sbuf[32];
@@ -2246,7 +2285,7 @@ static void read_led_config(void) {
 }
 
 static void check_led_request(void) {
-    const char *path = is_yam_mode ? "./data/requests/led" : "/data/opt/soloist/data/requests/led";
+    const char *path = get_led_req_path();
     int fd = sys_open(path, 0, 0);
     if (fd < 0) return;
     char cmd[16];
@@ -2466,7 +2505,137 @@ static void open_input_devices(void) {
     }
 }
 
-void _start(void) {
+static inline long sys_readlinkat(const char *path, char *buf, unsigned long sz) {
+    register long x8 __asm__("x8") = 78; // readlinkat
+    register long x0 __asm__("x0") = -100; // AT_FDCWD
+    register long x1 __asm__("x1") = (long)path;
+    register long x2 __asm__("x2") = (long)buf;
+    register long x3 __asm__("x3") = (long)sz;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return x0;
+}
+
+static void join_path(char *dst, unsigned long max, const char *a, const char *b) {
+    unsigned long pos = 0;
+    while (*a && pos + 1 < max) dst[pos++] = *a++;
+    if (pos > 0 && dst[pos - 1] != '/' && *b && *b != '/' && pos + 1 < max) dst[pos++] = '/';
+    while (*b && pos + 1 < max) dst[pos++] = *b++;
+    dst[pos] = 0;
+}
+
+static void lookup_proc_env(const char *ebuf, long elen, const char *key, char *dst, unsigned long max) {
+    dst[0] = 0;
+    unsigned long klen = str_len(key);
+    long i = 0;
+    while (i < elen) {
+        long start = i;
+        while (i < elen && ebuf[i] != 0) i++;
+        long len = i - start;
+        if ((unsigned long)len > klen + 1 && ebuf[start + klen] == '=' && mem_equal(ebuf + start, key, klen)) {
+            unsigned long vlen = (unsigned long)(len - (long)klen - 1);
+            if (vlen >= max) vlen = max - 1;
+            for (unsigned long k = 0; k < vlen; k++) dst[k] = ebuf[start + klen + 1 + k];
+            dst[vlen] = 0;
+            return;
+        }
+        i++;
+    }
+}
+
+static void push_yam_env(const char *key, const char *val) {
+    if (!val || !val[0] || g_yam_env_count >= 5) return;
+    char *dst = g_yam_env[g_yam_env_count++];
+    unsigned long pos = 0, max = sizeof(g_yam_env[0]);
+    while (*key && pos + 2 < max) dst[pos++] = *key++;
+    dst[pos++] = '=';
+    while (*val && pos + 1 < max) dst[pos++] = *val++;
+    dst[pos] = 0;
+}
+
+static void init_runtime_paths(void) {
+    char ebuf[8192];
+    long elen = 0;
+    int efd = sys_open("/proc/self/environ", 0, 0);
+    if (efd >= 0) {
+        elen = sys_read(efd, ebuf, sizeof(ebuf) - 1);
+        sys_close(efd);
+        if (elen < 0) elen = 0;
+        ebuf[elen] = 0;
+    }
+
+    char yam_root[256], yam_pkg[256], yam_etc[256], yam_var[256], yam_run[256];
+    lookup_proc_env(ebuf, elen, "YAM_ROOT", yam_root, sizeof(yam_root));
+    lookup_proc_env(ebuf, elen, "YAM_PKG", yam_pkg, sizeof(yam_pkg));
+    lookup_proc_env(ebuf, elen, "YAM_ETC", yam_etc, sizeof(yam_etc));
+    lookup_proc_env(ebuf, elen, "YAM_VAR", yam_var, sizeof(yam_var));
+    lookup_proc_env(ebuf, elen, "YAM_RUN", yam_run, sizeof(yam_run));
+
+    char exe_buf[512];
+    for (unsigned long i = 0; i < sizeof(exe_buf); i++) exe_buf[i] = 0;
+    long exelen = sys_readlinkat("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+    if (exelen > 0) exe_buf[exelen] = 0;
+
+    char pkg_share[256] = {0};
+    if (yam_pkg[0]) {
+        join_path(pkg_share, sizeof(pkg_share), yam_pkg, "share/horohi.soloist");
+    } else if (str_contains(exe_buf, "/share/horohi.soloist/bin/")) {
+        const char *needle = "/bin/soloist-bridge";
+        for (int i = 0; exe_buf[i]; i++) {
+            if (mem_equal(exe_buf + i, needle, 19)) {
+                unsigned long n = (unsigned long)i;
+                if (n >= sizeof(pkg_share)) n = sizeof(pkg_share) - 1;
+                for (unsigned long k = 0; k < n; k++) pkg_share[k] = exe_buf[k];
+                pkg_share[n] = 0;
+                break;
+            }
+        }
+    } else {
+        int probe = sys_open("./share/horohi.soloist/bin/soloist", 0, 0);
+        if (probe >= 0) {
+            sys_close(probe);
+            str_copy(pkg_share, "./share/horohi.soloist", sizeof(pkg_share));
+        }
+    }
+
+    if (pkg_share[0] || yam_var[0] || yam_etc[0] || str_contains(exe_buf, "/yam/")) {
+        if (!yam_root[0]) str_copy(yam_root, "/data/yam", sizeof(yam_root));
+        if (!pkg_share[0]) join_path(pkg_share, sizeof(pkg_share), yam_root, "share/horohi.soloist");
+        if (!yam_var[0]) join_path(yam_var, sizeof(yam_var), yam_root, "var");
+        if (!yam_etc[0]) join_path(yam_etc, sizeof(yam_etc), yam_root, "etc");
+
+        char data_base[256], conf_base[256];
+        join_path(data_base, sizeof(data_base), yam_var, "horohi.soloist");
+        join_path(conf_base, sizeof(conf_base), yam_etc, "horohi.soloist");
+
+        join_path(g_ctrl_sh, sizeof(g_ctrl_sh), pkg_share, "scripts/control.sh");
+        join_path(g_censor_path, sizeof(g_censor_path), data_base, "censorship");
+        join_path(g_req_dir, sizeof(g_req_dir), data_base, "requests");
+        join_path(g_sel_pending_path, sizeof(g_sel_pending_path), g_req_dir, "selection.pending");
+        join_path(g_sel_path, sizeof(g_sel_path), g_req_dir, "selection");
+        join_path(g_track_path, sizeof(g_track_path), g_req_dir, "track");
+        join_path(g_track_tmp_path, sizeof(g_track_tmp_path), g_req_dir, "track.tmp");
+        join_path(g_gen_path, sizeof(g_gen_path), g_req_dir, "generation");
+        join_path(g_led_state_path, sizeof(g_led_state_path), g_req_dir, "led_state");
+        join_path(g_led_req_path, sizeof(g_led_req_path), g_req_dir, "led");
+        join_path(g_conf_path, sizeof(g_conf_path), conf_base, "spotify_api.conf");
+
+        sys_mkdir(yam_var, 0755);
+        sys_mkdir(data_base, 0755);
+        sys_mkdir(g_req_dir, 0700);
+
+        push_yam_env("YAM_ROOT", yam_root);
+        if (yam_pkg[0]) push_yam_env("YAM_PKG", yam_pkg);
+        push_yam_env("YAM_ETC", yam_etc);
+        push_yam_env("YAM_VAR", yam_var);
+        if (yam_run[0]) push_yam_env("YAM_RUN", yam_run);
+
+        is_yam_mode = 1;
+        log_msg("[bridge] soloist-bridge v15 started (YAM v2 mode: ");
+        log_msg(pkg_share);
+        log_msg(")\n");
+        return;
+    }
+
     int test_fd = sys_open("./bin/soloist", 0 /* O_RDONLY */, 0);
     if (test_fd >= 0) {
         sys_close(test_fd);
@@ -2475,6 +2644,10 @@ void _start(void) {
     } else {
         log_msg("[bridge] soloist-bridge v15 started (Standalone mode: /data/opt/soloist)\n");
     }
+}
+
+void _start(void) {
+    init_runtime_paths();
 
     read_led_config();
     led_probe();

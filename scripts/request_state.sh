@@ -1,6 +1,36 @@
 # Shared by the controller and search worker; BASE_DIR must name this installation.
 umask 077
-STATE_DIR="$BASE_DIR/data/requests"
+
+# Resolve storage paths for YAM v2 ($YAM_VAR/$YAM_ETC) or Standalone (/data/opt/soloist)
+yam_root_from_base() {
+    case "${BASE_DIR:-}" in
+        */pkgs/horohi/soloist/*/share/horohi.soloist)
+            printf '%s\n' "${BASE_DIR%/pkgs/horohi/soloist/*/share/horohi.soloist}"
+            ;;
+        */share/horohi.soloist)
+            printf '%s\n' "${BASE_DIR%/share/horohi.soloist}"
+            ;;
+    esac
+}
+
+YAM_DETECTED_ROOT="${YAM_ROOT:-$(yam_root_from_base)}"
+if [ -n "${YAM_VAR:-}" ] || [ -n "${YAM_ETC:-}" ] || [ -n "${YAM_PKG:-}" ] || [ -n "$YAM_DETECTED_ROOT" ]; then
+    [ -n "$YAM_DETECTED_ROOT" ] || YAM_DETECTED_ROOT="/data/yam"
+    YAM_ROOT="$YAM_DETECTED_ROOT"
+    _var_base="${YAM_VAR:-$YAM_ROOT/var}"
+    _etc_base="${YAM_ETC:-$YAM_ROOT/etc}"
+    if [ "$YAM_ROOT" != "/data/yam" ]; then
+        [ "$_var_base" != "/data/yam/var" ] || _var_base="$YAM_ROOT/var"
+        [ "$_etc_base" != "/data/yam/etc" ] || _etc_base="$YAM_ROOT/etc"
+    fi
+    YAM_DATA_ROOT="$_var_base/horohi.soloist"
+    YAM_CONF_DIR="$_etc_base/horohi.soloist"
+    STATE_DIR="${SOLOIST_STATE_DIR:-$YAM_DATA_ROOT/requests}"
+else
+    YAM_DATA_ROOT="$BASE_DIR/data"
+    YAM_CONF_DIR="$BASE_DIR"
+    STATE_DIR="${SOLOIST_STATE_DIR:-$BASE_DIR/data/requests}"
+fi
 mkdir -p "$STATE_DIR" || exit 1
 exec 8>"$STATE_DIR/control.lock"
 SELECTION_PENDING=0

@@ -125,20 +125,22 @@ adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 (Если нужно передать ключ и имя заранее: `sh ./install.sh <API_KEY> "<Имя устройства>"`.)
 
 #### Вариант Б. Установка через YAM v2 (Y Application Manager)
-Проект содержит манифест `yam.yaml` и полностью адаптирован под спецификацию пакетов **YAM v2** (`.yampkg`):
+Проект содержит манифест `yam.yaml` и полностью адаптирован под спецификацию пакетов **YAM v2** (`.yampkg`) со строго разделёнными путями:
+- Бинарные файлы и скрипты: `$YAM_ROOT/share/horohi.soloist/` + команда `soloist` в `$YAM_ROOT/bin/soloist`
+- Конфигурация: `$YAM_ETC/horohi.soloist/config.env` (`API_KEY`, `DEVICE_NAME`) и `spotify_api.conf`
+- Данные и IPC: `$YAM_VAR/horohi.soloist/`
+
 ```bash
-# Сборка пакета для платформы (yandexmicro, yandexmini_2, yandexplum, yandexmidi):
-yam --platform yandexmicro pack . --output soloist.yampkg
+# Сборка .yampkg на ПК с помощью yam-publish (или make pack-yam YAM_TARGET=yandexmicro):
+./scripts/pack-yam.sh yandexmicro
 
-# Установка пакета:
-yam install soloist.yampkg
+# Локальная установка .yampkg на колонке с установленным YAM v2:
+yam install horohi-soloist-1.3.6-yandexmicro.yampkg
+
+# Или установка из репозитория после публикации namespace:
+yam install horohi/soloist
 ```
-YAM v2 автоматически зарегистрирует и запустит два системных сервиса: `soloist` (Spotify Connect клиент) и `bridge` (мост кнопок и Алисы).
-
-Скрипт автоматически:
-- Скопирует все необходимые файлы на колонку в `/data/opt/soloist`
-- Настроит права доступа и автозагрузку при старте колонки
-- Запустит сервис Spotify Connect
+После установки укажите `API_KEY` в `/data/yam/etc/horohi.soloist/config.env` (при миграции с `/data/opt/soloist` конфиги переносятся автоматически) и перезапустите службу: `soloist restart`. Автозапуск настраивается через `/etc/init.d/S98soloist`.
 
 ### 3. Подключение приложения
 Откройте приложение Spotify на смартфоне или компьютере, нажмите на значок устройств в плеере и выберите **«Yandex Station Lite»**.

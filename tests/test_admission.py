@@ -6,7 +6,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "src/soloist-bridge.c").read_text()
-production = source[source.index("static const char *get_controller_sh"):source.index("/* Text and command classification helpers */")]
+production = source[source.index("static int is_yam_mode = 0;"):source.index("/* Text and command classification helpers */")]
 production += source[source.index("static int mem_equal"):source.index("/* Word-boundary helpers.")]
 production += source[source.index("static int spotify_is_active"):source.index("static void handle_voice_recognition")]
 loop_start = source.index("    while (1) {", source.index("void _start")) + len("    while (1) {")
@@ -27,7 +27,6 @@ prefix = r'''
 #include <sys/stat.h>
 #include <poll.h>
 #include <signal.h>
-static int is_yam_mode=1;
 static long sys_clone(unsigned long f,void *s) {(void)f;(void)s;return fork();}
 static long sys_wait4(int p,int *s,int o,void *r) {(void)r;long n=waitpid(p,s,o);return n<0?-errno:n;}
 static int sys_execve(const char *p,const char *const a[],const char *const e[]) {return execve(p,(char *const *)a,(char *const *)e);}
@@ -49,6 +48,7 @@ static int64_t now_ms(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t)
 '''
 driver = r'''
 int main(void) {
+    is_yam_mode = 1;
     signal(SIGHUP,SIG_IGN); signal(SIGINT,SIG_IGN); signal(SIGTERM,SIG_IGN);
     int events[2]; pipe(events); write(events[1],"TQ",2);
     int64_t start=now_ms();

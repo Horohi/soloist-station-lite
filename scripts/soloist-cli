@@ -8,8 +8,58 @@ set -e
 export PATH="/data/opt/bin:/opt/bin:/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
 unset LD_LIBRARY_PATH LD_PRELOAD
 
-INSTALL_DIR="${INSTALL_DIR:-/data/opt/soloist}"
-[ -d "$INSTALL_DIR" ] || INSTALL_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+IS_YAM=0
+if [ -n "${INSTALL_DIR:-}" ]; then
+    case "$INSTALL_DIR" in */share/horohi.soloist) IS_YAM=1 ;; esac
+elif [ -n "${YAM_PKG:-}" ] && [ -d "$YAM_PKG/share/horohi.soloist/bin" ]; then
+    INSTALL_DIR="$YAM_PKG/share/horohi.soloist"
+    IS_YAM=1
+else
+    _cli_parent="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    _cli_real="$(readlink -f "$0" 2>/dev/null || true)"
+    _cli_real_parent=""
+    [ -z "$_cli_real" ] || _cli_real_parent="$(cd "$(dirname "$_cli_real")/.." 2>/dev/null && pwd)"
+
+    if [ -d "$_cli_parent/share/horohi.soloist/bin" ]; then
+        INSTALL_DIR="$_cli_parent/share/horohi.soloist"
+        YAM_ROOT="$_cli_parent"
+        IS_YAM=1
+    elif [ -n "$_cli_real_parent" ] && [ -d "$_cli_real_parent/share/horohi.soloist/bin" ]; then
+        INSTALL_DIR="$_cli_real_parent/share/horohi.soloist"
+        IS_YAM=1
+    elif [ -d "$_cli_parent/bin" ] && [ -f "$_cli_parent/scripts/control.sh" ]; then
+        INSTALL_DIR="$_cli_parent"
+        case "$INSTALL_DIR" in */share/horohi.soloist) IS_YAM=1 ;; esac
+    elif [ -d "${YAM_ROOT:-/data/yam}/share/horohi.soloist/bin" ]; then
+        INSTALL_DIR="${YAM_ROOT:-/data/yam}/share/horohi.soloist"
+        IS_YAM=1
+    else
+        INSTALL_DIR="/data/opt/soloist"
+    fi
+fi
+
+if [ "$IS_YAM" = 1 ]; then
+    if [ -z "${YAM_ROOT:-}" ]; then
+        case "$INSTALL_DIR" in
+            */pkgs/horohi/soloist/*/share/horohi.soloist) YAM_ROOT="${INSTALL_DIR%/pkgs/horohi/soloist/*/share/horohi.soloist}" ;;
+            */share/horohi.soloist) YAM_ROOT="${INSTALL_DIR%/share/horohi.soloist}" ;;
+            *) YAM_ROOT="/data/yam" ;;
+        esac
+    fi
+    _var_base="${YAM_VAR:-$YAM_ROOT/var}"
+    _etc_base="${YAM_ETC:-$YAM_ROOT/etc}"
+    if [ "$YAM_ROOT" != "/data/yam" ]; then
+        [ "$_var_base" != "/data/yam/var" ] || _var_base="$YAM_ROOT/var"
+        [ "$_etc_base" != "/data/yam/etc" ] || _etc_base="$YAM_ROOT/etc"
+    fi
+    DATA_ROOT="$_var_base/horohi.soloist"
+    CONF_DIR="$_etc_base/horohi.soloist"
+    CACHE_DIR="${SOLOIST_CACHE_DIR:-${YAM_RUN:-/tmp}/soloist_cache}"
+else
+    DATA_ROOT="$INSTALL_DIR/data"
+    CONF_DIR="$INSTALL_DIR"
+    CACHE_DIR="${SOLOIST_CACHE_DIR:-/tmp/soloist_cache}"
+fi
 
 CURL_BIN="$INSTALL_DIR/bin/curl"
 [ -x "$CURL_BIN" ] || CURL_BIN="curl"
@@ -77,7 +127,7 @@ cmd_status() {
     printf "${BOLD}=== Spotify Soloist Status ===${NC}\n"
 
     # Soloist daemon
-    SOLO_PID=$(pidof soloist 2>/dev/null | awk '{print $NF}' || cat "$INSTALL_DIR/data/soloist.pid" 2>/dev/null || true)
+    SOLO_PID=$(pidof soloist 2>/dev/null | awk '{print $NF}' || cat "$DATA_ROOT/soloist.pid" 2>/dev/null || cat "$CACHE_DIR/soloist.pid" 2>/dev/null || true)
     if [ -n "$SOLO_PID" ] && kill -0 "$SOLO_PID" 2>/dev/null; then
         RSS_KB=$(awk '/VmRSS/{print $2}' "/proc/$SOLO_PID/status" 2>/dev/null || echo "0")
         RSS_MB=$((RSS_KB / 1024))
@@ -87,7 +137,7 @@ cmd_status() {
     fi
 
     # Bridge daemon
-    BRIDGE_PID=$(pidof soloist-bridge 2>/dev/null || cat "$INSTALL_DIR/data/bridge.pid" 2>/dev/null || true)
+    BRIDGE_PID=$(pidof soloist-bridge 2>/dev/null || cat "$DATA_ROOT/bridge.pid" 2>/dev/null || cat "$CACHE_DIR/bridge.pid" 2>/dev/null || true)
     if [ -n "$BRIDGE_PID" ] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
         BR_RSS=$(awk '/VmRSS/{print $2}' "/proc/$BRIDGE_PID/status" 2>/dev/null || echo "0")
         printf "  Soloist Bridge: ${GREEN}RUNNING${NC} (PID: %s, RAM: %s KB)\n" "$BRIDGE_PID" "$BR_RSS"
@@ -96,8 +146,8 @@ cmd_status() {
     fi
 
     # LED visualizer state
-    if [ -f "$INSTALL_DIR/data/requests/led_state" ]; then
-        LED_ST=$(cat "$INSTALL_DIR/data/requests/led_state" 2>/dev/null || echo "off")
+    if [ -f "$DATA_ROOT/requests/led_state" ]; then
+        LED_ST=$(cat "$DATA_ROOT/requests/led_state" 2>/dev/null || echo "off")
         if [ "$LED_ST" = "on" ]; then
             printf "  Светомузыка:    ${GREEN}ВКЛЮЧЕНА (Nothing Phone / Equalizer)${NC}\n"
         else
@@ -115,11 +165,17 @@ cmd_status() {
     fi
 
     # Current Track
-    if [ -f "$INSTALL_DIR/data/requests/track" ]; then
-        TRACK_URI=$(head -n 1 "$INSTALL_DIR/data/requests/track" 2>/dev/null || true)
+    if [ -f "$DATA_ROOT/requests/track" ]; then
+        TRACK_URI=$(head -n 1 "$DATA_ROOT/requests/track" 2>/dev/null || true)
         if [ -n "$TRACK_URI" ]; then
             printf "  Текущий трек:   ${CYAN}%s${NC}\n" "$TRACK_URI"
         fi
+    fi
+
+    if [ "$IS_YAM" = 1 ]; then
+        printf "\n${BOLD}YAM v2 Пути:${NC}\n"
+        printf "  Конфиг: %s\n" "$CONF_DIR"
+        printf "  Данные: %s\n" "$DATA_ROOT"
     fi
 
     # Memory
@@ -130,9 +186,9 @@ cmd_status() {
 
 cmd_led() {
     ACTION="${1:-status}"
-    REQ_FILE="$INSTALL_DIR/data/requests/led"
-    STATE_FILE="$INSTALL_DIR/data/requests/led_state"
-    mkdir -p "$INSTALL_DIR/data/requests"
+    REQ_FILE="$DATA_ROOT/requests/led"
+    STATE_FILE="$DATA_ROOT/requests/led_state"
+    mkdir -p "$DATA_ROOT/requests"
 
     case "$ACTION" in
         on|1)
@@ -175,21 +231,36 @@ cmd_led() {
 
 cmd_restart() {
     printf "Перезапуск Spotify Soloist...\n"
-    "$INSTALL_DIR/stop.sh" >/dev/null 2>&1 || true
-    sleep 1
-    sh "$INSTALL_DIR/start.sh"
+    if [ "$IS_YAM" = 1 ]; then
+        YAM_ROOT="$YAM_ROOT" YAM_VAR="${YAM_VAR:-$YAM_ROOT/var}" YAM_ETC="${YAM_ETC:-$YAM_ROOT/etc}" \
+            sh "$INSTALL_DIR/scripts/yam-init.sh" restart
+    else
+        "$INSTALL_DIR/stop.sh" >/dev/null 2>&1 || true
+        sleep 1
+        sh "$INSTALL_DIR/start.sh"
+    fi
     printf "${GREEN}Готово! Служба перезапущена.${NC}\n"
 }
 
 cmd_start() {
     printf "Запуск Spotify Soloist...\n"
-    sh "$INSTALL_DIR/start.sh"
+    if [ "$IS_YAM" = 1 ]; then
+        YAM_ROOT="$YAM_ROOT" YAM_VAR="${YAM_VAR:-$YAM_ROOT/var}" YAM_ETC="${YAM_ETC:-$YAM_ROOT/etc}" \
+            sh "$INSTALL_DIR/scripts/yam-init.sh" start
+    else
+        sh "$INSTALL_DIR/start.sh"
+    fi
     printf "${GREEN}Запущено.${NC}\n"
 }
 
 cmd_stop() {
     printf "Остановка Spotify Soloist...\n"
-    "$INSTALL_DIR/stop.sh"
+    if [ "$IS_YAM" = 1 ]; then
+        YAM_ROOT="$YAM_ROOT" YAM_VAR="${YAM_VAR:-$YAM_ROOT/var}" YAM_ETC="${YAM_ETC:-$YAM_ROOT/etc}" \
+            sh "$INSTALL_DIR/scripts/yam-init.sh" stop
+    else
+        "$INSTALL_DIR/stop.sh"
+    fi
     printf "${YELLOW}Остановлено.${NC}\n"
 }
 
@@ -226,9 +297,9 @@ cmd_clean() {
 
     # 3. Clean old audio stream chunks from cache (BusyBox find compatible)
     if [ -x "$INSTALL_DIR/scripts/control.sh" ]; then
-        sh "$INSTALL_DIR/scripts/control.sh" clean-cache 2>/dev/null || true
-    elif [ -d /tmp/soloist_cache/cache ]; then
-        find /tmp/soloist_cache/cache -type f -mmin +1 -exec rm -f {} + 2>/dev/null || true
+        SOLOIST_CACHE_DIR="$CACHE_DIR/cache" sh "$INSTALL_DIR/scripts/control.sh" clean-cache 2>/dev/null || true
+    elif [ -d "$CACHE_DIR/cache" ]; then
+        find "$CACHE_DIR/cache" -type f -mmin +1 -exec rm -f {} + 2>/dev/null || true
     fi
 
     # 4. Clean update leftovers in /bkupgrade
@@ -238,10 +309,10 @@ cmd_clean() {
     rm -f "$INSTALL_DIR"/*.bak "$INSTALL_DIR"/*.tmp 2>/dev/null || true
 
     # 6. Ensure Storage cache lives in RAM tmpfs to protect flash memory
-    mkdir -p /tmp/soloist_cache/Storage
-    if [ ! -L "$INSTALL_DIR/data/cache/Storage" ]; then
-        rm -rf "$INSTALL_DIR/data/cache/Storage" 2>/dev/null || true
-        ln -sfn /tmp/soloist_cache/Storage "$INSTALL_DIR/data/cache/Storage" 2>/dev/null || true
+    mkdir -p "$CACHE_DIR/Storage" "$DATA_ROOT/cache"
+    if [ ! -L "$DATA_ROOT/cache/Storage" ]; then
+        rm -rf "$DATA_ROOT/cache/Storage" 2>/dev/null || true
+        ln -sfn "$CACHE_DIR/Storage" "$DATA_ROOT/cache/Storage" 2>/dev/null || true
     fi
 
     # 7. Drop inactive kernel page cache to free RAM
@@ -258,6 +329,13 @@ cmd_clean() {
 }
 
 cmd_update() {
+    if [ "$IS_YAM" = 1 ]; then
+        CURR=$(get_current_version)
+        printf "${BOLD}Пакет установлен через YAM v2 (${CYAN}horohi/soloist${NC}${BOLD}, текущая версия: %s).${NC}\n" "$CURR"
+        printf "Для обновления используйте пакетный менеджер YAM:\n"
+        printf "  ${CYAN}yam update && yam upgrade horohi/soloist${NC}\n"
+        exit 0
+    fi
     FORCE="${1:-}"
     CURR=$(get_current_version)
     printf "${BOLD}Проверка обновлений с GitHub (${GITHUB_REPO})...${NC}\n"

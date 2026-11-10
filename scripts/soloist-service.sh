@@ -1,22 +1,41 @@
 #!/bin/sh
 set -e
 
-# YAM v2 provides:
-# YAM_PKG: path to immutable package version directory (/data/yam/pkgs/horohi/soloist/1.2.0)
-# YAM_ROOT: package manager root (/data/yam)
-# YAM_ETC: configuration directory (/data/yam/etc)
-# YAM_VAR: mutable data directory (/data/yam/var)
-# YAM_RUN: runtime directory (/tmp/yam)
-# YAM_PLATFORM: current platform profile (e.g. yandexmicro)
-
-PKG_DIR="${YAM_PKG:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
+# YAM v2 provides YAM_PKG, YAM_ROOT, YAM_ETC, YAM_VAR, YAM_RUN, YAM_PLATFORM.
+if [ -n "${YAM_PKG:-}" ] && [ -d "$YAM_PKG/share/horohi.soloist/bin" ]; then
+    PKG_DIR="$YAM_PKG/share/horohi.soloist"
+else
+    PKG_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+fi
+[ -d "$PKG_DIR/bin" ] || PKG_DIR="${YAM_ROOT:-/data/yam}/share/horohi.soloist"
 [ -d "$PKG_DIR/bin" ] || PKG_DIR="/data/opt/soloist"
 
-CONFIG_DIR="${YAM_ETC:-$PKG_DIR/data}/horohi.soloist"
-DATA_DIR="${YAM_VAR:-$PKG_DIR/data}/horohi.soloist"
+if [ -z "${YAM_ROOT:-}" ]; then
+    case "$PKG_DIR" in
+        */pkgs/horohi/soloist/*/share/horohi.soloist) YAM_ROOT="${PKG_DIR%/pkgs/horohi/soloist/*/share/horohi.soloist}" ;;
+        */share/horohi.soloist) YAM_ROOT="${PKG_DIR%/share/horohi.soloist}" ;;
+        *) YAM_ROOT="/data/yam" ;;
+    esac
+fi
+
+_etc_base="${YAM_ETC:-$YAM_ROOT/etc}"
+_var_base="${YAM_VAR:-$YAM_ROOT/var}"
+if [ "$YAM_ROOT" != "/data/yam" ]; then
+    [ "$_etc_base" != "/data/yam/etc" ] || _etc_base="$YAM_ROOT/etc"
+    [ "$_var_base" != "/data/yam/var" ] || _var_base="$YAM_ROOT/var"
+fi
+
+if [ -n "${YAM_VAR:-}" ] || [ -n "${YAM_ETC:-}" ] || [ -n "${YAM_PKG:-}" ] || [ "$PKG_DIR" != "/data/opt/soloist" ]; then
+    CONFIG_DIR="$_etc_base/horohi.soloist"
+    DATA_DIR="$_var_base/horohi.soloist"
+else
+    CONFIG_DIR="/data/opt/soloist"
+    DATA_DIR="/data/opt/soloist/data"
+fi
 CACHE_DIR="${YAM_RUN:-/tmp}/soloist_cache"
 
-mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR/cache" "$CACHE_DIR/Storage" "$DATA_DIR/cache"
+mkdir -p "$CONFIG_DIR" "$DATA_DIR/requests" "$DATA_DIR/cache" "$CACHE_DIR/cache" "$CACHE_DIR/Storage"
+chmod 700 "$DATA_DIR/requests" 2>/dev/null || true
 if [ ! -L "$DATA_DIR/cache/Storage" ]; then
     rm -rf "$DATA_DIR/cache/Storage" 2>/dev/null || true
     ln -sfn "$CACHE_DIR/Storage" "$DATA_DIR/cache/Storage" 2>/dev/null || true
@@ -32,10 +51,8 @@ if [ -e /dev/zram0 ] && [ "$(cat /sys/block/zram0/disksize 2>/dev/null)" = "0" ]
 fi
 
 CONFIG_FILE="$CONFIG_DIR/config.env"
-if [ ! -f "$CONFIG_FILE" ]; then
-    if [ -f "$PKG_DIR/share/horohi.soloist/config.env.example" ]; then
-        cp -n "$PKG_DIR/share/horohi.soloist/config.env.example" "$CONFIG_FILE" 2>/dev/null || true
-    fi
+if [ ! -f "$CONFIG_FILE" ] && [ -f "$PKG_DIR/config.env.example" ]; then
+    cp "$PKG_DIR/config.env.example" "$CONFIG_FILE" 2>/dev/null || true
 fi
 
 API_KEY=""
@@ -44,13 +61,17 @@ if [ -f "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 fi
 
-# Fallback: check legacy start.sh or station config
+# Fallback: check legacy start.sh
 if [ -z "$API_KEY" ] && [ -f "/data/opt/soloist/start.sh" ]; then
     API_KEY=$(grep -o 'API_KEY="[^"]*"' /data/opt/soloist/start.sh 2>/dev/null | cut -d'"' -f2 || true)
 fi
 
-[ -n "$API_KEY" ] || API_KEY="dummy"
+if [ -z "$API_KEY" ]; then
+    echo "[service] Warning: API_KEY is not set in $CONFIG_FILE (using dummy placeholder)" >&2
+    API_KEY="dummy"
+fi
 
+COMPAT=""
 if [ -z "$DEVICE_NAME" ]; then
     DEVICE_NAME="Yandex Station"
     if [ -f /proc/device-tree/compatible ]; then
@@ -63,8 +84,12 @@ if [ -z "$DEVICE_NAME" ]; then
             *station-mini*) DEVICE_NAME="Yandex Station Mini" ;;
             *station-midi*|*midi*) DEVICE_NAME="Yandex Station 2" ;;
             *cucumber*|*amlogic,a5*|*amlogic,\ a5*) DEVICE_NAME="Yandex Station Midi" ;;
+            *orion*) DEVICE_NAME="Yandex Station Max" ;;
+            *saturn*) DEVICE_NAME="Yandex Station Max Zigbee" ;;
         esac
     fi
+elif [ -f /proc/device-tree/compatible ]; then
+    COMPAT=$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null || true)
 fi
 
 # Audio and memory allocation tuning

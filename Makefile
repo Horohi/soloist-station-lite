@@ -43,9 +43,9 @@ $(TARGET_ALSA_SHIM): $(SRC_DIR)/rate_samplerate.c
 	ln -sfn libasound_module_rate_speexrate_medium.so libasound_module_rate_samplerate_linear.so
 
 clean:
-	rm -rf $(TARGET_BIN) $(ALSA_LIB_DIR) $(TARGET_DUCK_SHIM) soloist.yampkg
+	rm -rf $(TARGET_BIN) $(ALSA_LIB_DIR) $(TARGET_DUCK_SHIM) soloist.yampkg dist/*.yampkg
 
 pack-yam: $(TARGET_BIN) $(TARGET_ALSA_SHIM) $(TARGET_DUCK_SHIM)
-	yam --platform yandexmicro pack . --output soloist.yampkg
+	./scripts/pack-yam.sh $(or $(YAM_TARGET),yandexmicro)
 
 .PHONY: all clean pack-yam

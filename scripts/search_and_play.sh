@@ -11,16 +11,22 @@ LOG="/tmp/soloist-search.log"
 printf "[search] ===== Incoming query: '%s' =====\n" "$QUERY" >> "$LOG"
 
 # Base directory detection
-BASE_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
-[ -d "$BASE_DIR/bin" ] || BASE_DIR="/data/opt/soloist"
+if [ -n "${YAM_PKG:-}" ] && [ -d "$YAM_PKG/share/horohi.soloist/bin" ]; then
+    BASE_DIR="$YAM_PKG/share/horohi.soloist"
+else
+    BASE_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    if [ ! -d "$BASE_DIR/bin" ] && [ ! -f "$BASE_DIR/scripts/request_state.sh" ]; then
+        if [ -d "${YAM_ROOT:-/data/yam}/share/horohi.soloist/bin" ]; then
+            BASE_DIR="${YAM_ROOT:-/data/yam}/share/horohi.soloist"
+        else
+            BASE_DIR="/data/opt/soloist"
+        fi
+    fi
+fi
 
 SOLOIST_BIN="$BASE_DIR/bin/soloist"
 CURL_BIN="$BASE_DIR/bin/curl"
 [ -x "$CURL_BIN" ] || CURL_BIN="curl"
-API_CONF="$BASE_DIR/spotify_api.conf"
-[ -f "$API_CONF" ] || API_CONF="/data/opt/soloist/spotify_api.conf"
-CENSOR_FILE="$BASE_DIR/data/censorship"
-[ -f "$CENSOR_FILE" ] || CENSOR_FILE="/data/opt/soloist/data/censorship"
 
 if [ -f "$BASE_DIR/scripts/request_state.sh" ]; then
     . "$BASE_DIR/scripts/request_state.sh"
@@ -29,6 +35,13 @@ elif [ -f "$BASE_DIR/bin/request_state.sh" ]; then
 else
     . /data/opt/soloist/scripts/request_state.sh
 fi
+
+API_CONF="$YAM_CONF_DIR/spotify_api.conf"
+[ -f "$API_CONF" ] || API_CONF="$BASE_DIR/spotify_api.conf"
+[ -f "$API_CONF" ] || API_CONF="/data/opt/soloist/spotify_api.conf"
+CENSOR_FILE="$YAM_DATA_ROOT/censorship"
+[ -f "$CENSOR_FILE" ] || CENSOR_FILE="$BASE_DIR/data/censorship"
+[ -f "$CENSOR_FILE" ] || CENSOR_FILE="/data/opt/soloist/data/censorship"
 GENERATION="$2"
 [ -n "$GENERATION" ] || request_begin || exit 1
 request_current || exit 0
@@ -59,8 +72,9 @@ valid_id() {
 RADIO=0
 case "$TERM" in
     'любимые треки'|'мои любимые треки'|'понравившиеся треки'|'мне нравится'|'избранное'|'мое избранное'|'моё избранное'|'избранные треки')
-        FAVORITES="$BASE_DIR/data/favorites.uri"
-        [ -f "$FAVORITES" ] || personal_error 'Liked Songs not configured (data/favorites.uri)'
+        FAVORITES="$YAM_DATA_ROOT/favorites.uri"
+        [ -f "$FAVORITES" ] || FAVORITES="$BASE_DIR/data/favorites.uri"
+        [ -f "$FAVORITES" ] || personal_error 'Liked Songs not configured (favorites.uri)'
         [ "$(wc -c < "$FAVORITES")" -le 128 ] || personal_error 'Invalid Liked Songs URI'
         URI=$(cat "$FAVORITES") || personal_error 'Could not read Liked Songs URI'
         case "$URI" in spotify:playlist:*) valid_id "${URI#spotify:playlist:}" || personal_error 'Invalid Liked Songs URI';;

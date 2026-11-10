@@ -1,27 +1,44 @@
 name: horohi/soloist
-version: 1.2.0
+version: 1.3.6
 license: MIT
-description: Spotify Connect with Alice voice control and media buttons for Yandex Station
+description: Spotify Connect with Alice voice control, media buttons, ALSA ducking, and adaptive LED equalizer for Yandex Station
 homepage: https://github.com/Horohi/soloist-station-lite
-targets: [yandexmicro, yandexplum, yandexmini_2, yandexmidi]
+targets:
+  - yandexmicro
+  - plum
+  - yandexplum
+  - yandexmini
+  - yandexmini_2
+  - bergamot
+  - pickle
+  - cucumber
+  - yandexmidi
+  - yandexstation
+  - yandexstation_2
+  - orion
+  - saturn
 files:
-  bin/soloist: bin/soloist
-  bin/soloist-bridge: bin/soloist-bridge
-  bin/soloist-cli: scripts/soloist-cli
-  bin/curl: bin/curl
-  bin/soloist-service: scripts/soloist-service.sh
-  bin/control.sh: scripts/control.sh
-  bin/request_state.sh: scripts/request_state.sh
-  bin/search_and_play.sh: scripts/search_and_play.sh
-  bin/toggle.sh: scripts/toggle.sh
-  lib64/: lib64/
+  bin/soloist: scripts/soloist-cli
+  bin/soloist-postinstall: scripts/yam-postinstall.sh
+  share/horohi.soloist/bin/soloist: bin/soloist
+  share/horohi.soloist/bin/soloist-bridge: bin/soloist-bridge
+  share/horohi.soloist/bin/curl: bin/curl
+  share/horohi.soloist/lib64/: lib64/
+  share/horohi.soloist/scripts/control.sh: scripts/control.sh
+  share/horohi.soloist/scripts/request_state.sh: scripts/request_state.sh
+  share/horohi.soloist/scripts/search_and_play.sh: scripts/search_and_play.sh
+  share/horohi.soloist/scripts/soloist-service.sh: scripts/soloist-service.sh
+  share/horohi.soloist/scripts/yam-init.sh: scripts/yam-init.sh
+  share/horohi.soloist/scripts/toggle.sh: scripts/toggle.sh
+  share/horohi.soloist/scripts/status.sh: scripts/status.sh
+  share/horohi.soloist/scripts/stop.sh: scripts/stop.sh
+  share/horohi.soloist/scripts/soloist-cli: scripts/soloist-cli
+  share/horohi.soloist/config.env.example: config.env.example
   share/horohi.soloist/spotify_api.conf.example: spotify_api.conf.example
+  share/horohi.soloist/version: version
 services:
   soloist:
-    exec: [bin/soloist-service]
-    restart: always
+    exec: ["share/horohi.soloist/scripts/yam-init.sh", "run"]
+    restart: on-failure
     after: [network]
-  bridge:
-    exec: [bin/soloist-bridge]
-    restart: always
-    after: [network]
+postinstall: ["bin/soloist-postinstall"]

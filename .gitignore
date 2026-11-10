@@ -10,4 +10,6 @@ cache/
 *.zip
 *.yap
 *.yampkg
+dist/
+version
 lib64/
