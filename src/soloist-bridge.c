@@ -1609,7 +1609,10 @@ static int g_led_last_active = 0;
 static uint32_t g_bass_level = 0;
 static uint32_t g_treble_level = 0;
 static int32_t *g_audio_shm_ptr = 0;
-static uint32_t g_auto_max_rms = 120;
+static uint32_t g_band_floor[3] = {0};
+static uint32_t g_band_peak[3] = {0};
+static int g_band_init[3] = {0};
+static int g_shm_is_32bit = 0;
 static uint32_t g_prev_zone_val[24] = {0};
 
 static inline uint32_t isqrt(uint64_t n) {
@@ -1646,33 +1649,124 @@ static void audio_shm_detach(void) {
     }
 }
 
-static inline uint32_t apply_audio_curve(uint32_t raw_rms, uint32_t max_ref) {
-    if (max_ref == 0) return 0;
+// Adaptive per-band baseline/peak envelope with noise gate and cubic gamma curve
+static uint32_t compute_band_energy(int band_idx, uint32_t e, uint32_t total_rms) {
+    if (band_idx < 0 || band_idx >= 3) return 0;
 
-    // Adaptive noise gate: normal gate is 35%.
-    // At low volume (max_ref < 60, e.g. 5% volume), reduce gate to 12% so quiet playback is visible.
-    uint32_t gate_pct = (max_ref < 60) ? 12 : 35;
-    uint32_t gate = (max_ref * gate_pct) / 100;
-    if (raw_rms <= gate) return 0;
-
-    uint32_t span = max_ref - gate;
-    if (span == 0) return 0;
-
-    uint32_t diff = raw_rms - gate;
-    if (diff > span) diff = span;
-
-    // Normalize to 0..255
-    uint32_t norm = (diff * 255) / span;
-
-    if (max_ref < 60) {
-        // Boost sensitivity at low volumes: milder curve (norm + norm^2) / 2
-        uint32_t quad = (norm * norm) / 255;
-        return (norm + quad) / 2;
+    if (!g_band_init[band_idx]) {
+        g_band_floor[band_idx] = (uint32_t)(((uint64_t)e * 92) / 100);
+        g_band_peak[band_idx] = (uint32_t)(((uint64_t)e * 115) / 100);
+        g_band_init[band_idx] = 1;
     }
 
-    // Non-linear quadratic curve: norm^2 / 255
-    // Quiet sounds are suppressed/nearly invisible, loud peaks flare up sharply
-    return (norm * norm) / 255;
+    uint32_t fl = g_band_floor[band_idx];
+    uint32_t pk = g_band_peak[band_idx];
+
+    // Floor tracks sustained signal slowly up and faster down
+    if (e < fl) {
+        fl = (uint32_t)(((uint64_t)fl * 82 + (uint64_t)e * 18) / 100);
+    } else {
+        fl = (uint32_t)(((uint64_t)fl * 93 + (uint64_t)e * 7) / 100);
+    }
+
+    // Peak tracks beats instantaneously up and decays cleanly toward floor
+    if (e > pk) {
+        pk = e;
+    } else {
+        uint32_t dec = ((uint64_t)fl * 3 < (uint64_t)pk) ? 94 : 97;
+        pk = (uint32_t)(((uint64_t)pk * dec + (uint64_t)fl * (100 - dec)) / 100);
+    }
+
+    g_band_floor[band_idx] = fl;
+    g_band_peak[band_idx] = pk;
+
+    // Suppress digital silence/very quiet noise (<1.5 LSB) and out-of-band filter bleed (<4% of total RMS)
+    if (e <= 384 || (uint64_t)e * 25 <= (uint64_t)total_rms) return 0;
+
+    uint32_t span = (pk > fl) ? (pk - fl) : 0;
+    uint32_t min_span = (uint32_t)(((uint64_t)pk * 30) / 100);
+    if (span < min_span) span = min_span;
+    if (span < 384) span = 384;
+
+    uint32_t ex = (e > fl) ? (e - fl) : 0;
+    uint32_t norm = (ex >= span) ? 255 : (uint32_t)(((uint64_t)ex * 255) / span);
+
+    // 28% deadzone keeps sustained pads dark so only genuine peaks stand out
+    if (norm <= 72) return 0;
+
+    uint32_t scaled = ((norm - 72) * 255) / (255 - 72);
+    // Cubic gamma curve matches human LED brightness perception and emphasizes peaks
+    uint32_t sq = (scaled * scaled) / 255;
+    return (sq * scaled) / 255;
+}
+
+// Fixed-point (<<8) 3-band 2-pole crossover across Left channel dmix buffer (7680 frames @ 48kHz)
+static void analyze_shm_bands(const int32_t *shm, int num_frames,
+                              uint32_t *bass_out, uint32_t *mid_out, uint32_t *treble_out) {
+    *bass_out = 0;
+    *mid_out = 0;
+    *treble_out = 0;
+    if (!shm || num_frames <= 0) return;
+
+    for (int pass = 0; pass < 2; pass++) {
+        int64_t total_sum_sq = 0;
+        int64_t bass_sum_sq = 0;
+        int64_t mid_sum_sq = 0;
+        int64_t treble_sum_sq = 0;
+        int64_t lpf1a = 0, lpf1b = 0;
+        int64_t lpf2a = 0, lpf_hp2 = 0;
+        int64_t mid_lp = 0;
+        int mode_switched = 0;
+
+        for (int f = 0; f < num_frames; f++) {
+            int32_t s = shm[f * 2];
+            if (!g_shm_is_32bit && (s > 65535 || s < -65535)) {
+                g_shm_is_32bit = 1;
+                for (int k = 0; k < 3; k++) {
+                    g_band_init[k] = 0;
+                    g_band_floor[k] = 0;
+                    g_band_peak[k] = 0;
+                }
+                mode_switched = 1;
+                break;
+            }
+
+            // Normalize both S16_LE and S32_LE dmix buffers into S16<<8 fixed-point scale
+            int64_t sfp = g_shm_is_32bit ? (((int64_t)s) / 256) : (((int64_t)s) * 256);
+
+            // Bass: 2-pole LPF ~240Hz (1/32, -12dB/oct)
+            lpf1a = (lpf1a * 31 + sfp) / 32;
+            lpf1b = (lpf1b * 31 + lpf1a) / 32;
+            int64_t b = lpf1b;
+
+            // Treble: 2-pole HPF ~955Hz (1/8, -12dB/oct)
+            lpf2a = (lpf2a * 7 + sfp) / 8;
+            int64_t hp2 = sfp - lpf2a;
+            lpf_hp2 = (lpf_hp2 * 7 + hp2) / 8;
+            int64_t t = hp2 - lpf_hp2;
+
+            // Mid: bandpass (~240..955Hz)
+            mid_lp = (mid_lp * 7 + (sfp - lpf1a)) / 8;
+            int64_t m = mid_lp;
+
+            total_sum_sq += sfp * sfp;
+            bass_sum_sq += b * b;
+            mid_sum_sq += m * m;
+            treble_sum_sq += t * t;
+        }
+
+        if (mode_switched) continue;
+
+        uint32_t total_rms = isqrt((uint64_t)(total_sum_sq / num_frames));
+        uint32_t bass_rms = isqrt((uint64_t)(bass_sum_sq / num_frames));
+        uint32_t mid_rms = isqrt((uint64_t)(mid_sum_sq / num_frames));
+        uint32_t treble_rms = isqrt((uint64_t)(treble_sum_sq / num_frames));
+
+        *bass_out = compute_band_energy(0, bass_rms, total_rms);
+        *mid_out = compute_band_energy(1, mid_rms, total_rms);
+        *treble_out = compute_band_energy(2, treble_rms, total_rms);
+        return;
+    }
 }
 
 static void write_sysfs_int(const char *path, int val) {
@@ -1784,6 +1878,12 @@ static void led_probe(void) {
 static void led_all_off(void) {
     audio_shm_detach();
     for (int i = 0; i < 24; i++) g_prev_zone_val[i] = 0;
+    for (int k = 0; k < 3; k++) {
+        g_band_floor[k] = 0;
+        g_band_peak[k] = 0;
+        g_band_init[k] = 0;
+    }
+    g_shm_is_32bit = 0;
     if (!g_led_hw.detected) return;
     int start = g_led_hw.is_zero_indexed ? 0 : 1;
     int end = start + g_led_hw.num_zones;
@@ -1835,23 +1935,38 @@ static void set_led_visualizer_impl(int enable) {
 static void read_led_config(void) {
     const char *conf_path = is_yam_mode ? "./spotify_api.conf" : "/data/opt/soloist/spotify_api.conf";
     int fd = sys_open(conf_path, 0, 0);
-    if (fd < 0) return;
-    char buf[1024];
-    long n = sys_read(fd, buf, sizeof(buf) - 1);
-    sys_close(fd);
-    if (n <= 0) return;
-    buf[n] = 0;
-    if (str_contains(buf, "LED_VISUALIZER=on") || str_contains(buf, "LED_VISUALIZER=1")) {
-        g_led_enabled = 1;
-    } else if (str_contains(buf, "LED_VISUALIZER=rainbow")) {
-        g_led_enabled = 1;
-        g_led_color_mode = 1;
-    } else if (str_contains(buf, "LED_VISUALIZER=cyan")) {
-        g_led_enabled = 1;
-        g_led_color_mode = 2;
-    } else if (str_contains(buf, "LED_VISUALIZER=white")) {
-        g_led_enabled = 1;
-        g_led_color_mode = 0;
+    if (fd >= 0) {
+        char buf[1024];
+        long n = sys_read(fd, buf, sizeof(buf) - 1);
+        sys_close(fd);
+        if (n > 0) {
+            buf[n] = 0;
+            if (str_contains(buf, "LED_VISUALIZER=on") || str_contains(buf, "LED_VISUALIZER=1")) {
+                g_led_enabled = 1;
+            } else if (str_contains(buf, "LED_VISUALIZER=rainbow")) {
+                g_led_enabled = 1;
+                g_led_color_mode = 1;
+            } else if (str_contains(buf, "LED_VISUALIZER=cyan")) {
+                g_led_enabled = 1;
+                g_led_color_mode = 2;
+            } else if (str_contains(buf, "LED_VISUALIZER=white")) {
+                g_led_enabled = 1;
+                g_led_color_mode = 0;
+            }
+        }
+    }
+
+    const char *state_path = is_yam_mode ? "./data/requests/led_state" : "/data/opt/soloist/data/requests/led_state";
+    int sfd = sys_open(state_path, 0, 0);
+    if (sfd >= 0) {
+        char sbuf[32];
+        long sn = sys_read(sfd, sbuf, sizeof(sbuf) - 1);
+        sys_close(sfd);
+        if (sn > 0) {
+            sbuf[sn] = 0;
+            if (str_contains(sbuf, "on")) g_led_enabled = 1;
+            else if (str_contains(sbuf, "off")) g_led_enabled = 0;
+        }
     }
 }
 
@@ -1910,48 +2025,7 @@ static void led_visualizer_tick(void) {
     uint32_t treble_energy = 0;
 
     if (g_audio_shm_ptr) {
-        int64_t total_sum_sq = 0;
-        int64_t bass_sum_sq = 0;
-        int64_t treble_sum_sq = 0;
-        int32_t lpf = 0;
-        int32_t prev_sample = 0;
-        int samples_read = 0;
-
-        // Sample Left channel across 160ms dmix buffer (7680 samples @ 48kHz)
-        for (int i = 0; i < 15360; i += 2) {
-            int32_t s = g_audio_shm_ptr[i];
-            total_sum_sq += (int64_t)s * s;
-
-            // Low-pass filter for bass (cutoff ~470 Hz)
-            lpf = (lpf * 15 + s) / 16;
-            bass_sum_sq += (int64_t)lpf * lpf;
-
-            // High-pass filter for treble
-            int32_t diff = s - prev_sample;
-            prev_sample = s;
-            treble_sum_sq += (int64_t)diff * diff;
-
-            samples_read++;
-        }
-
-        if (samples_read > 0) {
-            uint32_t total_rms = isqrt((uint64_t)(total_sum_sq / samples_read));
-            uint32_t bass_rms = isqrt((uint64_t)(bass_sum_sq / samples_read));
-            uint32_t treble_rms = isqrt((uint64_t)(treble_sum_sq / samples_read));
-            uint32_t mid_rms = (total_rms > bass_rms) ? (total_rms - (bass_rms / 2)) : (total_rms / 2);
-
-            // Auto-gain peak tracker
-            if (total_rms > g_auto_max_rms) {
-                g_auto_max_rms = total_rms;
-            } else {
-                g_auto_max_rms = (g_auto_max_rms * 98) / 100;
-            }
-            if (g_auto_max_rms < 2) g_auto_max_rms = 2;
-
-            bass_energy = apply_audio_curve(bass_rms, g_auto_max_rms);
-            mid_energy = apply_audio_curve(mid_rms, g_auto_max_rms);
-            treble_energy = apply_audio_curve(treble_rms, g_auto_max_rms);
-        }
+        analyze_shm_bands(g_audio_shm_ptr, 7680, &bass_energy, &mid_energy, &treble_energy);
     } else {
         // Fallback simulation if SHM is unavailable
         uint32_t bar_pos = g_led_frame % 40;
@@ -2007,7 +2081,7 @@ static void led_visualizer_tick(void) {
         if (target_energy > prev) {
             g_prev_zone_val[i] = target_energy; // Instant attack on beat
         } else {
-            g_prev_zone_val[i] = (prev * 70 + target_energy * 30) / 100; // Smooth fade-out
+            g_prev_zone_val[i] = (prev * 42 + target_energy * 58) / 100; // Snappy beat fade-out
         }
 
         uint32_t val = (g_prev_zone_val[i] * (uint32_t)g_led_brightness) / 255;
