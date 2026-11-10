@@ -200,7 +200,7 @@ if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
     ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
 fi
 
-printf "v1.3.2\n" > "$INSTALL_DIR/version"
+printf "v1.3.3\n" > "$INSTALL_DIR/version"
 
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
@@ -323,7 +323,10 @@ case "\$INIT_VOL" in ''|*[!0-9]*) INIT_VOL=20 ;; esac
 
 API_KEY="$API_KEY"
 
+DUCK_PRELOAD=""
+[ -f "/data/opt/soloist/lib64/libsoloist_duck.so" ] && DUCK_PRELOAD="/data/opt/soloist/lib64/libsoloist_duck.so"
 LD_LIBRARY_PATH="/data/opt/soloist/lib64" \\
+LD_PRELOAD="\$DUCK_PRELOAD" \\
 nohup /data/opt/soloist/bin/soloist \\
     -n "$DEVICE_NAME" \\
     -k "\$API_KEY" \\

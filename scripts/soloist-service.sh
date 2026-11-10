@@ -95,6 +95,7 @@ case "$INIT_VOL" in ''|*[!0-9]*) INIT_VOL=20 ;; esac
 [ "$INIT_VOL" -le 100 ] || INIT_VOL=100
 
 export LD_LIBRARY_PATH="$PKG_DIR/lib64"
+[ -f "$PKG_DIR/lib64/libsoloist_duck.so" ] && export LD_PRELOAD="$PKG_DIR/lib64/libsoloist_duck.so"
 exec "$PKG_DIR/bin/soloist" \
     -n "$DEVICE_NAME" \
     -k "$API_KEY" \

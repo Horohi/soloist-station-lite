@@ -1,0 +1,14 @@
+ALSA_0.9 {
+  global:
+    snd_pcm_hw_params_set_format;
+    snd_pcm_hw_params_set_channels;
+    snd_pcm_hw_params_set_rate;
+    snd_pcm_writei;
+  local:
+    *;
+};
+
+ALSA_0.9.0rc4 {
+  global:
+    snd_pcm_hw_params_set_rate_near;
+} ALSA_0.9;

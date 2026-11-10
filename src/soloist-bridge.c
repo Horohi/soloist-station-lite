@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "voice-request.h"
+#include "duck_shm.h"
 
 /* Minimal Linux system call wrappers for AArch64 (ARM64) */
 
@@ -179,6 +180,36 @@ static inline int sys_unlink(const char *path) {
 #else
     extern int unlink(const char *path);
     return unlink(path);
+#endif
+}
+
+static inline int sys_ftruncate(int fd, long length) {
+#ifdef __aarch64__
+    register long x8 __asm__("x8") = 46;
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = length;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+    return (int)x0;
+#else
+    (void)fd; (void)length;
+    return -1;
+#endif
+}
+
+static inline void *sys_mmap(void *addr, unsigned long len, int prot, int flags, int fd, long off) {
+#ifdef __aarch64__
+    register long x8 __asm__("x8") = 222;
+    register long x0 __asm__("x0") = (long)addr;
+    register long x1 __asm__("x1") = (long)len;
+    register long x2 __asm__("x2") = prot;
+    register long x3 __asm__("x3") = flags;
+    register long x4 __asm__("x4") = fd;
+    register long x5 __asm__("x5") = off;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5) : "memory");
+    return (void *)x0;
+#else
+    (void)addr; (void)len; (void)prot; (void)flags; (void)fd; (void)off;
+    return (void *)-1;
 #endif
 }
 
@@ -374,16 +405,48 @@ static void send_cancel_alice(int quasar_fd) {
     }
 }
 
+static struct soloist_duck_shm *g_duck_shm = 0;
+
+static void duck_shm_init(void) {
+    if (g_duck_shm) return;
+    int fd = sys_open(SOLOIST_DUCK_DEFAULT_PATH, 0100 | 02 /* O_CREAT | O_RDWR */, 0644);
+    if (fd < 0) return;
+    sys_ftruncate(fd, SOLOIST_DUCK_SHM_SIZE);
+    void *p = sys_mmap(0, SOLOIST_DUCK_SHM_SIZE, 3 /* PROT_READ|PROT_WRITE */, 1 /* MAP_SHARED */, fd, 0);
+    sys_close(fd);
+    if ((long)p < 0 && (long)p > -4096) return;
+    g_duck_shm = (struct soloist_duck_shm *)p;
+    g_duck_shm->magic = SOLOIST_DUCK_MAGIC;
+    __atomic_store_n(&g_duck_shm->until_ms, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_duck_shm->active, 0, __ATOMIC_RELEASE);
+}
+
+static void set_ducking(int active, int64_t now) {
+    if (!g_duck_shm) return;
+    if (active) {
+        __atomic_store_n(&g_duck_shm->until_ms, now + 60000, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_duck_shm->active, 1, __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&g_duck_shm->active, 0, __ATOMIC_RELEASE);
+    }
+}
+
+static int64_t cancel_alice_until_ms = 0;
+
 /* Sends Alice START_VOCALIZE directive so Alice speaks natively on the speaker */
 static int send_alice_tts(int quasar_fd, const char *text) {
     if (quasar_fd < 0 || !text || !*text) return -1;
+
+    // Cancel any in-flight cloud dialog so Alice won't also answer from Yandex Music,
+    // and clear suppression window so our own START_VOCALIZE speech isn't aborted.
+    send_cancel_alice(quasar_fd);
+    cancel_alice_until_ms = 0;
+    set_ducking(1, now_ms());
+
     unsigned long text_len = str_len(text);
     if (text_len > 350) text_len = 350;
 
-    // Build TVocalizeDirective:
-    // field 1 (wire 2): text
-    // field 2 (varint): 2 (Interrupt)
-    // field 3 (varint): 1 (applyOnMusic)
+    // Build TVocalizeDirective (schema fields: 1=Text, 2=SynthesisMode(2=Interrupt)):
     uint8_t voc_dir[400];
     unsigned long v_pos = 0;
     voc_dir[v_pos++] = 0x0a; // tag 1 wire 2
@@ -396,8 +459,6 @@ static int send_alice_tts(int quasar_fd, const char *text) {
     for (unsigned long i = 0; i < text_len; i++) voc_dir[v_pos++] = (uint8_t)text[i];
     voc_dir[v_pos++] = 0x10; // tag 2 wire 0
     voc_dir[v_pos++] = 0x02; // value 2 (Interrupt)
-    voc_dir[v_pos++] = 0x18; // tag 3 wire 0
-    voc_dir[v_pos++] = 0x01; // value 1 (applyOnMusic)
 
     // AliceCapabilityMethod:
     // field 1: method = 18 (tag 0x08, val 0x12)
@@ -459,10 +520,9 @@ static int send_alice_tts(int quasar_fd, const char *text) {
     return (n == (long)p210_pos) ? 0 : -1;
 }
 
-static int64_t cancel_alice_until_ms = 0;
-
 static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
     cancel_alice_until_ms = now_ms() + duration_ms;
+    set_ducking(0, now_ms());
     send_cancel_alice(quasar_fd);
 }
 
@@ -875,23 +935,92 @@ static void str_copy(char *dst, const char *src, unsigned long max_dst) {
     dst[i] = 0;
 }
 
-static int json_find_str(const char *json, const char *key, char *out, unsigned long max_out) {
+static int json_find_str_bounded(const char *json, const char *end, const char *key,
+                                 char *out, unsigned long max_out) {
     if (!json || !key || !out || max_out == 0) return 0;
     unsigned long klen = str_len(key);
-    for (unsigned long i = 0; json[i]; i++) {
-        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
-            unsigned long idx = i + 1 + klen + 1;
-            while (json[idx] == ' ' || json[idx] == ':') idx++;
-            if (json[idx] == '"') {
-                idx++;
+    for (const char *p = json; *p && (!end || p < end); p++) {
+        if (*p == '"' && (!end || p + 1 + klen < end) &&
+            mem_equal(p + 1, key, klen) && p[1 + klen] == '"') {
+            const char *v = p + 1 + klen + 1;
+            while (*v && (!end || v < end) && (*v == ' ' || *v == ':')) v++;
+            if (*v == '"') {
+                v++;
                 unsigned long o = 0;
-                while (json[idx] && json[idx] != '"' && o + 1 < max_out) {
-                    out[o++] = json[idx++];
+                while (*v && (!end || v < end) && *v != '"') {
+                    if (*v == '\\' && v[1] && (!end || v + 1 < end)) v++;
+                    if (o + 1 < max_out) out[o++] = *v;
+                    v++;
                 }
                 out[o] = 0;
                 return 1;
             }
         }
+    }
+    return 0;
+}
+
+static int json_find_str(const char *json, const char *key, char *out, unsigned long max_out) {
+    return json_find_str_bounded(json, 0, key, out, max_out);
+}
+
+/* Advances past a JSON string starting at opening '"'; returns pointer after closing '"'. */
+static const char *json_skip_str(const char *p, const char *end) {
+    if (!p || *p != '"') return p;
+    p++;
+    while (*p && (!end || p < end)) {
+        if (*p == '\\' && p[1] && (!end || p + 1 < end)) {
+            p += 2;
+            continue;
+        }
+        if (*p == '"') return p + 1;
+        p++;
+    }
+    return p;
+}
+
+/* Given pointer at '{' or '[', returns pointer just after the matching '}' or ']'. */
+static const char *json_span_end(const char *p, const char *end) {
+    if (!p || (*p != '{' && *p != '[')) return p;
+    int depth = 0;
+    while (*p && (!end || p < end)) {
+        if (*p == '"') {
+            p = json_skip_str(p, end);
+            continue;
+        }
+        if (*p == '{' || *p == '[') depth++;
+        else if (*p == '}' || *p == ']') {
+            depth--;
+            if (depth == 0) return p + 1;
+        }
+        p++;
+    }
+    return p;
+}
+
+/* Finds value pointer for direct child key inside JSON object [obj, end). */
+static const char *json_find_key_in_obj(const char *obj, const char *end, const char *key) {
+    if (!obj || *obj != '{') return 0;
+    unsigned long klen = str_len(key);
+    int depth = 0;
+    const char *p = obj;
+    while (*p && (!end || p < end)) {
+        if (*p == '"') {
+            int match = (depth == 1 && (!end || p + 1 + klen < end) &&
+                         mem_equal(p + 1, key, klen) && p[1 + klen] == '"');
+            p = json_skip_str(p, end);
+            if (match) {
+                while (*p && (!end || p < end) && (*p == ' ' || *p == ':' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+                return p;
+            }
+            continue;
+        }
+        if (*p == '{' || *p == '[') depth++;
+        else if (*p == '}' || *p == ']') {
+            depth--;
+            if (depth <= 0) break;
+        }
+        p++;
     }
     return 0;
 }
@@ -1082,46 +1211,98 @@ static int playback_speed = 0;
 static int64_t stuck_since_ms = 0;
 static int64_t last_auto_next_time = 0;
 
+static void append_artist_name(char *dst, unsigned long max_dst, const char *name) {
+    if (!name || !*name) return;
+    unsigned long len = str_len(dst);
+    unsigned long nlen = str_len(name);
+    if (len > 0) {
+        if (len + 2 + nlen >= max_dst) return;
+        dst[len++] = ',';
+        dst[len++] = ' ';
+    } else if (nlen >= max_dst) {
+        nlen = max_dst - 1;
+    }
+    for (unsigned long i = 0; i < nlen && len + 1 < max_dst; i++) {
+        dst[len++] = name[i];
+    }
+    dst[len] = 0;
+}
+
 static void extract_track_info(const char *json) {
+    if (!json || *json != '{') return;
+
+    const char *root_end = json_span_end(json, 0);
+    const char *item_val = json_find_key_in_obj(json, root_end, "item");
+
+    if (item_val) {
+        if (mem_equal(item_val, "null", 4)) {
+            current_track_name[0] = 0;
+            current_artist_name[0] = 0;
+            return;
+        }
+        if (*item_val == '{') {
+            const char *item_end = json_span_end(item_val, root_end);
+            char buf[128] = {0};
+
+            // Reset metadata only when an item payload carries decorations/name
+            const char *dec = json_find_key_in_obj(item_val, item_end, "decorations");
+            if (dec && *dec == '{') {
+                const char *dec_end = json_span_end(dec, item_end);
+                const char *id = json_find_key_in_obj(dec, dec_end, "identity");
+                if (id && *id == '{') {
+                    const char *id_end = json_span_end(id, dec_end);
+                    if (json_find_str_bounded(id, id_end, "name", buf, sizeof(buf))) {
+                        str_copy(current_track_name, buf, sizeof(current_track_name));
+                    }
+                }
+
+                current_artist_name[0] = 0;
+                const char *creators = json_find_key_in_obj(dec, dec_end, "creators");
+                if (creators && *creators == '[') {
+                    const char *cr_end = json_span_end(creators, dec_end);
+                    const char *p = creators + 1;
+                    int artist_count = 0;
+                    while (p < cr_end && artist_count < 3) {
+                        while (p < cr_end && *p != '{' && *p != ']') p++;
+                        if (p >= cr_end || *p != '{') break;
+                        const char *el_end = json_span_end(p, cr_end);
+                        const char *ent = json_find_key_in_obj(p, el_end, "entity");
+                        const char *ent_end = (ent && *ent == '{') ? json_span_end(ent, el_end) : el_end;
+                        const char *ent_obj = (ent && *ent == '{') ? ent : p;
+                        const char *cdec = json_find_key_in_obj(ent_obj, ent_end, "decorations");
+                        const char *cid_scope = (cdec && *cdec == '{') ? cdec : ent_obj;
+                        const char *cid_end = (cdec && *cdec == '{') ? json_span_end(cdec, ent_end) : ent_end;
+                        const char *cid = json_find_key_in_obj(cid_scope, cid_end, "identity");
+                        if (cid && *cid == '{') {
+                            const char *cid_obj_end = json_span_end(cid, cid_end);
+                            char abuf[128] = {0};
+                            if (json_find_str_bounded(cid, cid_obj_end, "name", abuf, sizeof(abuf))) {
+                                append_artist_name(current_artist_name, sizeof(current_artist_name), abuf);
+                                artist_count++;
+                            }
+                        }
+                        p = el_end;
+                    }
+                }
+            } else if (json_find_str_bounded(item_val, item_end, "name", buf, sizeof(buf))) {
+                str_copy(current_track_name, buf, sizeof(current_track_name));
+                if (json_find_str_bounded(item_val, item_end, "artist", buf, sizeof(buf))) {
+                    str_copy(current_artist_name, buf, sizeof(current_artist_name));
+                }
+            }
+            return;
+        }
+    }
+
+    // Fallback for flat diagnostic payloads without nested "item"
     char name_buf[128] = {0};
     char artist_buf[128] = {0};
-
-    // 1. Direct name / artist keys if present
-    if (json_find_str(json, "name", name_buf, sizeof(name_buf))) {
-        if (!str_contains(json, "\"device_name\"") || str_contains(json, "\"item\"")) {
-            str_copy(current_track_name, name_buf, sizeof(current_track_name));
-        }
+    if (json_find_str_bounded(json, root_end, "name", name_buf, sizeof(name_buf)) &&
+        !str_contains(json, "\"device_name\"")) {
+        str_copy(current_track_name, name_buf, sizeof(current_track_name));
     }
-    if (json_find_str(json, "artist", artist_buf, sizeof(artist_buf))) {
+    if (json_find_str_bounded(json, root_end, "artist", artist_buf, sizeof(artist_buf))) {
         str_copy(current_artist_name, artist_buf, sizeof(current_artist_name));
-    }
-
-    // 2. Nested "identity":{"name":"..."}
-    const char *id1 = 0;
-    for (unsigned long i = 0; json[i]; i++) {
-        if (json[i] == '"' && mem_equal(json + i + 1, "identity", 8) && json[i + 9] == '"') {
-            id1 = json + i + 10;
-            break;
-        }
-    }
-    if (id1) {
-        char n1[128];
-        if (json_find_str(id1, "name", n1, sizeof(n1))) {
-            str_copy(current_track_name, n1, sizeof(current_track_name));
-        }
-        const char *id2 = 0;
-        for (unsigned long i = 0; id1[i]; i++) {
-            if (id1[i] == '"' && mem_equal(id1 + i + 1, "identity", 8) && id1[i + 9] == '"') {
-                id2 = id1 + i + 10;
-                break;
-            }
-        }
-        if (id2) {
-            char n2[128];
-            if (json_find_str(id2, "name", n2, sizeof(n2))) {
-                str_copy(current_artist_name, n2, sizeof(current_artist_name));
-            }
-        }
     }
 }
 
@@ -1335,24 +1516,31 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         return;
     }
 
-    // Check "что играет" / track info query
-    if (str_contains(lower_buf, "что играет") ||
-        str_contains(lower_buf, "что сейчас играет") ||
-        str_contains(lower_buf, "какой трек") ||
-        str_contains(lower_buf, "какая песня") ||
-        str_contains(lower_buf, "что за трек") ||
-        str_contains(lower_buf, "что за песня") ||
-        str_contains(lower_buf, "кто поет") ||
-        str_contains(lower_buf, "кто это поет") ||
-        str_contains(lower_buf, "назови трек") ||
-        str_contains(lower_buf, "назови песню") ||
-        str_contains(lower_buf, "текущий трек")) {
+    // Check "что играет" / track info query (only when not an explicit search like "включи песню ...")
+    if (!is_explicit_search(lower_buf) &&
+        (str_contains(lower_buf, "что играет") ||
+         str_contains(lower_buf, "что сейчас играет") ||
+         str_contains(lower_buf, "что играет сейчас") ||
+         str_contains(lower_buf, "какой трек") ||
+         str_contains(lower_buf, "какая песня") ||
+         str_contains(lower_buf, "какая музыка") ||
+         str_contains(lower_buf, "что за трек") ||
+         str_contains(lower_buf, "что за песня") ||
+         str_contains(lower_buf, "что за музыка") ||
+         str_contains(lower_buf, "что за мелодия") ||
+         str_contains(lower_buf, "кто поет") ||
+         str_contains(lower_buf, "кто поёт") ||
+         str_contains(lower_buf, "кто это поет") ||
+         str_contains(lower_buf, "кто это поёт") ||
+         str_contains(lower_buf, "назови трек") ||
+         str_contains(lower_buf, "назови песню") ||
+         str_contains(lower_buf, "текущий трек"))) {
         log_msg("[bridge] Action: WHAT IS PLAYING (TTS)\n");
-        trigger_alice_suppression(quasar_fd, 4000);
         char phrase[320];
-        if (playback_status == 1 && current_track_name[0] != 0) {
+        if ((playback_status == 1 || playback_status == 2 || playback_status == 3) &&
+            current_track_name[0] != 0) {
             char *p = phrase;
-            const char *pref = "Сейчас играет ";
+            const char *pref = (playback_status == 2) ? "На паузе " : "Сейчас играет ";
             while (*pref) *p++ = *pref++;
             const char *t = current_track_name;
             while (*t && (p - phrase) < 180) *p++ = *t++;
@@ -2183,6 +2371,7 @@ void _start(void) {
 
     read_led_config();
     led_probe();
+    duck_shm_init();
 
     int quasar_fd = -1;
     int quasar_io_fd = -1;
@@ -2316,6 +2505,7 @@ void _start(void) {
                     sys_close(quasar_fd);
                     quasar_fd = -1;
                     quasar_buf_pos = 0;
+                    set_ducking(0, now);
                 } else {
                     quasar_buf_pos += n;
 
@@ -2344,11 +2534,21 @@ void _start(void) {
                             if (find_field(state_payload, state_len, 1, 0, 0, 0, &alice_state)) {
                                 if (alice_state == 1) {
                                     // User said "Alice" (wake-word spotted): clear suppression window immediately
-                                    // so the dialog is not killed and user can speak.
+                                    // so the dialog is not killed and user can speak; duck Spotify audio.
                                     cancel_alice_until_ms = 0;
-                                } else if ((alice_state == 2 || alice_state == 3) && now < cancel_alice_until_ms) {
-                                    // Suppress Alice cloud processing or TTS response from a hijacked Spotify command
-                                    send_cancel_alice(quasar_fd);
+                                    set_ducking(1, now);
+                                } else if (alice_state == 2 || alice_state == 3) {
+                                    if (now < cancel_alice_until_ms) {
+                                        // Suppress Alice cloud processing or TTS response from a hijacked Spotify command
+                                        send_cancel_alice(quasar_fd);
+                                        set_ducking(0, now);
+                                    } else {
+                                        set_ducking(1, now);
+                                    }
+                                } else if (alice_state == 5) {
+                                    if (now >= cancel_alice_until_ms) set_ducking(1, now);
+                                } else if (alice_state == 0 || alice_state == 6) {
+                                    set_ducking(0, now);
                                 }
                             }
                         }
@@ -2423,6 +2623,7 @@ void _start(void) {
                 sys_close(quasar_fd);
                 quasar_fd = -1;
                 quasar_buf_pos = 0;
+                set_ducking(0, now);
             }
 
             // Drain incoming IOEvents from Quasar IOHub (9910)

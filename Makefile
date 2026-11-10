@@ -13,12 +13,18 @@ ALSA_LIB_DIR = lib64/alsa-lib
 
 TARGET_BIN = $(BIN_DIR)/soloist-bridge
 TARGET_ALSA_SHIM = $(ALSA_LIB_DIR)/libasound_module_rate_speexrate_medium.so
+TARGET_DUCK_SHIM = lib64/libsoloist_duck.so
 
-all: $(TARGET_BIN) $(TARGET_ALSA_SHIM)
+all: $(TARGET_BIN) $(TARGET_ALSA_SHIM) $(TARGET_DUCK_SHIM)
 
-$(TARGET_BIN): $(SRC_DIR)/soloist-bridge.c $(SRC_DIR)/voice-request.h
+$(TARGET_BIN): $(SRC_DIR)/soloist-bridge.c $(SRC_DIR)/voice-request.h $(SRC_DIR)/duck_shm.h
 	mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $<
+	$(STRIP) -s $@
+
+$(TARGET_DUCK_SHIM): $(SRC_DIR)/soloist_duck.c $(SRC_DIR)/duck_shm.h $(SRC_DIR)/soloist_duck.map
+	mkdir -p lib64
+	$(CC) -shared -fPIC -O2 -Wall -Wextra -Wl,--version-script=$(SRC_DIR)/soloist_duck.map -o $@ $<
 	$(STRIP) -s $@
 
 $(TARGET_ALSA_SHIM): $(SRC_DIR)/rate_samplerate.c
@@ -37,9 +43,9 @@ $(TARGET_ALSA_SHIM): $(SRC_DIR)/rate_samplerate.c
 	ln -sfn libasound_module_rate_speexrate_medium.so libasound_module_rate_samplerate_linear.so
 
 clean:
-	rm -rf $(TARGET_BIN) $(ALSA_LIB_DIR) soloist.yampkg
+	rm -rf $(TARGET_BIN) $(ALSA_LIB_DIR) $(TARGET_DUCK_SHIM) soloist.yampkg
 
-pack-yam: $(TARGET_BIN) $(TARGET_ALSA_SHIM)
+pack-yam: $(TARGET_BIN) $(TARGET_ALSA_SHIM) $(TARGET_DUCK_SHIM)
 	yam --platform yandexmicro pack . --output soloist.yampkg
 
 .PHONY: all clean pack-yam
