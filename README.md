@@ -142,7 +142,7 @@ yam install horohi/soloist
 soloist setup
 
 # Или локальная установка скачанного .yampkg:
-yam install horohi-soloist-1.3.11-yandexmicro.yampkg
+yam install horohi-soloist-1.3.12-yandexmicro.yampkg
 ```
 При миграции со старого `/data/opt/soloist` `yam-postinstall` перенесёт ключи и конфиги автоматически; автозапуск настраивается через `/etc/init.d/S98soloist`. Для новой установки достаточно выполнить `soloist setup` после `yam install` (или вручную отредактировать `/data/yam/etc/horohi.soloist/config.env` и выполнить `soloist restart`).
 

@@ -15,3 +15,7 @@
 
 SPOTIFY_CLIENT_ID=""
 SPOTIFY_CLIENT_SECRET=""
+
+# LED-эквалайзер (по умолчанию включён: white — белый в стиле Nothing Phone)
+# Доступные значения: white | rainbow | cyan | off
+# LED_VISUALIZER="white"

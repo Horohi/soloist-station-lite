@@ -178,8 +178,96 @@ with tempfile.TemporaryDirectory() as td:
     check(proc_led_off.returncode == 0, "soloist-cli led off executes successfully")
     check(req_f.exists() and req_f.read_text().strip() == "0", "soloist-cli led off writes IPC request")
 
+    proc_status_def = subprocess.run(["sh", str(cli_sh), "led", "status"], env=env, capture_output=True, text=True)
+    check(proc_status_def.returncode == 0 and "ВКЛЮЧЕНА" in proc_status_def.stdout, "soloist-cli led status defaults to ON white")
+
     proc_clean = subprocess.run(["sh", str(cli_sh), "clean"], env=env, capture_output=True, text=True)
     check(proc_clean.returncode == 0, "soloist-cli clean executes successfully")
+
+def slice_between(txt: str, start: str, end: str) -> str:
+    s = txt.find(start)
+    assert s != -1, f"Start marker {start} not found"
+    e = txt.find(end, s)
+    assert e != -1, f"End marker {end} not found"
+    return txt[s:e]
+
+# 4. Bridge read_led_config() default-white migration & config override test
+with tempfile.TemporaryDirectory() as td:
+    td_p = pathlib.Path(td)
+    req_dir = td_p / "requests"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    conf_p = td_p / "spotify_api.conf"
+    state_p = req_dir / "led_state"
+    conf_p.write_text('LED_VISUALIZER="off"\n', encoding="utf-8")
+    state_p.write_text("off\n", encoding="utf-8")
+
+    read_led_cfg_fn = slice_between(source, "static void parse_led_conf_buf(", "static void check_led_request(")
+    join_fn = slice_between(source, "static void join_path(char *dst, unsigned long max, const char *a, const char *b) {", "static void lookup_proc_env(")
+    led_test_c = td_p / "led_cfg_test.c"
+    led_test_bin = td_p / "led_cfg_test"
+    led_test_c.write_text(f'''
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static int g_led_enabled = 1;
+static int g_led_color_mode = 0;
+static const char *g_test_req_dir = "{req_dir}";
+static const char *g_test_conf = "{conf_p}";
+static const char *g_test_state = "{state_p}";
+static const char *get_requests_dir(void) {{ return g_test_req_dir; }}
+static const char *get_conf_path(void) {{ return g_test_conf; }}
+static const char *get_led_state_path(void) {{ return g_test_state; }}
+static int sys_mkdir(const char *p, int m) {{ return mkdir(p, m); }}
+static int sys_open(const char *p, int f, int m) {{ return open(p, f, m); }}
+static long sys_read(int fd, void *b, unsigned long c) {{ return read(fd, b, c); }}
+static long sys_write(int fd, const void *b, unsigned long c) {{ return write(fd, b, c); }}
+static int sys_close(int fd) {{ return close(fd); }}
+static int sys_unlink(const char *p) {{ return unlink(p); }}
+static int mem_equal(const void *a, const void *b, unsigned long n) {{ return memcmp(a, b, n) == 0; }}
+static int str_contains(const char *h, const char *n) {{ return strstr(h, n) != NULL; }}
+
+{join_fn}
+{read_led_cfg_fn}
+
+int main(void) {{
+    // 1. First launch (no marker): forces white ON despite old off state/conf
+    g_led_enabled = 0; g_led_color_mode = 2;
+    read_led_config();
+    if (g_led_enabled != 1 || g_led_color_mode != 0) return 1;
+    if (access("{state_p}", F_OK) == 0) return 2;
+
+    // 2. Subsequent launch: honors config (quoted/unquoted) and ignores comments
+    g_led_enabled = 1; g_led_color_mode = 1;
+    read_led_config(); // conf currently has LED_VISUALIZER="off"
+    if (g_led_enabled != 0) return 3;
+
+    FILE *f = fopen(g_test_conf, "w");
+    fprintf(f, "# LED_VISUALIZER=off\\nLED_VISUALIZER=\\"rainbow\\"\\n");
+    fclose(f);
+    read_led_config();
+    if (g_led_enabled != 1 || g_led_color_mode != 1) return 4;
+
+    f = fopen(g_test_conf, "w");
+    fprintf(f, "LED_VISUALIZER=cyan\\n");
+    fclose(f);
+    read_led_config();
+    if (g_led_enabled != 1 || g_led_color_mode != 2) return 5;
+
+    // 3. Explicit runtime led_state=off overrides conf on restart
+    f = fopen(g_test_state, "w");
+    fprintf(f, "off\\n");
+    fclose(f);
+    read_led_config();
+    if (g_led_enabled != 0) return 6;
+    return 0;
+}}
+''', encoding="utf-8")
+    subprocess.check_call(["cc", "-O2", "-Wall", "-Wextra", str(led_test_c), "-o", str(led_test_bin)])
+    rc = subprocess.run([str(led_test_bin)]).returncode
+    check(rc == 0, f"read_led_config migration & config override checks passed (rc={rc})")
 
 if failures == 0:
     print("ALL LED & CACHE TESTS PASSED!", flush=True)

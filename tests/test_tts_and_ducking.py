@@ -67,6 +67,7 @@ static long sys_write(int fd, const void *buf, unsigned long count) {{
 static int sys_open(const char *p, int f, int m) {{ (void)p;(void)f;(void)m; return -1; }}
 static void sys_close(int fd) {{ (void)fd; }}
 static int sys_unlink(const char *p) {{ (void)p; return 0; }}
+static int sys_shmget(int key, unsigned long size, int shmflg) {{ (void)key; (void)size; (void)shmflg; return -2; }}
 
 static int cancel_calls = 0;
 static int suppressed_calls = 0;

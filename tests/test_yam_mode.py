@@ -17,7 +17,7 @@ part_mem = SOURCE[
     SOURCE.index("/* Word-boundary helpers.")
 ]
 part_init = SOURCE[
-    SOURCE.index("static void join_path(") :
+    SOURCE.index("static void join_path(char *dst, unsigned long max, const char *a, const char *b) {") :
     SOURCE.index("void _start(void)")
 ]
 

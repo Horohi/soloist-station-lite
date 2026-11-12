@@ -455,11 +455,14 @@ static inline int alice_owns_leds(int64_t now) {
 
 static void set_alsa_yield(int enable, int64_t now) {
     if (enable) {
-        if (!g_alsa_yield_active) {
+        int probe = sys_open(SOLOIST_YIELD_DEFAULT_PATH, 0, 0);
+        if (probe >= 0) {
+            sys_close(probe);
+        } else {
             int fd = sys_open(SOLOIST_YIELD_DEFAULT_PATH, 0100 | 01 /* O_CREAT | O_WRONLY */, 0644);
             if (fd >= 0) sys_close(fd);
-            g_alsa_yield_active = 1;
         }
+        g_alsa_yield_active = 1;
         if (g_alsa_yield_since_ms == 0) g_alsa_yield_since_ms = now;
     } else if (g_alsa_yield_active || g_alsa_yield_since_ms != 0) {
         sys_unlink(SOLOIST_YIELD_DEFAULT_PATH);
@@ -484,7 +487,10 @@ static int send_alice_tts(int quasar_fd, const char *text) {
     g_tts_hold_until_ms = tnow + 4000;
     set_ducking(1, tnow);
     set_alsa_yield(1, tnow);
-    sys_msleep(80);
+    for (int waited_ms = 20; waited_ms <= 400; waited_ms += 20) {
+        sys_msleep(20);
+        if (waited_ms >= 80 && sys_shmget(1024, 0, 0) < 0) break;
+    }
 
     unsigned long text_len = str_len(text);
     if (text_len > 350) text_len = 350;
@@ -1934,7 +1940,7 @@ struct led_hardware_info {
 };
 
 static struct led_hardware_info g_led_hw = {0};
-static int g_led_enabled = 0;       // 0=off (default), 1=on
+static int g_led_enabled = 1;       // 1=on white (default), 0=off
 static int g_led_color_mode = 0;    // 0=white (Nothing Phone style), 1=rainbow, 2=cyan, 3=red, 4=green, 5=blue, 6=magenta, 7=yellow
 static int g_led_brightness = 180;  // 1-255, default 180
 static uint64_t g_led_frame = 0;
@@ -2282,7 +2288,63 @@ static void set_led_visualizer_impl(int enable) {
     log_msg(g_led_enabled ? "[bridge] LED visualizer: ON (Nothing Phone Equalizer)\n" : "[bridge] LED visualizer: OFF\n");
 }
 
+static void join_path(char *dst, unsigned long max, const char *a, const char *b);
+
+static void parse_led_conf_buf(const char *buf) {
+    unsigned long i = 0;
+    while (buf[i]) {
+        while (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' || buf[i] == '\n') i++;
+        if (!buf[i]) break;
+        if (buf[i] == '#') {
+            while (buf[i] && buf[i] != '\n') i++;
+            continue;
+        }
+        if (mem_equal(buf + i, "LED_VISUALIZER=", 15)) {
+            i += 15;
+            if (buf[i] == '"' || buf[i] == '\'') i++;
+            if (mem_equal(buf + i, "off", 3) || buf[i] == '0') {
+                g_led_enabled = 0;
+            } else if (mem_equal(buf + i, "rainbow", 7)) {
+                g_led_enabled = 1;
+                g_led_color_mode = 1;
+            } else if (mem_equal(buf + i, "cyan", 4)) {
+                g_led_enabled = 1;
+                g_led_color_mode = 2;
+            } else if (mem_equal(buf + i, "white", 5) ||
+                       mem_equal(buf + i, "on", 2) ||
+                       buf[i] == '1') {
+                g_led_enabled = 1;
+                g_led_color_mode = 0;
+            }
+        }
+        while (buf[i] && buf[i] != '\n') i++;
+    }
+}
+
 static void read_led_config(void) {
+    const char *req_dir = get_requests_dir();
+    const char *state_path = get_led_state_path();
+    sys_mkdir(req_dir, 0700);
+
+    char marker_path[360];
+    join_path(marker_path, sizeof(marker_path), req_dir, ".led_v1312_default");
+    int mfd = sys_open(marker_path, 0, 0);
+    if (mfd < 0) {
+        int cfd = sys_open(marker_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
+        if (cfd >= 0) {
+            sys_write(cfd, "1\n", 2);
+            sys_close(cfd);
+        }
+        sys_unlink(state_path);
+        g_led_enabled = 1;
+        g_led_color_mode = 0;
+        return;
+    }
+    sys_close(mfd);
+
+    g_led_enabled = 1;
+    g_led_color_mode = 0;
+
     const char *conf_path = get_conf_path();
     int fd = sys_open(conf_path, 0, 0);
     if (fd >= 0) {
@@ -2291,22 +2353,10 @@ static void read_led_config(void) {
         sys_close(fd);
         if (n > 0) {
             buf[n] = 0;
-            if (str_contains(buf, "LED_VISUALIZER=on") || str_contains(buf, "LED_VISUALIZER=1")) {
-                g_led_enabled = 1;
-            } else if (str_contains(buf, "LED_VISUALIZER=rainbow")) {
-                g_led_enabled = 1;
-                g_led_color_mode = 1;
-            } else if (str_contains(buf, "LED_VISUALIZER=cyan")) {
-                g_led_enabled = 1;
-                g_led_color_mode = 2;
-            } else if (str_contains(buf, "LED_VISUALIZER=white")) {
-                g_led_enabled = 1;
-                g_led_color_mode = 0;
-            }
+            parse_led_conf_buf(buf);
         }
     }
 
-    const char *state_path = get_led_state_path();
     int sfd = sys_open(state_path, 0, 0);
     if (sfd >= 0) {
         char sbuf[32];
@@ -2902,7 +2952,8 @@ void _start(void) {
                                         set_alsa_yield(0, st_now);
                                         set_ducking(0, st_now);
                                     } else {
-                                        if (alice_state == 3 && g_tts_hold_until_ms > 0) g_tts_speaking_seen = 1;
+                                        // Quasar AliceState enum: 2=SPEAKING, 3=BUSY/THINKING
+                                        if (alice_state == 2 && g_tts_hold_until_ms > 0) g_tts_speaking_seen = 1;
                                         set_ducking(1, st_now);
                                         set_alsa_yield(1, st_now);
                                     }
