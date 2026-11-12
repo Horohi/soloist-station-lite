@@ -117,6 +117,13 @@ sh "$SEARCH" 'включи музыку' || true
 label='generic resume keeps existing playback'; check grep -q '9090 play$' "$TEST/controls"
 label='generic resume does not require an API call'; check test ! -s "$TEST/calls"
 reset
+echo paused > "$TEST/now_state"
+(sleep 0.7; [ ! -d "$TEST" ] || echo playing > "$TEST/now_state") &
+_delayed_resume_pid=$!
+sh "$SEARCH" 'включи музыку' || true
+wait "$_delayed_resume_pid" 2>/dev/null || true
+label='generic resume waits for slow >0.5s device activation without falling back to top hits'; check test ! -s "$TEST/calls"
+reset
 sh "$SEARCH" "включи песню Don't Stop Me Now" || true
 label='quoted song title still resolves'; check grep -q 'play spotify:track:TEST123' "$TEST/controls"
 label='apostrophe survives query encoding'; check grep -qi 'Don%27t' "$TEST/calls"

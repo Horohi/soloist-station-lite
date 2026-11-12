@@ -113,10 +113,19 @@ echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 if [ "$RADIO" = 0 ] && { [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; }; then
     echo "[search] Generic play request, resuming..." >> "$LOG"
     request_dispatch play || exit 1
-    sleep 0.5
-    request_current || exit 0
-    NOW_STATE=$(request_cli now) || { request_report play now "$?"; exit 1; }
-    if echo "$NOW_STATE" | grep -qi "playing" && ! echo "$NOW_STATE" | grep -qi "nothing"; then
+    _resume_tries=0
+    while [ "$_resume_tries" -lt 8 ]; do
+        sleep 0.3
+        request_current || exit 0
+        NOW_STATE=$(request_cli now) || { request_report play now "$?"; exit 1; }
+        if printf '%s\n' "$NOW_STATE" | grep -qiE 'playing|buffering' && ! printf '%s\n' "$NOW_STATE" | grep -qi 'nothing'; then
+            exit 0
+        fi
+        _resume_tries=$((_resume_tries + 1))
+    done
+    # If device is active with a loaded track still transitioning, do not clobber it with 'top hits'
+    NOW_JSON=$(request_cli now --json 2>/dev/null || true)
+    if printf '%s' "$NOW_JSON" | grep -q '"is_active":true' && printf '%s' "$NOW_JSON" | grep -q '"uri":"spotify:track:'; then
         exit 0
     fi
     # If nothing was playing, fall through and search popular hits
