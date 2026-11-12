@@ -127,7 +127,11 @@ cmd_version() {
 find_live_pid() {
     _proc="$1"
     for _p in $(pidof "$_proc" 2>/dev/null || true) $(cat "$DATA_ROOT/${_proc}.pid" 2>/dev/null || true) $(cat "$CACHE_DIR/${_proc}.pid" 2>/dev/null || true); do
-        [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null || continue
+        [ -n "$_p" ] && [ "$_p" != "$$" ] && [ "$_p" != "${PPID:-0}" ] && kill -0 "$_p" 2>/dev/null || continue
+        _exe=$(readlink "/proc/$_p/exe" 2>/dev/null || true)
+        case "$_exe" in
+            */busybox|*/sh|*/ash|*/dash|*/bash) continue ;;
+        esac
         _comm=$(cat "/proc/$_p/comm" 2>/dev/null || true)
         if [ "$_comm" = "$_proc" ]; then
             printf '%s\n' "$_p"
@@ -387,9 +391,15 @@ cmd_update() {
 
     DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST/soloist-station-lite.tar.gz"
 
-    # Stop current services
+    # Stop current services safely (guard against legacy stop.sh running killall -9 soloist on ourselves)
     printf "Остановка старых служб...\n"
-    "$INSTALL_DIR/stop.sh" >/dev/null 2>&1 || true
+    if [ -f "$INSTALL_DIR/stop.sh" ]; then
+        if grep -q '^killall -9 soloist ' "$INSTALL_DIR/stop.sh" 2>/dev/null; then
+            sed 's/^killall -9 soloist /true /' "$INSTALL_DIR/stop.sh" | sh >/dev/null 2>&1 || true
+        else
+            "$INSTALL_DIR/stop.sh" >/dev/null 2>&1 || true
+        fi
+    fi
 
     # Backup existing configuration
     SAVED_CONF=""
@@ -407,8 +417,10 @@ cmd_update() {
         fi
     fi
 
-    # Fix permissions
-    chmod 755 "$INSTALL_DIR/bin/"* "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/soloist-cli" 2>/dev/null || true
+    # Fix permissions and refresh top-level helper copies from scripts/
+    [ ! -f "$INSTALL_DIR/scripts/stop.sh" ] || cp -f "$INSTALL_DIR/scripts/stop.sh" "$INSTALL_DIR/stop.sh" 2>/dev/null || true
+    [ ! -f "$INSTALL_DIR/scripts/status.sh" ] || cp -f "$INSTALL_DIR/scripts/status.sh" "$INSTALL_DIR/status.sh" 2>/dev/null || true
+    chmod 755 "$INSTALL_DIR/bin/"* "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/soloist-cli" "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh" 2>/dev/null || true
 
     # Update CLI itself safely (atomic rename so running script is not truncated)
     if [ -f "$INSTALL_DIR/scripts/soloist-cli" ]; then

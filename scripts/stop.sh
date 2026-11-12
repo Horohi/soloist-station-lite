@@ -43,7 +43,24 @@ killall -9 soloist-bridge 2>/dev/null || true
 for pidfile in "$YAM_DATA/soloist.pid" "$YAM_CACHE/soloist.pid" /data/opt/soloist/data/soloist.pid; do
     kill_pidfile "$pidfile" soloist
 done
-killall -9 soloist 2>/dev/null || true
+
+# Kill only actual bin/soloist daemon/crashpad binaries; never kill CLI scripts named 'soloist'
+for proc_dir in /proc/[0-9]*; do
+    p="${proc_dir#/proc/}"
+    [ "$p" != "$$" ] && [ "$p" != "${PPID:-0}" ] || continue
+    exe=$(readlink "$proc_dir/exe" 2>/dev/null || true)
+    case "$exe" in
+        */busybox|*/sh|*/ash|*/dash|*/bash) continue ;;
+        */bin/soloist|*/bin/soloist\ *)
+            kill -9 "$p" 2>/dev/null || true
+            ;;
+        */ld-linux-aarch64.so.1*)
+            case "$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null || true)" in
+                */bin/soloist*) kill -9 "$p" 2>/dev/null || true ;;
+            esac
+            ;;
+    esac
+done
 
 rm -f /tmp/soloist.yield 2>/dev/null || true
 echo "Spotify Soloist and Bridge stopped."

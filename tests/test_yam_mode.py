@@ -413,6 +413,18 @@ int main(void) {
         assert "Soloist Daemon: " in st_res.stdout and "STOPPED" in st_res.stdout and "RUNNING" not in st_res.stdout, st_res.stdout
         print("PASS soloist status does not falsely report reused/stale PID as RUNNING")
 
+        # 4. Verify stop.sh does not kill a running shell process named 'soloist' (e.g. soloist update/restart)
+        sh_copy = tmp / "soloist"
+        sh_copy.symlink_to("/bin/sh")
+        cli_proc = subprocess.Popen([str(sh_copy), "-c", "sleep 5"])
+        try:
+            subprocess.run(["/bin/sh", str(ROOT / "scripts/stop.sh")], env=st_env, check=True, capture_output=True)
+            assert cli_proc.poll() is None, "stop.sh killed unrelated shell CLI process"
+        finally:
+            cli_proc.terminate()
+            cli_proc.wait(timeout=5)
+        print("PASS stop.sh does not kill soloist CLI shell processes")
+
 
 if __name__ == "__main__":
     test_c_yam_paths()
