@@ -410,6 +410,8 @@ static int g_ducking_active = 0;
 static int g_alsa_yield_active = 0;
 static int64_t g_alsa_yield_since_ms = 0;
 static int64_t g_tts_hold_until_ms = 0;
+static int g_tts_speaking_seen = 0;
+static int quasar_uses_f252 = -1; // -1=unknown, 0=direct field 210, 1=SharedMessage 252/253
 static uint64_t g_alice_state = 0;
 static int64_t g_led_alice_yield_until_ms = 0;
 
@@ -478,7 +480,8 @@ static int send_alice_tts(int quasar_fd, const char *text) {
     send_cancel_alice(quasar_fd);
     cancel_alice_until_ms = 0;
     int64_t tnow = now_ms();
-    g_tts_hold_until_ms = tnow + 1500;
+    g_tts_speaking_seen = 0;
+    g_tts_hold_until_ms = tnow + 4000;
     set_ducking(1, tnow);
     set_alsa_yield(1, tnow);
     sys_msleep(80);
@@ -534,30 +537,40 @@ static int send_alice_tts(int quasar_fd, const char *text) {
     }
     for (unsigned long i = 0; i < m_pos; i++) remoting[r_pos++] = meth_msg[i];
 
-    // Build frame for field 210:
-    // tag 210 (wire 2): 0x92, 0x0d
-    uint8_t f210[600];
-    unsigned long p210_pos = 4;
-    f210[p210_pos++] = 0x92;
-    f210[p210_pos++] = 0x0d;
-    if (r_pos >= 128) {
-        f210[p210_pos++] = (uint8_t)((r_pos & 0x7f) | 0x80);
-        f210[p210_pos++] = (uint8_t)(r_pos >> 7);
+    // Build frame for either direct field 210 (0x92, 0x0d) or SharedMessage field 252/253 (0xe2, 0x0f ... 0xe8, 0x0f, 0xd2, 0x01)
+    uint8_t frame[600];
+    unsigned long pos = 4;
+    if (quasar_uses_f252 == 1) {
+        frame[pos++] = 0xe2;
+        frame[pos++] = 0x0f; // tag 252 wire 2
     } else {
-        f210[p210_pos++] = (uint8_t)r_pos;
+        frame[pos++] = 0x92;
+        frame[pos++] = 0x0d; // tag 210 wire 2
     }
-    for (unsigned long i = 0; i < r_pos; i++) f210[p210_pos++] = remoting[i];
-    uint32_t body_len = (uint32_t)(p210_pos - 4);
-    f210[0] = (uint8_t)(body_len & 0xff);
-    f210[1] = (uint8_t)((body_len >> 8) & 0xff);
-    f210[2] = (uint8_t)((body_len >> 16) & 0xff);
-    f210[3] = (uint8_t)((body_len >> 24) & 0xff);
+    if (r_pos >= 128) {
+        frame[pos++] = (uint8_t)((r_pos & 0x7f) | 0x80);
+        frame[pos++] = (uint8_t)(r_pos >> 7);
+    } else {
+        frame[pos++] = (uint8_t)r_pos;
+    }
+    for (unsigned long i = 0; i < r_pos; i++) frame[pos++] = remoting[i];
+    if (quasar_uses_f252 == 1) {
+        frame[pos++] = 0xe8;
+        frame[pos++] = 0x0f; // tag 253 wire 0
+        frame[pos++] = 0xd2;
+        frame[pos++] = 0x01; // value 210 (QuasarMessage::remoting)
+    }
+    uint32_t body_len = (uint32_t)(pos - 4);
+    frame[0] = (uint8_t)(body_len & 0xff);
+    frame[1] = (uint8_t)((body_len >> 8) & 0xff);
+    frame[2] = (uint8_t)((body_len >> 16) & 0xff);
+    frame[3] = (uint8_t)((body_len >> 24) & 0xff);
 
-    long n = sys_write(quasar_fd, f210, p210_pos);
+    long n = sys_write(quasar_fd, frame, pos);
     log_msg("[bridge] Sent Alice TTS START_VOCALIZE: ");
     log_msg(text);
     log_msg("\n");
-    return (n == (long)p210_pos) ? 0 : -1;
+    return (n == (long)pos) ? 0 : -1;
 }
 
 static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
@@ -1232,6 +1245,7 @@ static int is_explicit_search(const char *lower) {
 
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify Connect device
+static int repeat_mode = 0; // 0=off, 1=context, 2=track
 static char current_track_uri[128] = {0};
 static char current_track_name[128] = {0};
 static char current_artist_name[128] = {0};
@@ -1471,6 +1485,16 @@ static void handle_soloist_ws_json(const char *json) {
     int got_uri = 0;
     if (json && *json == '{') {
         const char *root_end = json_span_end(json, 0);
+        const char *opts_val = json_find_key_in_obj(json, root_end, "options");
+        if (opts_val && *opts_val == '{') {
+            const char *opts_end = json_span_end(opts_val, root_end);
+            char rep_buf[16];
+            if (json_find_str_bounded(opts_val, opts_end, "repeat", rep_buf, sizeof(rep_buf))) {
+                if (str_equal(rep_buf, "track")) repeat_mode = 2;
+                else if (str_equal(rep_buf, "context")) repeat_mode = 1;
+                else if (str_equal(rep_buf, "off")) repeat_mode = 0;
+            }
+        }
         const char *item_val = json_find_key_in_obj(json, root_end, "item");
         if (item_val && *item_val == '{') {
             const char *item_end = json_span_end(item_val, root_end);
@@ -1760,6 +1784,18 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         }
 
         // Check REPEAT keywords (Instant Action)
+        if (str_contains(lower_buf, "повторяй трек") ||
+            str_contains(lower_buf, "повторяй песню") ||
+            str_contains(lower_buf, "повторяй этот трек") ||
+            str_contains(lower_buf, "повторяй эту песню") ||
+            str_contains(lower_buf, "повтор трека") ||
+            str_contains(lower_buf, "повтор песни") ||
+            str_contains(lower_buf, "повтор одного")) {
+            log_msg("[bridge] Action: REPEAT TRACK\n");
+            trigger_alice_suppression(quasar_fd, 2500);
+            run_soloist_cmd2("repeat", "track");
+            return;
+        }
         if (str_contains(lower_buf, "зацикли") ||
             str_contains(lower_buf, "повторяй") ||
             str_contains(lower_buf, "включи повтор")) {
@@ -2677,6 +2713,7 @@ void _start(void) {
         // Fail-safe release if TTS/SPEAKING completion event was ever dropped
         if (g_tts_hold_until_ms > 0 && now >= g_tts_hold_until_ms) {
             g_tts_hold_until_ms = 0;
+            g_tts_speaking_seen = 0;
             set_alsa_yield(0, now);
             set_ducking(0, now);
         }
@@ -2800,6 +2837,7 @@ void _start(void) {
                     g_alice_state = 0;
                     g_led_alice_yield_until_ms = 0;
                     g_tts_hold_until_ms = 0;
+                    g_tts_speaking_seen = 0;
                     set_alsa_yield(0, now);
                     set_ducking(0, now);
                 } else {
@@ -2823,6 +2861,12 @@ void _start(void) {
                         }
 
                         const uint8_t *frame_body = quasar_buf + 4;
+                        if (find_field(frame_body, frame_len, 253, 0, 0, 0, 0)) {
+                            quasar_uses_f252 = 1;
+                        } else if (find_field(frame_body, frame_len, 3, 2, 0, 0, 0) ||
+                                   find_field(frame_body, frame_len, 210, 2, 0, 0, 0)) {
+                            if (quasar_uses_f252 < 0) quasar_uses_f252 = 0;
+                        }
                         const uint8_t *state_payload = 0;
                         unsigned long state_len = 0;
                         if (voice_state_payload(frame_body, frame_len, &state_payload, &state_len)) {
@@ -2846,6 +2890,7 @@ void _start(void) {
                                     // so the dialog is not killed and user can speak; duck Spotify audio to 20%.
                                     cancel_alice_until_ms = 0;
                                     g_tts_hold_until_ms = 0;
+                                    g_tts_speaking_seen = 0;
                                     set_alsa_yield(0, st_now);
                                     set_ducking(1, st_now);
                                 } else if (alice_state == 2 || alice_state == 3) {
@@ -2855,7 +2900,7 @@ void _start(void) {
                                         set_alsa_yield(0, st_now);
                                         set_ducking(0, st_now);
                                     } else {
-                                        if (alice_state == 2) g_tts_hold_until_ms = 0;
+                                        if (alice_state == 3 && g_tts_hold_until_ms > 0) g_tts_speaking_seen = 1;
                                         set_ducking(1, st_now);
                                         set_alsa_yield(1, st_now);
                                     }
@@ -2865,8 +2910,9 @@ void _start(void) {
                                         set_alsa_yield(1, st_now);
                                     }
                                 } else if (alice_state == 0 || alice_state == 6) {
-                                    if (st_now >= g_tts_hold_until_ms) {
+                                    if (g_tts_speaking_seen || st_now >= g_tts_hold_until_ms) {
                                         g_tts_hold_until_ms = 0;
+                                        g_tts_speaking_seen = 0;
                                         set_alsa_yield(0, st_now);
                                         set_ducking(0, st_now);
                                     }
@@ -3219,13 +3265,19 @@ void _start(void) {
             }
         }
 
-        // Auto-Next Watchdog (Issue #4): Detect track end stall caused by apulse missing underflow callback
+        // Auto-Next / Auto-Repeat Watchdog (Issue #4 / #20): Detect track end stall caused by apulse missing underflow callback
         if (soloist_ws_fd >= 0 && soloist_ws_handshake) {
             if (spotify_device_is_active && (playback_status == 1 || playback_status == 3) && track_duration_ms > 2000) {
                 uint64_t current_pos = base_position_ms;
                 if (playback_speed == 1 && local_recorded_ms > 0) {
                     int64_t elapsed = now - local_recorded_ms;
                     if (elapsed > 0) current_pos += (uint64_t)elapsed;
+                }
+
+                // Clear repeat guard once track playback restarts from beginning (repeat track or 1-track context loop)
+                if (current_pos < 5000 && track_duration_ms > 15000 &&
+                    last_auto_next_uri[0] != 0 && (now - last_auto_next_time) >= 5000) {
+                    last_auto_next_uri[0] = 0;
                 }
 
                 int is_at_end = 0;
@@ -3238,14 +3290,22 @@ void _start(void) {
                     is_at_end = 1;
                 }
 
+                int64_t stall_thresh_ms = (repeat_mode == 2) ? 2500 : 1500;
                 if (is_at_end) {
                     if (stuck_since_ms == 0) {
                         stuck_since_ms = now;
-                    } else if (now - stuck_since_ms >= 1500 && now - last_auto_next_time >= 5000) {
-                        if (!str_equal(last_auto_next_uri, current_track_uri) && current_track_uri[0] != 0) {
+                    } else if (now - stuck_since_ms >= stall_thresh_ms && now - last_auto_next_time >= 5000) {
+                        if (repeat_mode == 2 && current_track_uri[0] != 0) {
+                            log_msg("[bridge] Auto-Repeat: restarting stalled single-track repeat\n");
+                            str_copy(last_auto_next_uri, current_track_uri, sizeof(last_auto_next_uri));
+                            last_auto_next_time = now;
+                            stuck_since_ms = 0;
+                            run_controller("auto-repeat", current_track_uri);
+                        } else if (!str_equal(last_auto_next_uri, current_track_uri) && current_track_uri[0] != 0) {
                             log_msg("[bridge] Auto-Next: track ended and audio output stalled, advancing to next track\n");
                             str_copy(last_auto_next_uri, current_track_uri, sizeof(last_auto_next_uri));
                             last_auto_next_time = now;
+                            stuck_since_ms = 0;
                             run_controller("auto-next", current_track_uri);
                         }
                     }

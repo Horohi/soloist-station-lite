@@ -13,7 +13,12 @@ fi
 SOLOIST_BIN="$BASE_DIR/bin/soloist"
 
 run_soloist() {
-    LD_LIBRARY_PATH="$BASE_DIR/lib64" "$SOLOIST_BIN" "$@"
+    _ld="$BASE_DIR/lib64/ld-linux-aarch64.so.1"
+    if [ -x "$_ld" ] && ! LD_LIBRARY_PATH="$BASE_DIR/lib64" "$SOLOIST_BIN" --help >/dev/null 2>&1; then
+        LD_LIBRARY_PATH="$BASE_DIR/lib64" "$_ld" --library-path "$BASE_DIR/lib64" --argv0 "$SOLOIST_BIN" "$SOLOIST_BIN" "$@"
+    else
+        LD_LIBRARY_PATH="$BASE_DIR/lib64" "$SOLOIST_BIN" "$@"
+    fi
 }
 
 echo "=== Spotify Soloist Status ==="

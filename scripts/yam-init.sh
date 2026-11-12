@@ -35,7 +35,22 @@ pid_alive() {
     pid=$(cat "$pidfile" 2>/dev/null || true)
     [ -n "$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
-    [ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" = "$expected" ]
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+    [ "$comm" = "$expected" ] && return 0
+    if [ "$expected" = "soloist" ] && [ "$comm" = "ld-linux-aarch6" ]; then
+        case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)" in
+            *soloist*) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+run_detached() {
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$@" </dev/null
+    else
+        "$@" </dev/null
+    fi
 }
 
 stop_daemons() {
@@ -55,55 +70,64 @@ start_daemons() {
 
     stop_daemons
 
-    env \
+    run_detached env \
         YAM_ROOT="$YAM_ROOT" \
         YAM_PKG="${YAM_PKG:-}" \
         YAM_ETC="$YAM_ETC" \
         YAM_VAR="$YAM_VAR" \
         YAM_RUN="$YAM_RUN" \
         YAM_PLATFORM="${YAM_PLATFORM:-}" \
-        sh "$PKG_SHARE/scripts/soloist-service.sh" </dev/null >/tmp/soloist.log 2>&1 &
+        sh "$PKG_SHARE/scripts/soloist-service.sh" >/tmp/soloist.log 2>&1 &
     echo $! > "$DATA_ROOT/soloist.pid"
 
     sleep 1
 
     if [ -x "$PKG_SHARE/bin/soloist-bridge" ]; then
-        env \
+        run_detached env \
             YAM_ROOT="$YAM_ROOT" \
             YAM_PKG="${YAM_PKG:-}" \
             YAM_ETC="$YAM_ETC" \
             YAM_VAR="$YAM_VAR" \
             YAM_RUN="$YAM_RUN" \
-            "$PKG_SHARE/bin/soloist-bridge" </dev/null >/tmp/soloist-bridge.log 2>&1 &
+            "$PKG_SHARE/bin/soloist-bridge" >/tmp/soloist-bridge.log 2>&1 &
         echo $! > "$DATA_ROOT/bridge.pid"
     fi
 
     # Keep tmpfs cache bounded against BusyBox memory pressure
-    (
+    run_detached sh -c '
         sleep 30
-        while pid_alive "$DATA_ROOT/soloist.pid" soloist; do
+        while true; do
+            _sp=$(cat "$1/soloist.pid" 2>/dev/null || true)
+            [ -n "$_sp" ] && kill -0 "$_sp" 2>/dev/null || break
             sleep 30
-            MEM_AVAIL=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 100)
+            MEM_AVAIL=$(awk "/MemAvailable/{print int(\$2/1024)}" /proc/meminfo 2>/dev/null || echo 100)
             if [ "${MEM_AVAIL:-100}" -lt 55 ]; then
-                YAM_ROOT="$YAM_ROOT" YAM_VAR="$YAM_VAR" YAM_ETC="$YAM_ETC" YAM_RUN="$YAM_RUN" \
-                    SOLOIST_CACHE_DIR="$CACHE_DIR/cache" \
-                    sh "$PKG_SHARE/scripts/control.sh" clean-cache-full >/dev/null 2>&1 || true
+                YAM_ROOT="$2" YAM_VAR="$3" YAM_ETC="$4" YAM_RUN="$5" \
+                    SOLOIST_CACHE_DIR="$6/cache" \
+                    sh "$7/scripts/control.sh" clean-cache-full >/dev/null 2>&1 || true
                 sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
             elif [ "${MEM_AVAIL:-100}" -lt 80 ]; then
-                YAM_ROOT="$YAM_ROOT" YAM_VAR="$YAM_VAR" YAM_ETC="$YAM_ETC" YAM_RUN="$YAM_RUN" \
-                    SOLOIST_CACHE_DIR="$CACHE_DIR/cache" \
-                    sh "$PKG_SHARE/scripts/control.sh" clean-cache >/dev/null 2>&1 || true
+                YAM_ROOT="$2" YAM_VAR="$3" YAM_ETC="$4" YAM_RUN="$5" \
+                    SOLOIST_CACHE_DIR="$6/cache" \
+                    sh "$7/scripts/control.sh" clean-cache >/dev/null 2>&1 || true
             fi
         done
-    ) </dev/null >/dev/null 2>&1 &
+    ' sh "$DATA_ROOT" "$YAM_ROOT" "$YAM_VAR" "$YAM_ETC" "$YAM_RUN" "$CACHE_DIR" "$PKG_SHARE" >/dev/null 2>&1 &
     echo $! > "$DATA_ROOT/ram_guard.pid"
 
-    (
+    run_detached sh -c '
+        _bin="$1/bin/soloist"
+        _lib="$1/lib64"
+        _ld="$_lib/ld-linux-aarch64.so.1"
         for i in 1 2 3 4 5; do
             sleep 2
-            LD_LIBRARY_PATH="$PKG_SHARE/lib64" "$PKG_SHARE/bin/soloist" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 && break
+            if [ -x "$_ld" ] && ! LD_LIBRARY_PATH="$_lib" "$_bin" --help >/dev/null 2>&1; then
+                LD_LIBRARY_PATH="$_lib" "$_ld" --library-path "$_lib" --argv0 "$_bin" "$_bin" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 && break
+            else
+                LD_LIBRARY_PATH="$_lib" "$_bin" ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 && break
+            fi
         done
-    ) </dev/null >/dev/null 2>&1 &
+    ' sh "$PKG_SHARE" >/dev/null 2>&1 &
 }
 
 run_foreground() {

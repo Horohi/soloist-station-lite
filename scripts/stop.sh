@@ -8,8 +8,15 @@ kill_pidfile() {
     pidfile="$1"; expected="$2"
     [ -f "$pidfile" ] || return 0
     pid=$(cat "$pidfile" 2>/dev/null || true)
-    if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "$expected" ]; then
-        kill -9 "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+        if [ "$comm" = "$expected" ]; then
+            kill -9 "$pid" 2>/dev/null || true
+        elif [ "$expected" = "soloist" ] && [ "$comm" = "ld-linux-aarch6" ]; then
+            case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)" in
+                *soloist*) kill -9 "$pid" 2>/dev/null || true ;;
+            esac
+        fi
     fi
     rm -f "$pidfile"
 }

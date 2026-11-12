@@ -124,12 +124,40 @@ cmd_version() {
     fi
 }
 
+find_live_pid() {
+    _proc="$1"
+    for _p in $(pidof "$_proc" 2>/dev/null || true) $(cat "$DATA_ROOT/${_proc}.pid" 2>/dev/null || true) $(cat "$CACHE_DIR/${_proc}.pid" 2>/dev/null || true); do
+        [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null || continue
+        _comm=$(cat "/proc/$_p/comm" 2>/dev/null || true)
+        if [ "$_comm" = "$_proc" ]; then
+            printf '%s\n' "$_p"
+            return 0
+        elif [ "$_proc" = "soloist" ] && [ "$_comm" = "ld-linux-aarch6" ]; then
+            case "$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null || true)" in
+                *soloist*) printf '%s\n' "$_p"; return 0 ;;
+            esac
+        fi
+    done
+    return 1
+}
+
+run_soloist_ctl() {
+    _bin="$INSTALL_DIR/bin/soloist"
+    _lib="$INSTALL_DIR/lib64"
+    _ld="$_lib/ld-linux-aarch64.so.1"
+    if [ -x "$_ld" ] && ! LD_LIBRARY_PATH="$_lib" "$_bin" --help >/dev/null 2>&1; then
+        LD_LIBRARY_PATH="$_lib" "$_ld" --library-path "$_lib" --argv0 "$_bin" "$_bin" "$@"
+    else
+        LD_LIBRARY_PATH="$_lib" "$_bin" "$@"
+    fi
+}
+
 cmd_status() {
     printf "${BOLD}=== Spotify Soloist Status ===${NC}\n"
 
     # Soloist daemon
-    SOLO_PID=$(pidof soloist 2>/dev/null | awk '{print $NF}' || cat "$DATA_ROOT/soloist.pid" 2>/dev/null || cat "$CACHE_DIR/soloist.pid" 2>/dev/null || true)
-    if [ -n "$SOLO_PID" ] && kill -0 "$SOLO_PID" 2>/dev/null; then
+    SOLO_PID=$(find_live_pid soloist || true)
+    if [ -n "$SOLO_PID" ]; then
         RSS_KB=$(awk '/VmRSS/{print $2}' "/proc/$SOLO_PID/status" 2>/dev/null || echo "0")
         RSS_MB=$((RSS_KB / 1024))
         printf "  Soloist Daemon: ${GREEN}RUNNING${NC} (PID: %s, RAM: %s MB)\n" "$SOLO_PID" "$RSS_MB"
@@ -138,8 +166,8 @@ cmd_status() {
     fi
 
     # Bridge daemon
-    BRIDGE_PID=$(pidof soloist-bridge 2>/dev/null || cat "$DATA_ROOT/bridge.pid" 2>/dev/null || cat "$CACHE_DIR/bridge.pid" 2>/dev/null || true)
-    if [ -n "$BRIDGE_PID" ] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    BRIDGE_PID=$(find_live_pid soloist-bridge || true)
+    if [ -n "$BRIDGE_PID" ]; then
         BR_RSS=$(awk '/VmRSS/{print $2}' "/proc/$BRIDGE_PID/status" 2>/dev/null || echo "0")
         printf "  Soloist Bridge: ${GREEN}RUNNING${NC} (PID: %s, RAM: %s KB)\n" "$BRIDGE_PID" "$BR_RSS"
     else
@@ -158,7 +186,7 @@ cmd_status() {
 
     # Soloist API status
     if [ -x "$INSTALL_DIR/bin/soloist" ]; then
-        STATUS_OUT=$(LD_LIBRARY_PATH="$INSTALL_DIR/lib64" "$INSTALL_DIR/bin/soloist" ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
+        STATUS_OUT=$(run_soloist_ctl ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
         if [ -n "$STATUS_OUT" ]; then
             printf "\n${BOLD}Spotify API & Сессия:${NC}\n"
             printf "%s\n" "$STATUS_OUT" | sed 's/^/  /'

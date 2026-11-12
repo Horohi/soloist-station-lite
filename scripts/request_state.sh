@@ -59,9 +59,19 @@ request_report() {
     printf '[control] action=%s stage=%s status=%s\n' "$1" "$2" "$3" >> "$STATE_DIR/control.log"
 }
 
+# Run bin/soloist directly or via bundled ld-linux-aarch64.so.1 when PT_INTERP differs (e.g. YAM v2 custom root)
+request_exec_soloist() {
+    _ld="$BASE_DIR/lib64/ld-linux-aarch64.so.1"
+    if [ -x "$_ld" ] && ! LD_LIBRARY_PATH="$BASE_DIR/lib64" "$SOLOIST_BIN" --help >/dev/null 2>&1; then
+        LD_LIBRARY_PATH="$BASE_DIR/lib64" exec "$_ld" --library-path "$BASE_DIR/lib64" --argv0 "$SOLOIST_BIN" "$SOLOIST_BIN" "$@"
+    else
+        LD_LIBRARY_PATH="$BASE_DIR/lib64" exec "$SOLOIST_BIN" "$@"
+    fi
+}
+
 # The CLI cannot retain either lock after its worker exits.
 request_cli() {
-    (trap - EXIT; exec 8>&- 9>&-; LD_LIBRARY_PATH="$BASE_DIR/lib64" exec "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 "$@") > "$STATE_DIR/cli.$$" 2>/dev/null &
+    (trap - EXIT; exec 8>&- 9>&-; request_exec_soloist ctl -w 127.0.0.1:9090 "$@") > "$STATE_DIR/cli.$$" 2>/dev/null &
     CLI_PID=$!
     CLI_TICKS_LEFT=${CLI_TICKS_LEFT:-30}
     cli_timed_out=0
@@ -118,7 +128,7 @@ request_dispatch() {
         flock -u 8
         return 1
     fi
-    if [ "$1" = auto-next ]; then
+    if [ "$1" = auto-next ] || [ "$1" = auto-repeat ]; then
         observation=$(cat "$STATE_DIR/track" 2>/dev/null)
         observed_uri=$(printf '%s\n' "$observation" | head -n 1)
         if [ -z "$2" ] || [ "$observed_uri" != "$2" ] || [ -f "$STATE_DIR/selection.pending" ]; then
@@ -129,7 +139,11 @@ request_dispatch() {
             flock -u 8
             return 0
         fi
-        set -- next
+        if [ "$1" = auto-repeat ]; then
+            set -- seek 0
+        else
+            set -- next
+        fi
     fi
     if [ "$1" = toggle ]; then
         request_cli now > "$STATE_DIR/now.$$"

@@ -121,7 +121,33 @@ case "$INIT_VOL" in ''|*[!0-9]*) INIT_VOL=20 ;; esac
 [ "$INIT_VOL" -le 100 ] || INIT_VOL=100
 
 export LD_LIBRARY_PATH="$PKG_DIR/lib64"
-[ -f "$PKG_DIR/lib64/libsoloist_duck.so" ] && export LD_PRELOAD="$PKG_DIR/lib64/libsoloist_duck.so"
+DUCK_LIB=""
+[ -f "$PKG_DIR/lib64/libsoloist_duck.so" ] && DUCK_LIB="$PKG_DIR/lib64/libsoloist_duck.so"
+
+LD_SO="$PKG_DIR/lib64/ld-linux-aarch64.so.1"
+if [ -x "$LD_SO" ] && ! "$PKG_DIR/bin/soloist" --help >/dev/null 2>&1; then
+    if [ -n "$DUCK_LIB" ]; then
+        exec "$LD_SO" --library-path "$PKG_DIR/lib64" --preload "$DUCK_LIB" --argv0 "$PKG_DIR/bin/soloist" \
+            "$PKG_DIR/bin/soloist" \
+            -n "$DEVICE_NAME" \
+            -k "$API_KEY" \
+            -D "$DATA_DIR" \
+            -C "$CACHE_DIR" \
+            -w 127.0.0.1:9090 \
+            --initial-volume "$INIT_VOL"
+    else
+        exec "$LD_SO" --library-path "$PKG_DIR/lib64" --argv0 "$PKG_DIR/bin/soloist" \
+            "$PKG_DIR/bin/soloist" \
+            -n "$DEVICE_NAME" \
+            -k "$API_KEY" \
+            -D "$DATA_DIR" \
+            -C "$CACHE_DIR" \
+            -w 127.0.0.1:9090 \
+            --initial-volume "$INIT_VOL"
+    fi
+fi
+
+[ -n "$DUCK_LIB" ] && export LD_PRELOAD="$DUCK_LIB"
 exec "$PKG_DIR/bin/soloist" \
     -n "$DEVICE_NAME" \
     -k "$API_KEY" \

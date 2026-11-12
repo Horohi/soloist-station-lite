@@ -77,6 +77,14 @@ if [ ! -x "$STAGE_DIR/bin/soloist" ]; then
     exit 1
 fi
 
+# Repoint PT_INTERP from standalone /data/opt/soloist to YAM v2 shared loader
+# (scripts also wrap via ld-linux-aarch64.so.1 if YAM_ROOT != /data/yam)
+if command -v patchelf >/dev/null 2>&1; then
+    patchelf --set-interpreter /data/yam/share/horohi.soloist/lib64/ld-linux-aarch64.so.1 "$STAGE_DIR/bin/soloist"
+else
+    echo "WARNING: patchelf not found; bin/soloist will rely on ld-linux-aarch64.so.1 wrapper fallback" >&2
+fi
+
 if [ -d "$REPO_DIR/lib64" ]; then
     cp -RfL "$REPO_DIR/lib64/." "$STAGE_DIR/lib64/"
 fi

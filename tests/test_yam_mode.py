@@ -350,8 +350,73 @@ def test_soloist_setup():
         print("PASS soloist setup interactive wizard (YAM v2 + Standalone + EOF + preserve)")
 
 
+def test_auto_repeat_and_stale_pid_status():
+    # 1. Verify C repeat_mode parsing from WS JSON options.repeat
+    with tempfile.TemporaryDirectory(prefix="soloist-repeat-test-") as d:
+        tmp = pathlib.Path(d)
+        # Filter out run_controller/selection declarations if already in part_paths
+        c_file = tmp / "test_rep.c"
+        exe = tmp / "test_rep"
+        # part_paths defines selection/run_controller helpers, extract through track_observation_revision or keep clean slice
+        ws_start = SOURCE.index("static int spotify_is_active = 0;")
+        ws_slice = SOURCE[ws_start : SOURCE.index("#ifdef __aarch64__", ws_start)]
+        stub_head = C_PREFIX + part_mem + r"""
+static int is_yam_mode = 0;
+static int spotify_is_active_dummy = 0;
+static const char *get_requests_dir(void) { return "/tmp"; }
+static void run_controller(const char *a, const char *b) { (void)a; (void)b; }
+static int selection_needs_observation(void) { return 0; }
+static void publish_track(const char *u) { (void)u; }
+""" + ws_slice + r"""
+int main(void) {
+    handle_soloist_ws_json("{\"type\":\"playback_state\",\"options\":{\"shuffle\":false,\"repeat\":\"track\"}}");
+    if (repeat_mode != 2) return 1;
+    handle_soloist_ws_json("{\"type\":\"playback_state\",\"options\":{\"shuffle\":false,\"repeat\":\"context\"}}");
+    if (repeat_mode != 1) return 2;
+    handle_soloist_ws_json("{\"type\":\"playback_state\",\"options\":{\"shuffle\":false,\"repeat\":\"off\"}}");
+    if (repeat_mode != 0) return 3;
+    printf("PASS C bridge options.repeat parser (track/context/off)\n");
+    return 0;
+}
+"""
+        c_file.write_text(stub_head)
+        subprocess.run(["cc", "-std=c99", "-Wno-unused-function", str(c_file), "-o", str(exe)], check=True)
+        res = subprocess.run([str(exe)], capture_output=True, text=True, check=True)
+        print(res.stdout, end="")
+
+        # 2. Verify control.sh auto-repeat dispatches 'seek 0' instead of 'next'
+        app = tmp / "app"
+        (app / "bin").mkdir(parents=True)
+        (app / "scripts").mkdir(parents=True)
+        (app / "data/requests").mkdir(parents=True)
+        (app / "bin/soloist").write_text('#!/bin/sh\necho "$@" >> "' + str(tmp / "ctl_calls") + '"\n')
+        (app / "bin/soloist").chmod(0o755)
+        for s in ("control.sh", "request_state.sh", "soloist-cli"):
+            p = app / "scripts" / s
+            p.write_text((ROOT / "scripts" / s).read_text())
+            p.chmod(0o755)
+        (app / "data/requests/track").write_text("spotify:track:1111111111111111111111\n1\n")
+        (app / "data/requests/generation").write_text("0\n")
+        subprocess.run(
+            ["/bin/sh", str(app / "scripts/control.sh"), "auto-repeat", "spotify:track:1111111111111111111111", "0"],
+            check=True,
+        )
+        ctl_out = (tmp / "ctl_calls").read_text()
+        assert "seek 0" in ctl_out and " next" not in ctl_out, ctl_out
+        print("PASS control.sh auto-repeat dispatches seek 0 instead of next")
+
+        # 3. Verify soloist status ignores stale PID file pointing to unrelated alive process (this python process)
+        (app / "data/soloist.pid").write_text(f"{os.getpid()}\n")
+        (app / "data/bridge.pid").write_text(f"{os.getpid()}\n")
+        st_env = {"PATH": "/bin:/usr/bin", "INSTALL_DIR": str(app)}
+        st_res = subprocess.run([str(app / "scripts/soloist-cli"), "status"], env=st_env, capture_output=True, text=True, check=True)
+        assert "Soloist Daemon: " in st_res.stdout and "STOPPED" in st_res.stdout and "RUNNING" not in st_res.stdout, st_res.stdout
+        print("PASS soloist status does not falsely report reused/stale PID as RUNNING")
+
+
 if __name__ == "__main__":
     test_c_yam_paths()
     test_shell_yam_layout()
     test_soloist_setup()
+    test_auto_repeat_and_stale_pid_status()
     print("ALL YAM V2 MODE TESTS PASSED!")

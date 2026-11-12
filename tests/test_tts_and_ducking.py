@@ -73,6 +73,8 @@ static int suppressed_calls = 0;
 static int duck_active_state = 0;
 static int yield_active_state = 0;
 static int64_t g_tts_hold_until_ms = 0;
+static int g_tts_speaking_seen = 0;
+static int quasar_uses_f252 = -1;
 static int64_t cancel_alice_until_ms = 0;
 static int spotify_is_active = 0;
 static int playback_status = 0;
@@ -149,8 +151,22 @@ int main(void) {{
     CHECK(memmem(written_frames, written_len, exp_play, strlen(exp_play)) != NULL,
           "TTS announces playing track and artists");
     // Ensure obsolete field 3 (tag 0x18 0x01) is not appended after Interrupt (0x10 0x02)
+    CHECK(written_frames[4] == 0x92 && written_frames[5] == 0x0d,
+          "direct Quasar daemon receives field 210 remoting frame");
     CHECK(written_frames[written_len - 2] == 0x10 && written_frames[written_len - 1] == 0x02,
           "TVocalizeDirective ends cleanly with SynthesisMode=Interrupt (2)");
+
+    // 5b. SharedMessage 252/253=210 framing for newer/alternate Quasar daemons (e.g. YNDX-0004)
+    quasar_uses_f252 = 1;
+    written_len = 0;
+    handle_voice_recognition(1, "какая музыка играет", strlen("какая музыка играет"));
+    CHECK(written_len > 24, "SharedMessage START_VOCALIZE frame written");
+    CHECK(written_frames[4] == 0xe2 && written_frames[5] == 0x0f,
+          "SharedMessage uses tag 252 envelope");
+    CHECK(written_frames[written_len - 4] == 0xe8 && written_frames[written_len - 3] == 0x0f &&
+          written_frames[written_len - 2] == 0xd2 && written_frames[written_len - 1] == 0x01,
+          "SharedMessage ends with tag 253 = 210");
+    quasar_uses_f252 = -1;
 
     // 6. Voice TTS when paused ("кто поёт")
     playback_status = 2;

@@ -28,7 +28,7 @@ case "$1" in
     search) request_begin || exit 1;;
     play|pause|next|prev|toggle) request_begin hold || exit 1;;
     shuffle|repeat) request_lock 8 50 || exit 1; GENERATION=;;
-    auto-next)
+    auto-next|auto-repeat)
         GENERATION=$3
         case "$GENERATION" in ''|*[!0-9]*) exit 2;; esac
         request_lock 8 50 || exit 1;;
@@ -74,7 +74,7 @@ elif [ "$1" = volume ]; then
     amixer sset Master "${vol}%" >/dev/null 2>&1 || true
     exit 0
 elif [ "$1" = what-is-playing ]; then
-    "$SOLOIST_BIN" ctl -w 127.0.0.1:9090 now 2>/dev/null || echo "Nothing is playing"
+    (request_exec_soloist ctl -w 127.0.0.1:9090 now 2>/dev/null) || echo "Nothing is playing"
     exit 0
 fi
 if [ "$1" = search ]; then
