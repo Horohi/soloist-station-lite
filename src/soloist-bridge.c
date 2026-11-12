@@ -2861,11 +2861,13 @@ void _start(void) {
                         }
 
                         const uint8_t *frame_body = quasar_buf + 4;
-                        if (find_field(frame_body, frame_len, 253, 0, 0, 0, 0)) {
+                        uint64_t f253_type = 0;
+                        if (find_field(frame_body, frame_len, 3, 2, 0, 0, 0) ||
+                            find_field(frame_body, frame_len, 210, 2, 0, 0, 0)) {
+                            quasar_uses_f252 = 0;
+                        } else if (find_field(frame_body, frame_len, 253, 0, 0, 0, &f253_type) &&
+                                   (f253_type == 3 || f253_type == 210)) {
                             quasar_uses_f252 = 1;
-                        } else if (find_field(frame_body, frame_len, 3, 2, 0, 0, 0) ||
-                                   find_field(frame_body, frame_len, 210, 2, 0, 0, 0)) {
-                            if (quasar_uses_f252 < 0) quasar_uses_f252 = 0;
                         }
                         const uint8_t *state_payload = 0;
                         unsigned long state_len = 0;

@@ -1,5 +1,5 @@
 name: horohi/soloist
-version: 1.3.10
+version: 1.3.11
 license: MIT
 description: Spotify Connect with Alice voice control, media buttons, ALSA ducking, and adaptive LED equalizer for Yandex Station
 homepage: https://github.com/Horohi/soloist-station-lite
