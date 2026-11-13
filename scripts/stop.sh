@@ -30,7 +30,23 @@ for pidfile in \
     /data/opt/soloist/data/ram_guard.pid; do
     if [ -f "$pidfile" ]; then
         rpid=$(cat "$pidfile" 2>/dev/null || true)
-        [ -n "$rpid" ] && kill -9 "$rpid" 2>/dev/null || true
+        case "$rpid" in
+            ''|*[!0-9]*) ;;
+            *)
+                # The PID file survives reboot. A recycled PID must not kill
+                # an unrelated process (or a whole process group, PID 0).
+                rcomm=$(cat "/proc/$rpid/comm" 2>/dev/null || true)
+                case "$rcomm" in
+                    sh|ash|bash|busybox)
+                        rcmd=$(tr '\0' ' ' < "/proc/$rpid/cmdline" 2>/dev/null || true)
+                        case "$rcmd" in
+                            *soloist-ram-guard*|*'MEM_AVAIL='*'/soloist.pid'*)
+                                [ "$rpid" -gt 1 ] && kill -9 "$rpid" 2>/dev/null || true ;;
+                        esac
+                        ;;
+                esac
+                ;;
+        esac
         rm -f "$pidfile"
     fi
 done
@@ -63,4 +79,9 @@ for proc_dir in /proc/[0-9]*; do
 done
 
 rm -f /tmp/soloist.yield 2>/dev/null || true
+# Older standalone start.sh files embed an untracked guard. Migrate known
+# generated blocks after the helper has been installed, including on update.
+if [ -f /data/opt/soloist/scripts/migrate-standalone-guard.sh ]; then
+    sh /data/opt/soloist/scripts/migrate-standalone-guard.sh /data/opt/soloist || true
+fi
 echo "Spotify Soloist and Bridge stopped."

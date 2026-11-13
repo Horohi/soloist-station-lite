@@ -111,7 +111,7 @@ start_daemons() {
                     sh "$7/scripts/control.sh" clean-cache >/dev/null 2>&1 || true
             fi
         done
-    ' sh "$DATA_ROOT" "$YAM_ROOT" "$YAM_VAR" "$YAM_ETC" "$YAM_RUN" "$CACHE_DIR" "$PKG_SHARE" >/dev/null 2>&1 &
+    ' soloist-ram-guard "$DATA_ROOT" "$YAM_ROOT" "$YAM_VAR" "$YAM_ETC" "$YAM_RUN" "$CACHE_DIR" "$PKG_SHARE" >/dev/null 2>&1 &
     echo $! > "$DATA_ROOT/ram_guard.pid"
 
     run_detached sh -c '

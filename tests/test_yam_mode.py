@@ -3,6 +3,7 @@
 import os
 import pathlib
 import subprocess
+import tarfile
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -426,9 +427,166 @@ int main(void) {
         print("PASS stop.sh does not kill soloist CLI shell processes")
 
 
+def test_ram_guard_pid_reuse():
+    with tempfile.TemporaryDirectory(prefix="soloist-guard-") as d:
+        tmp = pathlib.Path(d)
+        state = tmp / "var/horohi.soloist"
+        state.mkdir(parents=True)
+        # Isolate this test from the host's unrelated Soloist processes and files.
+        script = (ROOT / "scripts/stop.sh").read_text()
+        script = script.replace("killall -9 soloist-bridge", "true")
+        script = script.replace("/proc/[0-9]*", str(tmp / "no-proc/[0-9]*"))
+        script = script.replace("/data/opt/soloist", str(tmp / "standalone"))
+        script = script.replace("/tmp/soloist.yield", str(tmp / "soloist.yield"))
+        stop = tmp / "stop.sh"
+        stop.write_text(script)
+        env = {"PATH": "/bin:/usr/bin", "YAM_VAR": str(tmp / "var"), "YAM_RUN": str(tmp / "run")}
+        unrelated = subprocess.Popen(["sleep", "30"])
+        try:
+            (state / "ram_guard.pid").write_text(f"{unrelated.pid}\n")
+            subprocess.run(["sh", str(stop)], env=env, check=True, capture_output=True)
+            assert unrelated.poll() is None, "reused RAM guard PID killed an unrelated process"
+        finally:
+            unrelated.terminate()
+            unrelated.wait(timeout=5)
+
+        guard = subprocess.Popen(["sh", "-c", "while :; do sleep 1; done", "soloist-ram-guard"])
+        try:
+            (state / "ram_guard.pid").write_text(f"{guard.pid}\n")
+            subprocess.run(["sh", str(stop)], env=env, check=True, capture_output=True)
+            guard.wait(timeout=5)
+            assert guard.returncode != 0, "actual RAM guard was not stopped"
+        finally:
+            if guard.poll() is None:
+                guard.terminate()
+                guard.wait(timeout=5)
+        print("PASS stop.sh checks RAM guard identity before killing a PID")
+
+
+def test_standalone_update_download_failures():
+    with tempfile.TemporaryDirectory(prefix="soloist-update-") as d:
+        tmp = pathlib.Path(d)
+        app = tmp / "app"
+        for directory in ("bin", "scripts", "lib64"):
+            (app / directory).mkdir(parents=True)
+        cli_text = (ROOT / "scripts/soloist-cli").read_text()
+        cli_text = cli_text.replace("/data/opt/bin", str(tmp / "opt-bin"))
+        cli_text = cli_text.replace("/tmp/soloist_update* /data/local/tmp/soloist*", str(tmp / "update-debris-*"))
+        cli = app / "bin/soloist-cli"
+        cli.write_text(cli_text)
+        (app / "version").write_text("v1.3.12\n")
+        (app / "bin/soloist").write_text("old executable\n")
+        (app / "spotify_api.conf").write_text("keep this configuration\n")
+        (app / "data").mkdir()
+        (app / "data/user.dat").write_text("keep this data\n")
+        (app / "stop.sh").write_text(f'#!/bin/sh\ntouch "{tmp / "stopped"}"\n')
+        (app / "stop.sh").chmod(0o755)
+        (app / "start.sh").write_text(f'#!/bin/sh\ntouch "{tmp / "started"}"\n')
+        curl = app / "bin/curl"
+        curl.write_text('''#!/bin/sh
+case "$*" in
+    *api.github.com*) printf '%s\\n' '  "tag_name": "v1.3.13",';;
+    *)
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = -o ]; then out=$2; shift; fi
+            shift
+        done
+        cp "$TEST_ARCHIVE" "$out"
+        [ "${TEST_DOWNLOAD_FAIL:-0}" != 1 ];;
+esac
+''')
+        curl.chmod(0o755)
+
+        payload = tmp / "payload"
+        for path in ("bin/soloist", "bin/soloist-bridge", "bin/curl", "lib64/ld-linux-aarch64.so.1",
+                     "scripts/soloist-cli", "scripts/control.sh", "scripts/request_state.sh",
+                     "scripts/search_and_play.sh", "scripts/stop.sh", "scripts/status.sh",
+                     "scripts/soloist-ram-guard.sh", "scripts/migrate-standalone-guard.sh"):
+            file = payload / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(cli_text if path == "scripts/soloist-cli" else "new release\n")
+        for name in ("start.sh", "spotify_api.conf", "data/user.dat"):
+            file = payload / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("unexpected replacement\n")
+        archive = tmp / "release.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(payload, arcname=".")
+        env = {"PATH": "/bin:/usr/bin", "INSTALL_DIR": str(app), "TEST_ARCHIVE": str(archive)}
+
+        def run_update(extra_env=None):
+            return subprocess.run(["sh", str(cli), "update"], env={**env, **(extra_env or {})},
+                                  capture_output=True, text=True, timeout=15)
+
+        for extra in ({"TEST_DOWNLOAD_FAIL": "1"}, {"TEST_ARCHIVE": str(tmp / "truncated.tar.gz")}):
+            (tmp / "truncated.tar.gz").write_bytes(archive.read_bytes()[:-16])
+            result = run_update(extra)
+            assert result.returncode != 0, result.stdout + result.stderr
+            assert not (tmp / "stopped").exists(), result.stdout
+            assert (app / "bin/soloist").read_text() == "old executable\n"
+            assert (app / "version").read_text() == "v1.3.12\n"
+            assert not list(app.glob(".soloist-update.*"))
+
+        result = run_update()
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp / "stopped").exists() and (tmp / "started").exists()
+        assert (app / "bin/soloist").read_text() == "new release\n"
+        assert (app / "spotify_api.conf").read_text() == "keep this configuration\n"
+        assert (app / "data/user.dat").read_text() == "keep this data\n"
+        assert "unexpected replacement" not in (app / "start.sh").read_text()
+        assert (app / "version").read_text() == "v1.3.13\n"
+        assert not list(app.glob(".soloist-update.*"))
+        print("PASS standalone update rejects incomplete downloads before stopping the service")
+
+
+def test_standalone_guard_migration():
+    with tempfile.TemporaryDirectory(prefix="soloist-migrate-") as d:
+        app = pathlib.Path(d)
+        start = app / "start.sh"
+        prefix = '#!/bin/sh\nAPI_KEY="test_private_value"\necho before\n'
+        suffix = 'echo after\n'
+        combined = '''# Activation & RAM cache guard
+(
+    # 2. RAM guard: keep audio stream cache under 16MB
+    while true; do sleep 30; done
+) &
+'''
+        separate = '''# Activation guard
+(
+    echo activate
+) &
+
+# RAM guard: keep tmpfs audio cache under 16MB
+(
+    while true; do sleep 30; done
+) &
+'''
+        helper = ROOT / "scripts/migrate-standalone-guard.sh"
+        for old in (combined, separate):
+            start.write_text(prefix + old + suffix)
+            subprocess.run(["sh", str(helper), str(app)], check=True)
+            migrated = start.read_text()
+            assert migrated.startswith(prefix) and migrated.endswith(suffix), migrated
+            assert migrated.count("soloist-ram-guard.sh") == 1, migrated
+            assert "ram_guard.pid" in migrated and "while true" not in migrated, migrated
+            assert start.stat().st_mode & 0o777 == 0o700
+            subprocess.run(["sh", str(helper), str(app)], check=True)
+            assert start.read_text() == migrated
+
+        # Refuse to overwrite an incomplete or user-modified matching block.
+        original = prefix + combined.replace(") &\n", "") + suffix
+        start.write_text(original)
+        res = subprocess.run(["sh", str(helper), str(app)], capture_output=True)
+        assert res.returncode != 0 and start.read_text() == original
+        print("PASS standalone guard migration preserves settings and refuses incomplete blocks")
+
+
 if __name__ == "__main__":
     test_c_yam_paths()
     test_shell_yam_layout()
     test_soloist_setup()
     test_auto_repeat_and_stale_pid_status()
+    test_ram_guard_pid_reuse()
+    test_standalone_update_download_failures()
+    test_standalone_guard_migration()
     print("ALL YAM V2 MODE TESTS PASSED!")

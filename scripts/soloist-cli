@@ -391,6 +391,31 @@ cmd_update() {
 
     DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST/soloist-station-lite.tar.gz"
 
+    # Validate the complete download before stopping the old service. Keep
+    # only the compressed archive: the speaker may have little free space.
+    UPDATE_DIR=$(mktemp -d "$INSTALL_DIR/.soloist-update.XXXXXX") || {
+        printf "${RED}Ошибка: не удалось создать временный каталог обновления.${NC}\n"
+        exit 1
+    }
+    trap 'rm -rf "$UPDATE_DIR"' EXIT
+    trap 'exit 1' HUP INT TERM
+    printf "Загрузка и проверка релиза %s...\n" "$LATEST"
+    if ! "$CURL_BIN" -L -f -s --connect-timeout 10 --max-time 300 -o "$UPDATE_DIR/release.tar.gz" "$DOWNLOAD_URL" ||
+       ! gzip -t "$UPDATE_DIR/release.tar.gz" 2>/dev/null ||
+       ! gzip -dc "$UPDATE_DIR/release.tar.gz" | tar -tf - > "$UPDATE_DIR/files" 2>/dev/null; then
+        printf "${RED}Ошибка загрузки или проверки архива; текущая установка сохранена.${NC}\n"
+        exit 1
+    fi
+    for required in bin/soloist bin/soloist-bridge bin/curl lib64/ld-linux-aarch64.so.1 \
+                    scripts/soloist-cli scripts/control.sh scripts/request_state.sh scripts/search_and_play.sh scripts/stop.sh scripts/status.sh \
+                    scripts/soloist-ram-guard.sh scripts/migrate-standalone-guard.sh; do
+        if ! grep -Fx "./$required" "$UPDATE_DIR/files" >/dev/null &&
+           ! grep -Fx "$required" "$UPDATE_DIR/files" >/dev/null; then
+            printf "${RED}Ошибка: в релизе отсутствует %s; текущая установка сохранена.${NC}\n" "$required"
+            exit 1
+        fi
+    done
+
     # Stop current services safely (guard against legacy stop.sh running killall -9 soloist on ourselves)
     printf "Остановка старых служб...\n"
     if [ -f "$INSTALL_DIR/stop.sh" ]; then
@@ -407,14 +432,17 @@ cmd_update() {
         SAVED_CONF=$(cat "$INSTALL_DIR/spotify_api.conf")
     fi
 
-    # Stream download and unpack directly into $INSTALL_DIR (0 MB RAM / 0 MB temp disk usage)
-    printf "Загрузка и потоковая распаковка релиза %s...\n" "$LATEST"
-    if ! "$CURL_BIN" -L -f -s "$DOWNLOAD_URL" | gzip -d -c 2>/dev/null | tar -xf - -C "$INSTALL_DIR" 2>/dev/null; then
-        # Fallback if gzip -d failed: try gunzip
-        if ! "$CURL_BIN" -L -f -s "$DOWNLOAD_URL" | gunzip -c 2>/dev/null | tar -xf - -C "$INSTALL_DIR" 2>/dev/null; then
-            printf "${RED}Ошибка загрузки или распаковки архива с GitHub!${NC}\n"
-            exit 1
-        fi
+    # Preserve local settings and the running CLI. The verified archive is
+    # decompressed through a pipe because BusyBox tar may lack gzip support.
+    if ! gzip -dc "$UPDATE_DIR/release.tar.gz" | tar -xf - -C "$INSTALL_DIR" \
+        --exclude='./bin/soloist-cli' --exclude='bin/soloist-cli' \
+        --exclude='./start.sh' --exclude='start.sh' \
+        --exclude='./spotify_api.conf' --exclude='spotify_api.conf' \
+        --exclude='./data' --exclude='data' \
+        --exclude='./version' --exclude='version' \
+        --exclude='./soloist-station-lite.tar.gz' --exclude='soloist-station-lite.tar.gz'; then
+        printf "${RED}Ошибка установки файлов; проверьте свободное место и повторите обновление.${NC}\n"
+        exit 1
     fi
 
     # Fix permissions and refresh top-level helper copies from scripts/

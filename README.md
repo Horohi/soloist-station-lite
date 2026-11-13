@@ -96,6 +96,9 @@ soloist restart      # Перезапуск службы
 soloist logs bridge  # Просмотр логов моста в реальном времени
 ```
 
+Для обновления Standalone нужно свободное место под скачанный архив релиза на `/data`.
+Архив проверяется до остановки службы; при ошибке загрузки текущая установка продолжает работать.
+
 ---
 
 ## 📦 Быстрая установка
@@ -143,7 +146,7 @@ yam install horohi/soloist
 soloist setup
 
 # Или локальная установка скачанного .yampkg:
-yam install horohi-soloist-1.3.12-yandexmicro.yampkg
+yam install horohi-soloist-1.3.13-yandexmicro.yampkg
 ```
 При миграции со старого `/data/opt/soloist` `yam-postinstall` перенесёт ключи и конфиги автоматически; автозапуск настраивается через `/etc/init.d/S98soloist`. Для новой установки достаточно выполнить `soloist setup` после `yam install` (или вручную отредактировать `/data/yam/etc/horohi.soloist/config.env` и выполнить `soloist restart`).
 

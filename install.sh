@@ -185,7 +185,7 @@ if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
     chmod 755 "$INSTALL_DIR/scripts/search_and_play.sh"
 fi
 
-for helper in control.sh request_state.sh soloist-cli soloist-service.sh; do
+for helper in control.sh request_state.sh soloist-cli soloist-service.sh soloist-ram-guard.sh migrate-standalone-guard.sh; do
     if [ -f "$SCRIPT_DIR/scripts/$helper" ]; then
         cp -f "$SCRIPT_DIR/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
         chmod 755 "$INSTALL_DIR/scripts/$helper"
@@ -200,7 +200,7 @@ if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
     ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
 fi
 
-printf "v1.3.12\n" > "$INSTALL_DIR/version"
+printf "v1.3.13\n" > "$INSTALL_DIR/version"
 
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
@@ -347,31 +347,8 @@ if [ -x /data/opt/soloist/bin/soloist-bridge ]; then
 fi
 
 # Activation & RAM cache guard
-(
-    # 1. Wait for daemon to become ready and activate device if logged in
-    for attempt in \$(seq 1 15); do
-        sleep 2
-        STATUS=\$(LD_LIBRARY_PATH="/data/opt/soloist/lib64" /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
-        if echo "\$STATUS" | grep -qi "logged in: yes"; then
-            LD_LIBRARY_PATH="/data/opt/soloist/lib64" /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 activate >/dev/null 2>&1 || true
-            break
-        fi
-    done
-
-    # 2. RAM guard: keep audio stream cache under 16MB so tmpfs never exhausts RAM / zram
-    while true; do
-        sleep 30
-        if [ -f /data/opt/soloist/scripts/control.sh ]; then
-            sh /data/opt/soloist/scripts/control.sh clean-cache >/dev/null 2>&1 || true
-        elif [ -d /tmp/soloist_cache/cache ]; then
-            find /tmp/soloist_cache/cache -type f -mmin +1 -exec rm -f {} + 2>/dev/null || true
-            CACHE_KB=\$(du -sk /tmp/soloist_cache/cache 2>/dev/null | awk '{print \$1}')
-            if [ "\${CACHE_KB:-0}" -gt 16384 ]; then
-                rm -rf /tmp/soloist_cache/cache/* 2>/dev/null || true
-            fi
-        fi
-    done
-) &
+/bin/sh /data/opt/soloist/scripts/soloist-ram-guard.sh /data/opt/soloist &
+echo \$! > /data/opt/soloist/data/ram_guard.pid
 START_EOF
 chmod 700 "$INSTALL_DIR/start.sh"   # contains the Soloist API key
 
