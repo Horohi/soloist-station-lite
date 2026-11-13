@@ -239,10 +239,33 @@ if [ -f "$CENSOR_FILE" ]; then
     echo "[search] Censorship filter ACTIVE (filtering explicit tracks)" >> "$LOG"
 fi
 
+# Keep JSON string contents intact while accepting whitespace between tokens.
+compact_json() {
+    LC_ALL=C awk 'BEGIN { quoted=0; escape=0 }
+    {
+        for (i=1; i<=length($0); i++) {
+            c=substr($0,i,1)
+            if (quoted) {
+                printf "%s", c
+                if (escape) escape=0
+                else if (c=="\\") escape=1
+                else if (c=="\"") quoted=0
+            } else if (c=="\"") { quoted=1; printf "%s", c }
+            else if (c !~ /[[:space:]]/) printf "%s", c
+        }
+    }'
+}
+
+# Album and artist contexts can contain explicit tracks that cannot be checked here.
+if [ "$CENSORSHIP" = 1 ] && [ "$TYPE" != track ]; then
+    personal_error 'Cannot filter explicit tracks in an album or artist context'
+fi
+
 LIMIT=5
 
 SEARCH_RESP=$(api_request "https://api.spotify.com/v1/search?q=$ENCODED&type=$TYPE&limit=$LIMIT" \
     -H "Authorization: Bearer $TOKEN") || exit 1
+SEARCH_RESP=$(printf '%s' "$SEARCH_RESP" | compact_json)
 request_current || exit 0
 
 # Rank track results by how many query words hit the title (x5) or the artists (x2).
@@ -256,7 +279,7 @@ pick_track() {
         nwords = split(tolower(ENVIRON["SEARCH_TERM"]), qwords, " ")
     }
     NR > 1 {
-        if (censor == "1" && $0 ~ /"explicit":true/) next
+        if (censor == "1" && $0 !~ /"explicit":false/) next
         uri = ""
         if (match($0, /"uri":"spotify:track:[a-zA-Z0-9]+/)) {
             uri = substr($0, RSTART + 7, RLENGTH - 7)
@@ -304,11 +327,12 @@ if [ -z "$URI" ] && [ "$RADIO" = 0 ]; then
     echo "[search] No match for type=$TYPE, trying general search..." >> "$LOG"
     SEARCH_RESP=$(api_request "https://api.spotify.com/v1/search?q=$ENCODED&type=track,artist,album&limit=5" \
         -H "Authorization: Bearer $TOKEN") || exit 1
+    SEARCH_RESP=$(printf '%s' "$SEARCH_RESP" | compact_json)
     request_current || exit 0
     URI=$(printf '%s' "$SEARCH_RESP" | pick_track)
     # Prioritize track > artist > album
-    [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:artist:[a-zA-Z0-9]+' | head -n 1)
-    [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:album:[a-zA-Z0-9]+' | head -n 1)
+    [ "$CENSORSHIP" = 1 ] || [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:artist:[a-zA-Z0-9]+' | head -n 1)
+    [ "$CENSORSHIP" = 1 ] || [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:album:[a-zA-Z0-9]+' | head -n 1)
 fi
 
 flock -u 9

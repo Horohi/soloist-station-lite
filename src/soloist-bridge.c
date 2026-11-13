@@ -487,9 +487,17 @@ static int send_alice_tts(int quasar_fd, const char *text) {
     g_tts_hold_until_ms = tnow + 4000;
     set_ducking(1, tnow);
     set_alsa_yield(1, tnow);
+    int alsa_released = 0;
     for (int waited_ms = 20; waited_ms <= 400; waited_ms += 20) {
         sys_msleep(20);
-        if (waited_ms >= 80 && sys_shmget(1024, 0, 0) < 0) break;
+        if (waited_ms >= 80 && sys_shmget(1024, 0, 0) == -2 /* ENOENT */) {
+            alsa_released = 1;
+            break;
+        }
+    }
+    if (!alsa_released) {
+        log_msg("[bridge] Alice TTS cancelled: ALSA SHM still present or inaccessible\n");
+        return -1;
     }
 
     unsigned long text_len = str_len(text);

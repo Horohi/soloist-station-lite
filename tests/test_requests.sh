@@ -57,6 +57,8 @@ case "$url" in
             radio-censor) body='{"tracks":{"items":[{"album":{},"explicit":true,"name":"Test","track_number":1,"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"},{"album":{},"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:BBBBBBBBBBBBBBBBBBBBBB"}]}}';;
             radio-empty) body='{"tracks":{"items":[]},"artists":{"items":[{"uri":"spotify:artist:BBBBBBBBBBBBBBBBBBBBBB"}]}}';;
             censor) body='{"tracks":{"items":[{"album":{},"artists":[],"explicit":true,"name":"Test","track_number":1,"uri":"spotify:track:EXPLICIT"},{"album":{},"artists":[],"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:CLEAN"}]}}';;
+            formatted) body='{ "tracks": { "items": [ { "album": {}, "explicit": true, "name": "Test", "track_number": 1, "uri": "spotify:track:EXPLICIT" }, { "album": {}, "explicit": false, "name": "Test", "track_number": 1, "uri": "spotify:track:CLEAN" } ] } }';;
+            explicit-only) body='{ "tracks": { "items": [ { "album": {}, "artists": [{"uri":"spotify:artist:ARTIST"}], "explicit": true, "name": "Test", "track_number": 1, "uri": "spotify:track:EXPLICIT" } ] } }';;
             *) body='{"tracks":{"items":[{"album":{},"artists":[{"name":"Queen"}],"explicit":false,"name":"Don\u0027t Stop Me Now","track_number":1,"uri":"spotify:track:TEST123"}]}}';;
         esac;;
 esac
@@ -111,6 +113,16 @@ touch "$TEST/app/data/censorship"
 sh "$SEARCH" 'включи песню Test' || true
 label='censorship keeps clean track selection'; check grep -q 'play spotify:track:CLEAN' "$TEST/controls"
 label='censorship skips explicit selection'; check sh -c '! grep -q "play spotify:track:EXPLICIT" "$TEST/controls"'
+reset
+echo formatted > "$TEST/mode"
+touch "$TEST/app/data/censorship"
+sh "$SEARCH" 'включи песню Test' || true
+label='formatted JSON selects clean track'; check grep -q 'play spotify:track:CLEAN' "$TEST/controls"
+reset
+echo explicit-only > "$TEST/mode"
+touch "$TEST/app/data/censorship"
+sh "$SEARCH" 'включи песню Test' || true
+label='censorship does not fall back to unfiltered artist'; check test ! -s "$TEST/controls"
 reset
 echo playing > "$TEST/now_state"
 sh "$SEARCH" 'включи музыку' || true

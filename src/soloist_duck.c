@@ -309,8 +309,13 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size) {
         g_scratch_cap = nbytes;
     }
 
+    float initial_gain = st->gain;
     apply_duck_gain(g_scratch, (const uint8_t *)buffer, size, st, busy);
     long rc = orig(pcm, g_scratch, size);
+    if (rc < 0 || (unsigned long)rc < size) {
+        st->gain = initial_gain;
+        if (rc > 0) apply_duck_gain(g_scratch, (const uint8_t *)buffer, (size_t)rc, st, busy);
+    }
     pthread_mutex_unlock(&g_lock);
     return rc;
 }

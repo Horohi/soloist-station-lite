@@ -67,7 +67,8 @@ static long sys_write(int fd, const void *buf, unsigned long count) {{
 static int sys_open(const char *p, int f, int m) {{ (void)p;(void)f;(void)m; return -1; }}
 static void sys_close(int fd) {{ (void)fd; }}
 static int sys_unlink(const char *p) {{ (void)p; return 0; }}
-static int sys_shmget(int key, unsigned long size, int shmflg) {{ (void)key; (void)size; (void)shmflg; return -2; }}
+static int mock_shm_result = -2;
+static int sys_shmget(int key, unsigned long size, int shmflg) {{ (void)key; (void)size; (void)shmflg; return mock_shm_result; }}
 
 static int cancel_calls = 0;
 static int suppressed_calls = 0;
@@ -157,6 +158,13 @@ int main(void) {{
     CHECK(written_frames[written_len - 2] == 0x10 && written_frames[written_len - 1] == 0x02,
           "TVocalizeDirective ends cleanly with SynthesisMode=Interrupt (2)");
 
+    mock_shm_result = 42;
+    written_len = 0;
+    CHECK(send_alice_tts(1, "test") == -1 && written_len == 0, "busy SHM blocks vocalization after timeout");
+    mock_shm_result = -13;
+    CHECK(send_alice_tts(1, "test") == -1 && written_len == 0, "SHM permission error does not count as released");
+    mock_shm_result = -2;
+
     // 5b. SharedMessage 252/253=210 framing for newer/alternate Quasar daemons (e.g. YNDX-0004)
     quasar_uses_f252 = 1;
     written_len = 0;
@@ -222,6 +230,7 @@ def run_duck_preload_tests() -> None:
 
 uint8_t g_captured[262144];
 size_t g_captured_len = 0;
+long g_write_limit = -1;
 
 void reset_capture(void) { g_captured_len = 0; }
 
@@ -244,7 +253,7 @@ long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size) {
         memcpy(g_captured + g_captured_len, buffer, bytes);
         g_captured_len += bytes;
     }
-    return (long)size;
+    return g_write_limit >= 0 && (unsigned long)g_write_limit < size ? g_write_limit : (long)size;
 }
 '''
 
@@ -265,6 +274,7 @@ extern int snd_pcm_hw_params_set_channels(void *pcm, void *params, unsigned int 
 extern int snd_pcm_hw_params_set_rate_near(void *pcm, void *params, unsigned int *val, int *dir);
 extern long snd_pcm_writei(void *pcm, const void *buffer, unsigned long size);
 extern uint8_t g_captured[];
+extern long g_write_limit;
 extern void reset_capture(void);
 
 static int64_t now_mono_ms(void) {
@@ -307,6 +317,18 @@ int main(void) {
     // 2. Duck active: 80ms attack (3840 frames) down to 0.20, stereo symmetry
     shm->until_ms = now_mono_ms() + 60000;
     __atomic_store_n(&shm->active, 1, __ATOMIC_RELEASE);
+    // A partial write must advance the envelope only for accepted frames.
+    void *pcm_partial = (void *)0x3333;
+    CHECK(snd_pcm_hw_params_set_format(pcm_partial, NULL, 14) == 0, "set partial format");
+    CHECK(snd_pcm_hw_params_set_channels(pcm_partial, NULL, 2) == 0, "set partial channels");
+    CHECK(snd_pcm_hw_params_set_rate_near(pcm_partial, NULL, &rate, &dir) == 0, "set partial rate");
+    g_write_limit = 100;
+    reset_capture();
+    CHECK(snd_pcm_writei(pcm_partial, src_f, 4800) == 100, "partial write");
+    g_write_limit = -1;
+    reset_capture();
+    CHECK(snd_pcm_writei(pcm_partial, src_f, 1) == 1, "write after partial");
+    CHECK(((float *)g_captured)[0] > 0.95f, "gain reflects accepted frames only");
     reset_capture();
     CHECK(snd_pcm_writei(pcm_f, src_f, 4800) == 4800, "duck writei");
     CHECK(fabsf(src_f[0] - 1.0f) < 1e-6f, "input caller buffer stays untouched");

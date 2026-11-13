@@ -61,14 +61,13 @@ stop_daemons() {
 start_daemons() {
     mkdir -p "$CONF_DIR" "$DATA_ROOT/requests" "$DATA_ROOT/cache" "$CACHE_DIR/cache" "$CACHE_DIR/Storage"
     chmod 700 "$DATA_ROOT/requests" 2>/dev/null || true
-    rm -f /tmp/soloist.yield
-
     if pid_alive "$DATA_ROOT/soloist.pid" soloist && pid_alive "$DATA_ROOT/bridge.pid" soloist-bridge; then
         echo "[yam-init] Soloist and Bridge are already running."
         return 0
     fi
 
     stop_daemons
+    rm -f /tmp/soloist.yield
 
     run_detached env \
         YAM_ROOT="$YAM_ROOT" \
