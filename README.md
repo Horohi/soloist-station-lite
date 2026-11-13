@@ -1,13 +1,21 @@
-# 🎵 Spotify Soloist для Яндекс Станций (Universal ARM64)
+# 🎵 Spotify Soloist для Яндекс Станций
 
-> **Полноценный Spotify Connect клиент на базе официального движка Spotify Soloist (ARM64)**  
-> Поддерживает все умные колонки Яндекс с 64-битным ядром Linux (`aarch64`):
-> - **Станция Лайт 1 & 2** (`yandexmicro`, `plum`)
-> - **Станция Мини 2, 3, 3 Про** (`station-mini2`, `bergamot`, `pickle`)
-> - **Станция 2** (`station-midi` в DT)
-> - **Станция Миди** (`cucumber`)
+**Spotify Connect на колонке с Алисой** — голосовой поиск музыки, управление кнопками и световой эквалайзер.
 
-Полноценный клиент **Spotify Connect** с **голосовым управлением через Алису**, **голосовым поиском любых треков/альбомов**, **аппаратными сенсорными кнопками** (с автоопределением сенсоров на любой модели), **переключением цензуры мата** и **надёжным автозапуском при включении**.
+[![Последний релиз](https://img.shields.io/github/v/release/Horohi/soloist-station-lite?label=релиз)](../../releases/latest)
+![Архитектура](https://img.shields.io/badge/архитектура-ARM64-blue)
+![Установка](https://img.shields.io/badge/установка-Standalone%20%7C%20YAM-green)
+
+## Поддерживаемые модели
+
+Колонки с 64-битным ядром Linux (`aarch64`):
+
+| Модель | Платформа |
+| --- | --- |
+| Станция Лайт 1 и 2 | `yandexmicro`, `plum` |
+| Станция Мини 1, 2, 3 и 3 Про | `yandexmini`, `yandexmini_2`, `bergamot`, `pickle` |
+| Станция 2 | `station-midi` в DT |
+| Станция Миди | `cucumber` |
 
 English guide: [Voice request lifecycle, configuration and tests](docs/VOICE_REQUESTS.md).
 
