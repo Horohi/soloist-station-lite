@@ -93,7 +93,8 @@ elif [ -f /proc/device-tree/compatible ]; then
 fi
 
 # Audio and memory allocation tuning
-CARD_NAME=$(cat /proc/asound/cards 2>/dev/null | awk '/\[/{print $2; exit}' || echo "default")
+CARD_NAME=$(awk -F'[][]' '/\[/{gsub(/[[:space:]]/, "", $2); if ($2 != "") {print $2; exit}}' /proc/asound/cards 2>/dev/null || true)
+[ -n "$CARD_NAME" ] || CARD_NAME="default"
 case "$COMPAT" in
     *plum*)
         export APULSE_PLAYBACK_DEVICE="sysdefault:CARD=$CARD_NAME"

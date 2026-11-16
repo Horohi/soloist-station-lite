@@ -581,6 +581,35 @@ def test_standalone_guard_migration():
         print("PASS standalone guard migration preserves settings and refuses incomplete blocks")
 
 
+def test_alsa_card_name():
+    with tempfile.TemporaryDirectory(prefix="soloist-card-") as d:
+        tmp = pathlib.Path(d)
+        cards = tmp / "cards"
+        sources = ((ROOT / "scripts/soloist-service.sh").read_text(),
+                   (ROOT / "install.sh").read_text())
+        for idx, source in enumerate(sources):
+            lines = source.splitlines()
+            start = next(i for i, line in enumerate(lines) if line.startswith("CARD_NAME="))
+            fragment = "\n".join(lines[start:start + 2])
+            if idx == 1:
+                # The installer writes this code through an unquoted heredoc.
+                fragment = subprocess.run(["sh", "-c", "cat <<GENERATED\n" + fragment + "\nGENERATED\n"],
+                                          capture_output=True, text=True, check=True).stdout
+            fragment = fragment.replace("/proc/asound/cards", str(cards))
+            for contents, expected in ((" 0 [AMLAUGESOUND   ]: AML-AUGESOUND\n", "AMLAUGESOUND"),
+                                       (" 1 [OtherCard]: example\n", "OtherCard"),
+                                       ("no soundcards\n", "default")):
+                cards.write_text(contents)
+                result = subprocess.run(["sh", "-c", fragment + '\nprintf "%s" "$CARD_NAME"'],
+                                        capture_output=True, text=True, check=True)
+                assert result.stdout == expected, (idx, contents, result.stdout, result.stderr)
+            cards.unlink()
+            result = subprocess.run(["sh", "-c", fragment + '\nprintf "%s" "$CARD_NAME"'],
+                                    capture_output=True, text=True, check=True)
+            assert result.stdout == "default", (idx, result.stdout, result.stderr)
+        print("PASS ALSA card IDs and fallback in YAM service and generated standalone startup")
+
+
 if __name__ == "__main__":
     test_c_yam_paths()
     test_shell_yam_layout()
@@ -589,4 +618,5 @@ if __name__ == "__main__":
     test_ram_guard_pid_reuse()
     test_standalone_update_download_failures()
     test_standalone_guard_migration()
+    test_alsa_card_name()
     print("ALL YAM V2 MODE TESTS PASSED!")
