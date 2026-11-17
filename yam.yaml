@@ -1,5 +1,5 @@
 name: horohi/soloist
-version: 1.3.13
+version: 1.3.14
 license: MIT
 description: Spotify Connect with Alice voice control, media buttons, ALSA ducking, and adaptive LED equalizer for Yandex Station
 homepage: https://github.com/Horohi/soloist-station-lite
@@ -27,7 +27,6 @@ files:
   share/horohi.soloist/scripts/request_state.sh: scripts/request_state.sh
   share/horohi.soloist/scripts/search_and_play.sh: scripts/search_and_play.sh
   share/horohi.soloist/scripts/spotify-network.sh: scripts/spotify-network.sh
-  share/horohi.soloist/scripts/setup-preview.sh: scripts/setup-preview.sh
   share/horohi.soloist/scripts/soloist-service.sh: scripts/soloist-service.sh
   share/horohi.soloist/scripts/yam-init.sh: scripts/yam-init.sh
   share/horohi.soloist/scripts/toggle.sh: scripts/toggle.sh

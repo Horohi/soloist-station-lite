@@ -6,11 +6,6 @@ set -e
 export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
 unset LD_LIBRARY_PATH LD_PRELOAD
 
-if [ "${1:-}" = "--preview" ] || [ "${1:-}" = "--demo" ]; then
-    PREVIEW_DIR="$(cd "$(dirname "$0")" && pwd)"
-    exec sh "$PREVIEW_DIR/scripts/setup-preview.sh"
-fi
-
 echo "=== Spotify Soloist Universal Installer for Yandex Station (aarch64) ==="
 
 # 1. Root check
@@ -193,7 +188,7 @@ if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
     chmod 755 "$INSTALL_DIR/scripts/search_and_play.sh"
 fi
 
-for helper in control.sh request_state.sh soloist-cli soloist-service.sh soloist-ram-guard.sh migrate-standalone-guard.sh spotify-network.sh setup-preview.sh; do
+for helper in control.sh request_state.sh soloist-cli soloist-service.sh soloist-ram-guard.sh migrate-standalone-guard.sh spotify-network.sh; do
     if [ -f "$SCRIPT_DIR/scripts/$helper" ]; then
         cp -f "$SCRIPT_DIR/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
         chmod 755 "$INSTALL_DIR/scripts/$helper"
@@ -209,7 +204,7 @@ if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
     ln -sf "$INSTALL_DIR/bin/soloist-cli" /data/opt/bin/soloistctl 2>/dev/null || true
 fi
 
-printf "v1.3.13\n" > "$INSTALL_DIR/version"
+printf "v1.3.14\n" > "$INSTALL_DIR/version"
 
 # Spotify Search API Credentials
 if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then

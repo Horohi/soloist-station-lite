@@ -106,11 +106,6 @@ if grep -Fxq "$ip" "$TEST_HEALTH"; then printf 401; else printf 403; fi
                 child.kill()
                 child.wait()
 
-        preview = subprocess.run(["sh", str(ROOT / "scripts/setup-preview.sh")], input="\n" * 6,
-                                 text=True, capture_output=True, check=True)
-        assert 'SOLOIST_NETWORK_MODE="auto"' in preview.stdout
-        assert "Никакие файлы не изменены" in preview.stdout
-
         # A real setup invocation, with fake Spotify probes and sandboxed files,
         # selects auto only when a working proxy was actually found.
         app = tmp / "app"
@@ -129,9 +124,6 @@ if grep -Fxq "$ip" "$TEST_HEALTH"; then printf 401; else printf 403; fi
         assert "37.221.93.141 api.spotify.com" in hosts.read_text(), hosts.read_text()
         assert "найден рабочий прокси" in setup.stdout
 
-        install_preview = subprocess.run(["sh", str(ROOT / "install.sh"), "--preview"],
-                                         input="\n" * 5, text=True, capture_output=True, check=True)
-        assert "Демо завершено" in install_preview.stdout
     print("PASS Spotify proxy selection preserves current, handles failures and protects custom hosts")
 
 

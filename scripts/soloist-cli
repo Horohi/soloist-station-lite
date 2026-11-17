@@ -839,9 +839,6 @@ EOF
 # Main entrypoint
 case "${1:-}" in
     setup|configure|wizard)
-        if [ "${2:-}" = "--preview" ] || [ "${2:-}" = "--demo" ]; then
-            exec sh "$INSTALL_DIR/scripts/setup-preview.sh"
-        fi
         cmd_setup
         ;;
     status|st)
