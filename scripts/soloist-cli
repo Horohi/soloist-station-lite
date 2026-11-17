@@ -525,6 +525,21 @@ normalize_playlist_uri() {
 
 update_hosts_sni() {
     _enable="$1"
+    if [ -f "$INSTALL_DIR/scripts/spotify-network.sh" ]; then
+        mkdir -p "$CONF_DIR" "$DATA_ROOT"
+        if [ "$_enable" = 1 ]; then _net_mode=auto; else _net_mode=off; fi
+        printf 'SOLOIST_NETWORK_MODE="%s"\n' "$_net_mode" > "$CONF_DIR/spotify-network.conf"
+        if [ "$_net_mode" = auto ]; then
+            SOLOIST_NET_BASE="$INSTALL_DIR" SOLOIST_NET_STATE="$DATA_ROOT" SOLOIST_NET_CONF="$CONF_DIR/spotify-network.conf" \
+                sh "$INSTALL_DIR/scripts/spotify-network.sh" check || true
+        else
+            if ! SOLOIST_NET_BASE="$INSTALL_DIR" SOLOIST_NET_STATE="$DATA_ROOT" sh "$INSTALL_DIR/scripts/spotify-network.sh" off; then
+                printf "Не удалось убрать записи Spotify из hosts; повторите настройку.\n" >&2
+                return 1
+            fi
+        fi
+        return
+    fi
     _hosts="${SOLOIST_HOSTS_FILE:-/etc/hosts}"
     [ -e "$_hosts" ] || return 0
 
@@ -558,6 +573,10 @@ HOSTS_EOF
 }
 
 cmd_setup() {
+    if [ -x /system/bin/getprop ]; then
+        printf "Внимание: обнаружен Android. Для Station Max может понадобиться отдельный аудиомост.\n"
+    fi
+    printf "Обнаружена колонка: %s\n\n" "$(detect_station_model)"
     printf "${BOLD}${GREEN}=== Мастер настройки Spotify Soloist ===${NC}\n\n"
 
     CURR_API_KEY=""
@@ -723,16 +742,41 @@ cmd_setup() {
     _hosts_file="${SOLOIST_HOSTS_FILE:-/etc/hosts}"
     _sni_on=0
     grep -q "5.175.161.40" "$_hosts_file" 2>/dev/null && _sni_on=1 || true
+    if [ -f "$CONF_DIR/spotify-network.conf" ] && grep -q '^SOLOIST_NETWORK_MODE="*auto"*$' "$CONF_DIR/spotify-network.conf"; then
+        _sni_on=1
+    fi
     printf "${BOLD}5. Встроенный SNI-прокси для обхода блокировки 403 (/etc/hosts)${NC}\n"
+    if [ -f "$INSTALL_DIR/scripts/spotify-network.sh" ]; then
+        printf "   Проверка Spotify API и прокси (может занять до минуты)...\n"
+        _net_recommend=$(SOLOIST_NET_BASE="$INSTALL_DIR" sh "$INSTALL_DIR/scripts/spotify-network.sh" recommend)
+        if [ "$_net_recommend" = current ]; then
+            printf "   Spotify API доступен через текущие настройки сети.\n"
+            if [ "$_sni_on" = 0 ]; then
+                printf "   Рекомендуется сохранить текущую сеть.\n"
+                _net_default=0
+            else
+                _net_default=1
+            fi
+        elif [ "$_net_recommend" = proxy ]; then
+            printf "   Текущая сеть недоступна, найден рабочий прокси; рекомендуется автовыбор.\n"
+            _net_default=1
+        else
+            printf "   Spotify API и проверенные прокси недоступны; текущие настройки сохранятся.\n"
+            _net_default="$_sni_on"
+        fi
+    else
+        _net_default=1
+    fi
     if [ "$_sni_on" = 1 ]; then
         printf "   Сейчас прокси включён. Оставить включённым? [Y/n]: "
     else
-        printf "   Включить встроенный SNI-прокси? [Y/n]: "
+        if [ "$_net_default" = 0 ]; then printf "   Включить автоматический Spotify-прокси? [y/N]: "; else printf "   Включить автоматический Spotify-прокси? [Y/n]: "; fi
     fi
     IFS= read -r _in_sni || true
     case "$(trim_ws "${_in_sni:-}")" in
         [nN]|[nN][oO]|н|Н|нет|Нет) NEW_SNI=0 ;;
-        *) NEW_SNI=1 ;;
+        [yY]|[yY][eE][sS]|д|Д|да|Да) NEW_SNI=1 ;;
+        *) NEW_SNI="$_net_default" ;;
     esac
     printf "\n"
 
@@ -795,6 +839,9 @@ EOF
 # Main entrypoint
 case "${1:-}" in
     setup|configure|wizard)
+        if [ "${2:-}" = "--preview" ] || [ "${2:-}" = "--demo" ]; then
+            exec sh "$INSTALL_DIR/scripts/setup-preview.sh"
+        fi
         cmd_setup
         ;;
     status|st)

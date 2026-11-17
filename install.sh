@@ -6,6 +6,11 @@ set -e
 export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
 unset LD_LIBRARY_PATH LD_PRELOAD
 
+if [ "${1:-}" = "--preview" ] || [ "${1:-}" = "--demo" ]; then
+    PREVIEW_DIR="$(cd "$(dirname "$0")" && pwd)"
+    exec sh "$PREVIEW_DIR/scripts/setup-preview.sh"
+fi
+
 echo "=== Spotify Soloist Universal Installer for Yandex Station (aarch64) ==="
 
 # 1. Root check
@@ -137,6 +142,9 @@ case "$DT_COMPAT" in
 esac
 
 echo "Определена модель: $DETECTED_MODEL ($ARCH)"
+if [ -x /system/bin/getprop ]; then
+    echo "Внимание: обнаружен Android. Поддержка аудио на Station Max требует отдельного моста и не подтверждается обычным установщиком."
+fi
 
 DEVICE_NAME="${2:-$DETECTED_MODEL}"
 
@@ -185,12 +193,13 @@ if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
     chmod 755 "$INSTALL_DIR/scripts/search_and_play.sh"
 fi
 
-for helper in control.sh request_state.sh soloist-cli soloist-service.sh soloist-ram-guard.sh migrate-standalone-guard.sh; do
+for helper in control.sh request_state.sh soloist-cli soloist-service.sh soloist-ram-guard.sh migrate-standalone-guard.sh spotify-network.sh setup-preview.sh; do
     if [ -f "$SCRIPT_DIR/scripts/$helper" ]; then
         cp -f "$SCRIPT_DIR/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
         chmod 755 "$INSTALL_DIR/scripts/$helper"
     fi
 done
+[ ! -f "$SCRIPT_DIR/spotify-network.conf.example" ] || cp -f "$SCRIPT_DIR/spotify-network.conf.example" "$INSTALL_DIR/spotify-network.conf.example"
 
 if [ -f "$SCRIPT_DIR/scripts/soloist-cli" ]; then
     cp -f "$SCRIPT_DIR/scripts/soloist-cli" "$INSTALL_DIR/bin/soloist-cli"
@@ -221,13 +230,36 @@ chmod 755 "$INSTALL_DIR/bin/soloist" "$INSTALL_DIR/lib64/ld-linux-aarch64.so.1"
 chmod 755 "$INSTALL_DIR/stop.sh" "$INSTALL_DIR/status.sh"
 
 # 9. SSL Certificates & Hosts SNI Proxy (bypass 403 country restrictions)
+if [ ! -f /etc/ssl/certs/ca-certificates.crt ] && [ -f /system/vendor/quasar/ca-certificates.crt ]; then
+    export CURL_CA_BUNDLE=/system/vendor/quasar/ca-certificates.crt
+fi
 ENABLE_SNI_PROXY="${ENABLE_SNI_PROXY:-}"
 if [ -z "$ENABLE_SNI_PROXY" ]; then
-    printf "Включить встроенный SNI-прокси для обхода блокировок? [Y/n]: "
+    SNI_DEFAULT=1
+    if [ -f "$INSTALL_DIR/scripts/spotify-network.sh" ]; then
+        echo "Проверка доступности Spotify API и прокси (может занять до минуты)..."
+        NETWORK_RECOMMEND=$(SOLOIST_NET_BASE="$INSTALL_DIR" sh "$INSTALL_DIR/scripts/spotify-network.sh" recommend)
+        if [ "$NETWORK_RECOMMEND" = current ]; then
+            CURRENT_PROXY=$(SOLOIST_NET_BASE="$INSTALL_DIR" sh "$INSTALL_DIR/scripts/spotify-network.sh" current)
+            if [ -n "$CURRENT_PROXY" ]; then
+                echo "Spotify API доступен через текущие настройки ($CURRENT_PROXY); рекомендуется сохранить автоматический режим."
+            else
+                echo "Spotify API доступен через текущую сеть; рекомендуется сохранить текущий DNS."
+                SNI_DEFAULT=0
+            fi
+        elif [ "$NETWORK_RECOMMEND" = proxy ]; then
+            echo "Spotify API недоступен через текущую сеть, но найден рабочий прокси; рекомендуется автовыбор."
+        else
+            echo "Spotify API и проверенные прокси недоступны; текущие настройки сети сохранятся."
+            SNI_DEFAULT=0
+        fi
+    fi
+    if [ "$SNI_DEFAULT" = 1 ]; then printf "Включить автовыбор Spotify-прокси? [Y/n]: "; else printf "Включить автовыбор Spotify-прокси? [y/N]: "; fi
     read PROXY_CHOICE
     case "$PROXY_CHOICE" in
         [nN]|[nN][oO]) ENABLE_SNI_PROXY="0" ;;
-        *)            ENABLE_SNI_PROXY="1" ;;
+        [yY]|[yY][eE][sS]) ENABLE_SNI_PROXY="1" ;;
+        *) ENABLE_SNI_PROXY="$SNI_DEFAULT" ;;
     esac
 fi
 
@@ -243,7 +275,16 @@ if [ ! -f "/etc/ssl/certs/ca-certificates.crt" ]; then
     fi
 fi
 
-if [ "$ENABLE_SNI_PROXY" = "1" ]; then
+if [ -f "$INSTALL_DIR/scripts/spotify-network.sh" ]; then
+    if [ "$ENABLE_SNI_PROXY" = 1 ]; then NETWORK_MODE=auto; else NETWORK_MODE=off; fi
+    printf 'SOLOIST_NETWORK_MODE="%s"\n' "$NETWORK_MODE" > "$INSTALL_DIR/spotify-network.conf"
+    if [ "$NETWORK_MODE" = auto ]; then
+        SOLOIST_NET_BASE="$INSTALL_DIR" SOLOIST_NET_STATE="$INSTALL_DIR/data" \
+          SOLOIST_NET_CONF="$INSTALL_DIR/spotify-network.conf" SOLOIST_NET_ROOT_WRITABLE=1 sh "$INSTALL_DIR/scripts/spotify-network.sh" check || true
+    else
+        SOLOIST_NET_BASE="$INSTALL_DIR" SOLOIST_NET_STATE="$INSTALL_DIR/data" SOLOIST_NET_ROOT_WRITABLE=1 sh "$INSTALL_DIR/scripts/spotify-network.sh" off || true
+    fi
+elif [ "$ENABLE_SNI_PROXY" = "1" ]; then
     if ! grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
         cat << 'HOSTS_EOF' >> /etc/hosts
 

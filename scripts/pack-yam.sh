@@ -99,6 +99,7 @@ done
 cp -f "$REPO_DIR/scripts/"* "$STAGE_DIR/scripts/"
 cp -f "$REPO_DIR/config.env.example" "$STAGE_DIR/config.env.example"
 cp -f "$REPO_DIR/spotify_api.conf.example" "$STAGE_DIR/spotify_api.conf.example"
+cp -f "$REPO_DIR/spotify-network.conf.example" "$STAGE_DIR/spotify-network.conf.example"
 cp -f "$REPO_DIR/yam.yaml" "$STAGE_DIR/yam.yaml"
 printf 'v%s\n' "$VERSION" > "$STAGE_DIR/version"
 

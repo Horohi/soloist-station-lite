@@ -95,10 +95,17 @@ start_daemons() {
     # Keep tmpfs cache bounded against BusyBox memory pressure
     run_detached sh -c '
         sleep 30
+        network_next=0
         while true; do
             _sp=$(cat "$1/soloist.pid" 2>/dev/null || true)
             [ -n "$_sp" ] && kill -0 "$_sp" 2>/dev/null || break
             sleep 30
+            network_now=$(date +%s 2>/dev/null || echo 0)
+            if [ "$network_now" -ge "$network_next" ] && [ -f "$7/scripts/spotify-network.sh" ]; then
+                network_next=$((network_now + 3600))
+                SOLOIST_NET_BASE="$7" SOLOIST_NET_STATE="$1" SOLOIST_NET_CONF="$4/horohi.soloist/spotify-network.conf" \
+                    sh "$7/scripts/spotify-network.sh" check >> /tmp/soloist-network.log 2>&1 &
+            fi
             MEM_AVAIL=$(awk "/MemAvailable/{print int(\$2/1024)}" /proc/meminfo 2>/dev/null || echo 100)
             if [ "${MEM_AVAIL:-100}" -lt 55 ]; then
                 YAM_ROOT="$2" YAM_VAR="$3" YAM_ETC="$4" YAM_RUN="$5" \

@@ -147,9 +147,17 @@ if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
 fi
 
 CURL_OPTS="-sS --connect-timeout 5 --max-time 15"
-if grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
-    CURL_OPTS="--resolve api.spotify.com:443:5.175.161.40 --resolve accounts.spotify.com:443:5.175.161.40 $CURL_OPTS"
+_network_helper="$BASE_DIR/scripts/spotify-network.sh"
+_proxy_ip=""
+if [ -f "$_network_helper" ]; then
+    _proxy_ip=$(SOLOIST_NET_BASE="$BASE_DIR" sh "$_network_helper" current 2>/dev/null || true)
+elif grep -q "5.175.161.40" /etc/hosts 2>/dev/null; then
+    _proxy_ip=5.175.161.40
 fi
+case "$_proxy_ip" in
+    ''|*[!0-9.]*) ;;
+    *) CURL_OPTS="--resolve api.spotify.com:443:$_proxy_ip --resolve accounts.spotify.com:443:$_proxy_ip $CURL_OPTS" ;;
+esac
 
 # A separate API lock serializes token refresh and cooldown without blocking pause.
 exec 9>"$STATE_DIR/api.lock"

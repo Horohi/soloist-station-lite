@@ -1,0 +1,4 @@
+# Spotify-only network mode. This file does not contain Spotify API keys.
+# auto: check the current SNI proxy hourly and switch only if it fails.
+# off: leave existing network settings alone.
+SOLOIST_NETWORK_MODE="auto"

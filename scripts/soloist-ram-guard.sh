@@ -16,8 +16,16 @@ for attempt in $(seq 1 15); do
     fi
 done
 
+network_next=0
 while true; do
     sleep 30
+    network_now=$(date +%s 2>/dev/null || echo 0)
+    if [ "$network_now" -ge "$network_next" ] && [ -f "$INSTALL_DIR/scripts/spotify-network.sh" ]; then
+        network_next=$((network_now + 3600))
+        SOLOIST_NET_BASE="$INSTALL_DIR" SOLOIST_NET_STATE="$INSTALL_DIR/data" \
+            SOLOIST_NET_CONF="$INSTALL_DIR/spotify-network.conf" \
+            sh "$INSTALL_DIR/scripts/spotify-network.sh" check >> /tmp/soloist-network.log 2>&1 &
+    fi
     if [ -f "$INSTALL_DIR/scripts/control.sh" ]; then
         sh "$INSTALL_DIR/scripts/control.sh" clean-cache >/dev/null 2>&1 || true
     elif [ -d "$CACHE_DIR" ]; then
