@@ -593,10 +593,12 @@ cmd_setup() {
 
     CURR_CID=""
     CURR_CSECRET=""
+    CURR_MARKET=""
     if [ -f "$CONF_DIR/spotify_api.conf" ]; then
         . "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
         CURR_CID="${SPOTIFY_CLIENT_ID:-}"
         CURR_CSECRET="${SPOTIFY_CLIENT_SECRET:-}"
+        case "${SPOTIFY_MARKET:-}" in [A-Za-z][A-Za-z]) CURR_MARKET=$SPOTIFY_MARKET ;; esac
     fi
 
     CURR_FAV=""
@@ -810,6 +812,9 @@ EOF
 SPOTIFY_CLIENT_ID='$NEW_CID'
 SPOTIFY_CLIENT_SECRET='$NEW_CSECRET'
 EOF
+            if [ -n "$CURR_MARKET" ]; then
+                printf "SPOTIFY_MARKET='%s'\n" "$CURR_MARKET" >> "$CONF_DIR/spotify_api.conf"
+            fi
             chmod 600 "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
         )
     elif [ "$_in_cid" = "clear" ] || [ "$_in_cid" = "-" ]; then

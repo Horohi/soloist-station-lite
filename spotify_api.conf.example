@@ -16,6 +16,10 @@
 SPOTIFY_CLIENT_ID=""
 SPOTIFY_CLIENT_SECRET=""
 
+# Страна аккаунта Spotify для поиска доступных треков (например DE или US).
+# Пустое значение сохраняет поиск без явного рынка.
+# SPOTIFY_MARKET="DE"
+
 # LED-эквалайзер (по умолчанию включён: white — белый в стиле Nothing Phone)
 # Доступные значения: white | rainbow | cyan | off
 # LED_VISUALIZER="white"

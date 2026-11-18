@@ -26,6 +26,7 @@ files:
   share/horohi.soloist/scripts/control.sh: scripts/control.sh
   share/horohi.soloist/scripts/request_state.sh: scripts/request_state.sh
   share/horohi.soloist/scripts/search_and_play.sh: scripts/search_and_play.sh
+  share/horohi.soloist/scripts/spotify-search.awk: scripts/spotify-search.awk
   share/horohi.soloist/scripts/spotify-network.sh: scripts/spotify-network.sh
   share/horohi.soloist/scripts/soloist-service.sh: scripts/soloist-service.sh
   share/horohi.soloist/scripts/yam-init.sh: scripts/yam-init.sh

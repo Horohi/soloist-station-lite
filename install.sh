@@ -56,9 +56,12 @@ fi
 # 5. Spotify Web API Credentials (for Alice Voice Track Search)
 CLIENT_ID=""
 CLIENT_SECRET=""
+SAVED_MARKET=""
 
 if [ -f "/data/opt/soloist/spotify_api.conf" ]; then
     SAVED_CID=$(grep -o 'SPOTIFY_CLIENT_ID="[^"]*"' /data/opt/soloist/spotify_api.conf 2>/dev/null | cut -d'"' -f2 || true)
+    SAVED_MARKET=$(tr -d "\"'" < /data/opt/soloist/spotify_api.conf |
+        sed -n 's/^SPOTIFY_MARKET=\([A-Za-z][A-Za-z]\)$/\1/p' | head -n 1)
     SAVED_SEC=$(grep -o 'SPOTIFY_CLIENT_SECRET="[^"]*"' /data/opt/soloist/spotify_api.conf 2>/dev/null | cut -d'"' -f2 || true)
 fi
 
@@ -188,7 +191,7 @@ if [ -f "$SCRIPT_DIR/scripts/search_and_play.sh" ]; then
     chmod 755 "$INSTALL_DIR/scripts/search_and_play.sh"
 fi
 
-for helper in control.sh request_state.sh soloist-cli soloist-service.sh soloist-ram-guard.sh migrate-standalone-guard.sh spotify-network.sh; do
+for helper in control.sh request_state.sh soloist-cli soloist-service.sh soloist-ram-guard.sh migrate-standalone-guard.sh spotify-network.sh spotify-search.awk; do
     if [ -f "$SCRIPT_DIR/scripts/$helper" ]; then
         cp -f "$SCRIPT_DIR/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
         chmod 755 "$INSTALL_DIR/scripts/$helper"
@@ -212,6 +215,9 @@ if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
 SPOTIFY_CLIENT_ID="$CLIENT_ID"
 SPOTIFY_CLIENT_SECRET="$CLIENT_SECRET"
 EOF_CONF
+    if [ -n "$SAVED_MARKET" ]; then
+        printf 'SPOTIFY_MARKET="%s"\n' "$SAVED_MARKET" >> "$INSTALL_DIR/spotify_api.conf"
+    fi
     chmod 600 "$INSTALL_DIR/spotify_api.conf"
     echo "Конфигурация голосового поиска успешно сохранена в $INSTALL_DIR/spotify_api.conf"
 elif [ -f "$SCRIPT_DIR/spotify_api.conf" ] && [ ! -f "$INSTALL_DIR/spotify_api.conf" ]; then

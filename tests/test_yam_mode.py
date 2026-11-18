@@ -305,7 +305,9 @@ def test_soloist_setup():
         hosts_txt = hosts_file.read_text()
         assert "5.175.161.40 accounts.spotify.com" in hosts_txt, hosts_txt
 
-        # 3. Re-run keeping existing secrets via Enter, and disabling SNI proxy
+        # 3. Re-run keeping existing secrets and the market, and disabling SNI proxy
+        api_cfg += "SPOTIFY_MARKET='DE'\n"
+        (yam_root / "etc/horohi.soloist/spotify_api.conf").write_text(api_cfg)
         rerun_input = "\n".join(["", "", "", "", "n", ""])
         subprocess.run(
             [str(yam_root / "bin/soloist"), "setup"],

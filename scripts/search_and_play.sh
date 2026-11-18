@@ -97,20 +97,36 @@ esac
 
 # Detect search type hint from the FIRST word only ("песню Группа крови" is a track, not an artist)
 TYPE="track"
+EXPLICIT_TYPE=0
+ARTIST=""
+ALLOW_GENERIC=0
 case "$TERM" in
     "альбом "*)
-        TYPE="album"; TERM="${TERM#* }" ;;
+        TYPE="album"; EXPLICIT_TYPE=1; TERM="${TERM#* }" ;;
     "группу "*|"группа "*|"исполнителя "*|"исполнитель "*|"артиста "*|"артист "*|"певца "*|"певицу "*)
-        TYPE="artist"; TERM="${TERM#* }" ;;
+        TYPE="artist"; EXPLICIT_TYPE=1; TERM="${TERM#* }" ;;
     "песню "*|"песня "*|"трек "*)
-        TYPE="track"; TERM="${TERM#* }" ;;
+        TYPE="track"; EXPLICIT_TYPE=1; TERM="${TERM#* }" ;;
 esac
 [ "$RADIO" = 0 ] || TYPE=track
+if [ "$TYPE" = track ] && { [ "$EXPLICIT_TYPE" = 1 ] || [ "$RADIO" = 1 ]; }; then
+    case "$TERM" in
+        *' исполнителя '*)
+            ARTIST=${TERM#* исполнителя }
+            TERM=${TERM%% исполнителя *}
+            ;;
+        *' группы '*)
+            ARTIST=${TERM#* группы }
+            TERM=${TERM%% группы *}
+            ;;
+    esac
+fi
 
 echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 
 # If search term is empty or generic 'музыку' -> resume or play default
-if [ "$RADIO" = 0 ] && { [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; }; then
+if [ "$RADIO" = 0 ] && [ "$EXPLICIT_TYPE" = 0 ] &&
+   { [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; }; then
     echo "[search] Generic play request, resuming..." >> "$LOG"
     request_dispatch play || exit 1
     _resume_tries=0
@@ -131,6 +147,7 @@ if [ "$RADIO" = 0 ] && { [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$T
     # If nothing was playing, fall through and search popular hits
     TERM="top hits"
     TYPE="track"
+    ALLOW_GENERIC=1
     echo "[search] Nothing was active, searching '$TERM'..." >> "$LOG"
 fi
 
@@ -221,24 +238,6 @@ if [ -z "$TOKEN" ]; then
 fi
 request_current || exit 0
 
-# URL encode function
-ENCODED=$(echo "$TERM" | awk 'BEGIN {
-    for (i = 0; i < 256; i++) {
-        c = sprintf("%c", i);
-        if (c ~ /[a-zA-Z0-9._~-]/) table[c] = c;
-        else table[c] = sprintf("%%%02X", i);
-    }
-}
-{
-    out = "";
-    len = length($0);
-    for (i = 1; i <= len; i++) {
-        c = substr($0, i, 1);
-        out = out table[c];
-    }
-    print out;
-}')
-
 echo "[search] Querying Spotify API: term='$TERM', type='$TYPE'..." >> "$LOG"
 
 CENSORSHIP=0
@@ -247,100 +246,52 @@ if [ -f "$CENSOR_FILE" ]; then
     echo "[search] Censorship filter ACTIVE (filtering explicit tracks)" >> "$LOG"
 fi
 
-# Keep JSON string contents intact while accepting whitespace between tokens.
-compact_json() {
-    LC_ALL=C awk 'BEGIN { quoted=0; escape=0 }
-    {
-        for (i=1; i<=length($0); i++) {
-            c=substr($0,i,1)
-            if (quoted) {
-                printf "%s", c
-                if (escape) escape=0
-                else if (c=="\\") escape=1
-                else if (c=="\"") quoted=0
-            } else if (c=="\"") { quoted=1; printf "%s", c }
-            else if (c !~ /[[:space:]]/) printf "%s", c
-        }
-    }'
-}
-
 # Album and artist contexts can contain explicit tracks that cannot be checked here.
 if [ "$CENSORSHIP" = 1 ] && [ "$TYPE" != track ]; then
     personal_error 'Cannot filter explicit tracks in an album or artist context'
 fi
 
-LIMIT=5
+MARKET=$(printf '%s' "${SPOTIFY_MARKET:-}" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+case "$MARKET" in
+    [A-Z][A-Z]) ;;
+    *) MARKET="" ;;
+esac
 
-SEARCH_RESP=$(api_request "https://api.spotify.com/v1/search?q=$ENCODED&type=$TYPE&limit=$LIMIT" \
-    -H "Authorization: Bearer $TOKEN") || exit 1
-SEARCH_RESP=$(printf '%s' "$SEARCH_RESP" | compact_json)
-request_current || exit 0
-
-# Rank track results by how many query words hit the title (x5) or the artists (x2).
-# The term is passed via the environment: awk -v would interpret backslash escapes.
-pick_track() {
-    SEARCH_TERM="$TERM" awk -v censor="$CENSORSHIP" '
-    BEGIN {
-        RS = "\\{\"album\":"
-        best_score = -1
-        best_uri = ""
-        nwords = split(tolower(ENVIRON["SEARCH_TERM"]), qwords, " ")
-    }
-    NR > 1 {
-        if (censor == "1" && $0 !~ /"explicit":false/) next
-        uri = ""
-        if (match($0, /"uri":"spotify:track:[a-zA-Z0-9]+/)) {
-            uri = substr($0, RSTART + 7, RLENGTH - 7)
-        }
-        if (uri == "") next
-
-        name = ""
-        if (match($0, /"name":"[^"]+","track_number"/)) {
-            name = tolower(substr($0, RSTART + 8, RLENGTH - 24))
-        }
-
-        artists = ""
-        if (match($0, /"artists":/)) {
-            artists = tolower(substr($0, RSTART))
-        }
-
-        score = 0
-        for (i = 1; i <= nwords; i++) {
-            w = qwords[i]
-            if (length(w) == 0) continue
-            if (index(name, w) > 0) score += 5
-            if (index(artists, w) > 0) score += 2
-        }
-
-        if (score > best_score) {
-            best_score = score
-            best_uri = uri
-        } else if (best_uri == "") {
-            best_uri = uri
-        }
-    }
-    END {
-        if (best_uri != "") print best_uri
-    }'
+search_catalog() {
+    query=$1
+    types=$2
+    contexts=$3
+    set -- -G --max-filesize 524288 --data-urlencode "q=$query" --data-urlencode "type=$types" --data-urlencode 'limit=10'
+    if [ -n "$MARKET" ]; then
+        set -- "$@" --data-urlencode "market=$MARKET"
+    fi
+    response=$(api_request "$@" -H "Authorization: Bearer $TOKEN" 'https://api.spotify.com/v1/search') ||
+        return 1
+    request_current || return 1
+    printf '%s' "$response" |
+        LC_ALL=C SOLOIST_SEARCH_TERM="$TERM" SOLOIST_SEARCH_ARTIST="$ARTIST" \
+            awk -v type="$TYPE" -v contexts="$contexts" -v censor="$CENSORSHIP" \
+            -v allow_generic="$ALLOW_GENERIC" -f "$BASE_DIR/scripts/spotify-search.awk"
 }
 
-if [ "$TYPE" = "track" ]; then
-    URI=$(printf '%s' "$SEARCH_RESP" | pick_track)
-else
-    URI=$(echo "$SEARCH_RESP" | grep -oE "spotify:$TYPE:[a-zA-Z0-9]+" | head -n 1)
+CONTEXTS=0
+TYPES=$TYPE
+if [ "$EXPLICIT_TYPE" = 0 ] && [ "$RADIO" = 0 ] && [ "$CENSORSHIP" = 0 ] &&
+   [ "$ALLOW_GENERIC" = 0 ] && [ -z "$ARTIST" ]; then
+    CONTEXTS=1
+    TYPES=track,artist,album
 fi
 
-# Fallback: if preferred type had no matches, search any playable type
-if [ -z "$URI" ] && [ "$RADIO" = 0 ]; then
-    echo "[search] No match for type=$TYPE, trying general search..." >> "$LOG"
-    SEARCH_RESP=$(api_request "https://api.spotify.com/v1/search?q=$ENCODED&type=track,artist,album&limit=5" \
-        -H "Authorization: Bearer $TOKEN") || exit 1
-    SEARCH_RESP=$(printf '%s' "$SEARCH_RESP" | compact_json)
-    request_current || exit 0
-    URI=$(printf '%s' "$SEARCH_RESP" | pick_track)
-    # Prioritize track > artist > album
-    [ "$CENSORSHIP" = 1 ] || [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:artist:[a-zA-Z0-9]+' | head -n 1)
-    [ "$CENSORSHIP" = 1 ] || [ -n "$URI" ] || URI=$(echo "$SEARCH_RESP" | grep -oE 'spotify:album:[a-zA-Z0-9]+' | head -n 1)
+SEARCH_QUERY=$TERM
+if [ -n "$ARTIST" ]; then
+    case "$TERM$ARTIST" in
+        *'"'*) SEARCH_QUERY="$TERM $ARTIST" ;;
+        *) SEARCH_QUERY="track:\"$TERM\" artist:\"$ARTIST\"" ;;
+    esac
+fi
+URI=$(search_catalog "$SEARCH_QUERY" "$TYPES" "$CONTEXTS") || exit 1
+if [ -z "$URI" ] && [ -n "$ARTIST" ] && [ "$SEARCH_QUERY" != "$TERM $ARTIST" ]; then
+    URI=$(search_catalog "$TERM $ARTIST" "$TYPES" "$CONTEXTS") || exit 1
 fi
 
 flock -u 9

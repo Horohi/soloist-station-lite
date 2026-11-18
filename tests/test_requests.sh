@@ -5,7 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 TEST=$(mktemp -d)
 trap 'rm -rf "$TEST"' EXIT HUP INT TERM
 mkdir -p "$TEST/app/bin" "$TEST/app/scripts" "$TEST/app/data" "$TEST/tmp"
-cp "$ROOT"/scripts/*.sh "$TEST/app/scripts/"
+cp "$ROOT"/scripts/*.sh "$ROOT/scripts/spotify-search.awk" "$TEST/app/scripts/"
 # Keep the unmodified upstream RED run isolated too.
 sed -e "s|/tmp/|$TEST/tmp/|g" -e "s|/data/opt/soloist|$TEST/app|g" "$ROOT/scripts/search_and_play.sh" > "$TEST/app/scripts/search_and_play.sh"
 export TEST
@@ -24,11 +24,12 @@ EOF
 cat > "$TEST/app/bin/curl" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$TEST/calls"
-out= headers= url=
+out= headers= url= query=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o|--output) out=$2; shift;;
         -D|--dump-header) headers=$2; shift;;
+        --data-urlencode) case "$2" in q=*) query=${2#q=};; esac; shift;;
         http*) url=$1;;
     esac
     shift
@@ -53,13 +54,19 @@ case "$url" in
             denied) code=401; body='{"error":{"status":401}}';;
             malformed) body='not JSON';;
             empty) body='{"tracks":{"items":[]}}';;
-            radio) body='{"tracks":{"items":[{"album":{},"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}]}}';;
+            radio) case "$query" in музыку) title=Музыку;; *) title=Test;; esac
+                   body='{"tracks":{"items":[{"explicit":false,"name":"'"$title"'","uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}]}}';;
             radio-censor) body='{"tracks":{"items":[{"album":{},"explicit":true,"name":"Test","track_number":1,"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"},{"album":{},"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:BBBBBBBBBBBBBBBBBBBBBB"}]}}';;
             radio-empty) body='{"tracks":{"items":[]},"artists":{"items":[{"uri":"spotify:artist:BBBBBBBBBBBBBBBBBBBBBB"}]}}';;
             censor) body='{"tracks":{"items":[{"album":{},"artists":[],"explicit":true,"name":"Test","track_number":1,"uri":"spotify:track:EXPLICIT"},{"album":{},"artists":[],"explicit":false,"name":"Test","track_number":1,"uri":"spotify:track:CLEAN"}]}}';;
             formatted) body='{ "tracks": { "items": [ { "album": {}, "explicit": true, "name": "Test", "track_number": 1, "uri": "spotify:track:EXPLICIT" }, { "album": {}, "explicit": false, "name": "Test", "track_number": 1, "uri": "spotify:track:CLEAN" } ] } }';;
             explicit-only) body='{ "tracks": { "items": [ { "album": {}, "artists": [{"uri":"spotify:artist:ARTIST"}], "explicit": true, "name": "Test", "track_number": 1, "uri": "spotify:track:EXPLICIT" } ] } }';;
-            *) body='{"tracks":{"items":[{"album":{},"artists":[{"name":"Queen"}],"explicit":false,"name":"Don\u0027t Stop Me Now","track_number":1,"uri":"spotify:track:TEST123"}]}}';;
+            catalog) body=$(cat "$TEST/catalog.json");;
+            *) case "$query" in
+                   first|second|test) body='{"tracks":{"items":[{"name":"'"$query"'","explicit":false,"uri":"spotify:track:TEST123"}]}}';;
+                   "любимые треки") body='{"tracks":{"items":[{"name":"Любимые треки","explicit":false,"uri":"spotify:track:TEST123"}]}}';;
+                   *) body='{"tracks":{"items":[{"album":{},"artists":[{"name":"Queen"}],"explicit":false,"name":"Don\u0027t Stop Me Now","track_number":1,"uri":"spotify:track:TEST123"}]}}';;
+               esac;;
         esac;;
 esac
 if [ -n "$headers" ]; then printf 'HTTP/1.1 %s\r\nRetry-After: 30\r\n\r\n' "$code" > "$headers"; fi
@@ -138,7 +145,52 @@ label='generic resume waits for slow >0.5s device activation without falling bac
 reset
 sh "$SEARCH" "включи песню Don't Stop Me Now" || true
 label='quoted song title still resolves'; check grep -q 'play spotify:track:TEST123' "$TEST/controls"
-label='apostrophe survives query encoding'; check grep -qi 'Don%27t' "$TEST/calls"
+label='apostrophe is handed intact to curl for URL encoding'; check grep -qi -- "--data-urlencode q=don't stop me now" "$TEST/calls"
+reset
+echo catalog > "$TEST/mode"
+cat > "$TEST/catalog.json" <<'EOF'
+{"tracks":{"items":[
+    {"name":"Brain","uri":"spotify:track:WRONG","explicit":false},
+    {"uri":"spotify:track:RIGHT","name":"Rain","artists":[],"album":{},"explicit":false}
+]}}
+EOF
+sh "$SEARCH" 'включи трек Rain' || true
+label='exact title wins over a substring even with reordered JSON keys'
+check grep -q 'play spotify:track:RIGHT$' "$TEST/controls"
+
+reset
+echo catalog > "$TEST/mode"
+cat > "$TEST/catalog.json" <<'EOF'
+{"tracks":{"items":[
+    {"name":"Кукушка","uri":"spotify:track:OTHER","artists":[{"name":"Полина Гагарина"}],"explicit":false},
+    {"name":"Кукушка","uri":"spotify:track:UNAVAILABLE","artists":[{"name":"Кино"}],"explicit":false,"is_playable":false},
+    {"name":"Кукушка","uri":"spotify:track:EXPLICIT","artists":[{"name":"Кино"}],"album":{"explicit":false},"explicit":true},
+    {"name":"\u041a\u0443\u043a\u0443\u0448\u043a\u0430","uri":"spotify:track:KINO","explicit":false,"artists":[{"name":"Kino"}]}
+]}}
+EOF
+touch "$TEST/app/data/censorship"
+SPOTIFY_MARKET=de sh "$SEARCH" 'включи песню Кукушка группы Кино' || true
+label='Cyrillic, escaped names, artist filter, market and explicit flag work together'
+check sh -c 'grep -q "play spotify:track:KINO$" "$TEST/controls" &&
+    grep -Fq -- "q=track:\"Кукушка\" artist:\"Кино\"" "$TEST/calls" &&
+    grep -Fq -- "--data-urlencode market=DE" "$TEST/calls"'
+
+for phrase in 'включи песню Кукушка' 'включи радио по треку Кукушка'; do
+    reset
+    echo catalog > "$TEST/mode"
+    echo '{"tracks":{"items":[{"name":"Unrelated","uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}]},"artists":{"items":[{"name":"Кукушка","uri":"spotify:artist:OTHER"}]}}' > "$TEST/catalog.json"
+    sh "$SEARCH" "$phrase" || true
+    label="$phrase refuses unrelated tracks and context fallback"
+    check test ! -s "$TEST/controls"
+done
+
+reset
+echo catalog > "$TEST/mode"
+echo '{"tracks":{"items":[{"name":"Rain","uri":"spotify:track:RIGHT"}]}} trailing text' > "$TEST/catalog.json"
+sh "$SEARCH" 'включи трек Rain' || true
+label='a valid track inside a malformed response is not played'
+check test ! -s "$TEST/controls"
+
 for action in pause next prev toggle; do
     reset
     touch "$TEST/delay"
@@ -225,7 +277,7 @@ for phrase in 'волну по треку Test' 'радио по песне Test
     echo radio > "$TEST/mode"
     sh "$SEARCH" "включи $phrase" || true
     label="$phrase resolves a track and plays its station"
-    check sh -c 'grep -q "q=test&type=track" "$TEST/calls" && grep -q "play spotify:station:track:AAAAAAAAAAAAAAAAAAAAAA$" "$TEST/controls"'
+    check sh -c 'grep -q "q=test --data-urlencode type=track" "$TEST/calls" && grep -q "play spotify:station:track:AAAAAAAAAAAAAAAAAAAAAA$" "$TEST/controls"'
 done
 reset
 echo radio-empty > "$TEST/mode"
