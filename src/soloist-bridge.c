@@ -1741,129 +1741,138 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         }
 
         // Check PAUSE / STOP keywords (Instant Action)
-        if (str_contains(lower_buf, "пауз") ||
-            str_contains(lower_buf, "стоп") ||
-            str_contains(lower_buf, "хватит") ||
-            str_contains(lower_buf, "замолчи") ||
-            str_contains(lower_buf, "останови") ||
-            str_contains(lower_buf, "выключи музыку") ||
-            str_contains(lower_buf, "отключи музыку")) {
-            log_msg("[bridge] Action: PAUSE\n");
-            trigger_alice_suppression(quasar_fd, 3000);
-            spotify_is_active = 0;
-            run_soloist_cmd("pause");
-            return;
-        }
+        // Media words belong to Spotify only while this speaker is the active
+        // Spotify Connect device. Without this guard an ordinary "Алиса, стоп"
+        // aimed at a timer or alarm is consumed here, Alice's cloud reply is
+        // suppressed, and her dialog is cancelled; "дальше" during a Yandex
+        // Music playlist likewise skips a Spotify track instead. Events from
+        // another device of the same account arrive with is_active=false, so
+        // this also stops a phone or car from steering the speaker.
+        if (spotify_is_active || spotify_device_is_active) {
+            if (str_contains(lower_buf, "пауз") ||
+                str_contains(lower_buf, "стоп") ||
+                str_contains(lower_buf, "хватит") ||
+                str_contains(lower_buf, "замолчи") ||
+                str_contains(lower_buf, "останови") ||
+                str_contains(lower_buf, "выключи музыку") ||
+                str_contains(lower_buf, "отключи музыку")) {
+                log_msg("[bridge] Action: PAUSE\n");
+                trigger_alice_suppression(quasar_fd, 3000);
+                spotify_is_active = 0;
+                run_soloist_cmd("pause");
+                return;
+            }
 
-        // Check NEXT TRACK keywords (Instant Action)
-        if (str_contains(lower_buf, "дальше") ||
-            str_contains(lower_buf, "следующ") ||
-            str_contains(lower_buf, "переключи") ||
-            str_contains(lower_buf, "пропусти")) {
-            log_msg("[bridge] Action: NEXT TRACK\n");
-            trigger_alice_suppression(quasar_fd, 3000);
-            spotify_is_active = 1;
-            run_soloist_cmd("next");
-            return;
-        }
+            // Check NEXT TRACK keywords (Instant Action)
+            if (str_contains(lower_buf, "дальше") ||
+                str_contains(lower_buf, "следующ") ||
+                str_contains(lower_buf, "переключи") ||
+                str_contains(lower_buf, "пропусти")) {
+                log_msg("[bridge] Action: NEXT TRACK\n");
+                trigger_alice_suppression(quasar_fd, 3000);
+                spotify_is_active = 1;
+                run_soloist_cmd("next");
+                return;
+            }
 
-        // Check PREVIOUS TRACK keywords (Instant Action)
-        if (str_contains(lower_buf, "назад") ||
-            str_contains(lower_buf, "предыдущ") ||
-            str_contains(lower_buf, "прошл")) {
-            log_msg("[bridge] Action: PREVIOUS TRACK\n");
-            trigger_alice_suppression(quasar_fd, 3000);
-            spotify_is_active = 1;
-            run_soloist_cmd("prev");
-            return;
-        }
+            // Check PREVIOUS TRACK keywords (Instant Action)
+            if (str_contains(lower_buf, "назад") ||
+                str_contains(lower_buf, "предыдущ") ||
+                str_contains(lower_buf, "прошл")) {
+                log_msg("[bridge] Action: PREVIOUS TRACK\n");
+                trigger_alice_suppression(quasar_fd, 3000);
+                spotify_is_active = 1;
+                run_soloist_cmd("prev");
+                return;
+            }
 
-        // Check SHUFFLE keywords (Instant Action)
-        if (str_contains(lower_buf, "перемешай") ||
-            str_contains(lower_buf, "случайный порядок") ||
-            str_contains(lower_buf, "случайном порядке") ||
-            str_contains(lower_buf, "включи перемешивание")) {
-            log_msg("[bridge] Action: SHUFFLE ON\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("shuffle", "on");
-            return;
-        }
-        if (str_contains(lower_buf, "по порядку") ||
-            str_contains(lower_buf, "выключи перемешивание") ||
-            str_contains(lower_buf, "отключи перемешивание")) {
-            log_msg("[bridge] Action: SHUFFLE OFF\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("shuffle", "off");
-            return;
-        }
+            // Check SHUFFLE keywords (Instant Action)
+            if (str_contains(lower_buf, "перемешай") ||
+                str_contains(lower_buf, "случайный порядок") ||
+                str_contains(lower_buf, "случайном порядке") ||
+                str_contains(lower_buf, "включи перемешивание")) {
+                log_msg("[bridge] Action: SHUFFLE ON\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("shuffle", "on");
+                return;
+            }
+            if (str_contains(lower_buf, "по порядку") ||
+                str_contains(lower_buf, "выключи перемешивание") ||
+                str_contains(lower_buf, "отключи перемешивание")) {
+                log_msg("[bridge] Action: SHUFFLE OFF\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("shuffle", "off");
+                return;
+            }
 
-        // Check REPEAT keywords (Instant Action)
-        if (str_contains(lower_buf, "повторяй трек") ||
-            str_contains(lower_buf, "повторяй песню") ||
-            str_contains(lower_buf, "повторяй этот трек") ||
-            str_contains(lower_buf, "повторяй эту песню") ||
-            str_contains(lower_buf, "повтор трека") ||
-            str_contains(lower_buf, "повтор песни") ||
-            str_contains(lower_buf, "повтор одного")) {
-            log_msg("[bridge] Action: REPEAT TRACK\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("repeat", "track");
-            return;
-        }
-        if (str_contains(lower_buf, "зацикли") ||
-            str_contains(lower_buf, "повторяй") ||
-            str_contains(lower_buf, "включи повтор")) {
-            log_msg("[bridge] Action: REPEAT ON\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("repeat", "context");
-            return;
-        }
-        if (str_contains(lower_buf, "не повторяй") ||
-            str_contains(lower_buf, "выключи повтор") ||
-            str_contains(lower_buf, "отключи повтор")) {
-            log_msg("[bridge] Action: REPEAT OFF\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("repeat", "off");
-            return;
-        }
+            // Check REPEAT keywords (Instant Action)
+            if (str_contains(lower_buf, "повторяй трек") ||
+                str_contains(lower_buf, "повторяй песню") ||
+                str_contains(lower_buf, "повторяй этот трек") ||
+                str_contains(lower_buf, "повторяй эту песню") ||
+                str_contains(lower_buf, "повтор трека") ||
+                str_contains(lower_buf, "повтор песни") ||
+                str_contains(lower_buf, "повтор одного")) {
+                log_msg("[bridge] Action: REPEAT TRACK\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("repeat", "track");
+                return;
+            }
+            if (str_contains(lower_buf, "зацикли") ||
+                str_contains(lower_buf, "повторяй") ||
+                str_contains(lower_buf, "включи повтор")) {
+                log_msg("[bridge] Action: REPEAT ON\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("repeat", "context");
+                return;
+            }
+            if (str_contains(lower_buf, "не повторяй") ||
+                str_contains(lower_buf, "выключи повтор") ||
+                str_contains(lower_buf, "отключи повтор")) {
+                log_msg("[bridge] Action: REPEAT OFF\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("repeat", "off");
+                return;
+            }
 
-        // Resume checks (Fast Action)
-        if (str_has_word_prefix(lower_buf, "продолж") ||
-            str_has_word(lower_buf, "играй") ||
-            str_has_word_prefix(lower_buf, "возобнов") ||
-            str_has_word(lower_buf, "заиграй") ||
-            str_contains(lower_buf, "вруби музыку") ||
-            (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
-            log_msg("[bridge] Action: RESUME\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            spotify_is_active = 1;
-            run_search_and_play("включи музыку");
-            return;
-        }
-    }
-
-    // Censorship toggle
-    if (str_contains(lower_buf, "цензур") ||
-        str_contains(lower_buf, "без мата") ||
-        str_contains(lower_buf, "с матом") ||
-        str_contains(lower_buf, "детский режим") ||
-        str_contains(lower_buf, "взрослый режим")) {
-        trigger_alice_suppression(quasar_fd, 2500);
-        if (str_contains(lower_buf, "выключ") ||
-            str_contains(lower_buf, "отключ") ||
-            str_contains(lower_buf, "с матом") ||
-            str_contains(lower_buf, "взрослый режим")) {
-            log_msg("[bridge] Action: CENSORSHIP OFF\n");
-            sys_unlink(get_censor_path());
-        } else {
-            log_msg("[bridge] Action: CENSORSHIP ON\n");
-            int fd = sys_open(get_censor_path(), 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
-            if (fd >= 0) {
-                sys_write(fd, "1\n", 2);
-                sys_close(fd);
+            // Resume checks (Fast Action)
+            if (str_has_word_prefix(lower_buf, "продолж") ||
+                str_has_word(lower_buf, "играй") ||
+                str_has_word_prefix(lower_buf, "возобнов") ||
+                str_has_word(lower_buf, "заиграй") ||
+                str_contains(lower_buf, "вруби музыку") ||
+                (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
+                log_msg("[bridge] Action: RESUME\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                spotify_is_active = 1;
+                run_search_and_play("включи музыку");
+                return;
             }
         }
-        return;
+
+        // Censorship toggle
+        if (str_contains(lower_buf, "цензур") ||
+            str_contains(lower_buf, "без мата") ||
+            str_contains(lower_buf, "с матом") ||
+            str_contains(lower_buf, "детский режим") ||
+            str_contains(lower_buf, "взрослый режим")) {
+            trigger_alice_suppression(quasar_fd, 2500);
+            if (str_contains(lower_buf, "выключ") ||
+                str_contains(lower_buf, "отключ") ||
+                str_contains(lower_buf, "с матом") ||
+                str_contains(lower_buf, "взрослый режим")) {
+                log_msg("[bridge] Action: CENSORSHIP OFF\n");
+                sys_unlink(get_censor_path());
+            } else {
+                log_msg("[bridge] Action: CENSORSHIP ON\n");
+                int fd = sys_open(get_censor_path(), 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
+                if (fd >= 0) {
+                    sys_write(fd, "1\n", 2);
+                    sys_close(fd);
+                }
+            }
+            return;
+        }
     }
 
     // Check PLAY / SEARCH / TRACK keywords (Search Action)
@@ -1953,6 +1962,10 @@ static int g_led_color_mode = 0;    // 0=white (Nothing Phone style), 1=rainbow,
 static int g_led_brightness = 180;  // 1-255, default 180
 static uint64_t g_led_frame = 0;
 static int g_led_last_active = 0;
+/* Set when the equalizer has painted the ring and not yet erased it. Unlike
+ * g_led_last_active it survives Alice borrowing the LEDs, so the "nothing is
+ * playing" branch below still knows a stale frame is sitting in the hardware. */
+static int g_led_ring_dirty = 0;
 static int64_t g_last_led_tick_ms = 0;
 static uint8_t g_led_last_rgb[24][3] = {{0}};
 static int g_led_rgb_cache_valid = 0;
@@ -2242,10 +2255,14 @@ static void led_reset_internal_state(void) {
     g_led_last_active = 0;
     g_led_rgb_cache_valid = 0;
     g_last_led_tick_ms = 0;
+    /* g_led_ring_dirty is intentionally NOT cleared here: this runs whenever
+     * Alice takes the LEDs for her own animation, while the last equalizer
+     * frame is still lit in hardware. */
 }
 
 static void led_all_off(void) {
     led_reset_internal_state();
+    g_led_ring_dirty = 0;
     if (!g_led_hw.detected) return;
     int start = g_led_hw.is_zero_indexed ? 0 : 1;
     int end = start + g_led_hw.num_zones;
@@ -2436,7 +2453,7 @@ static void led_visualizer_tick(int64_t now) {
     }
 
     if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
-        if (g_led_last_active) {
+        if (g_led_last_active || g_led_ring_dirty) {
             led_all_off();
         }
         return;
@@ -2449,6 +2466,7 @@ static void led_visualizer_tick(int64_t now) {
     g_last_led_tick_ms = now;
 
     g_led_last_active = 1;
+    g_led_ring_dirty = 1;
     g_led_frame++;
 
     audio_shm_ensure_attached();

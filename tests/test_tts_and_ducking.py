@@ -79,6 +79,7 @@ static int g_tts_speaking_seen = 0;
 static int quasar_uses_f252 = -1;
 static int64_t cancel_alice_until_ms = 0;
 static int spotify_is_active = 0;
+static int spotify_device_is_active = 0;
 static int playback_status = 0;
 static char current_track_name[128] = {{0}};
 static char current_artist_name[128] = {{0}};
