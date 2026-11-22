@@ -1837,20 +1837,6 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
                 run_soloist_cmd2("repeat", "off");
                 return;
             }
-
-            // Resume checks (Fast Action)
-            if (str_has_word_prefix(lower_buf, "продолж") ||
-                str_has_word(lower_buf, "играй") ||
-                str_has_word_prefix(lower_buf, "возобнов") ||
-                str_has_word(lower_buf, "заиграй") ||
-                str_contains(lower_buf, "вруби музыку") ||
-                (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
-                log_msg("[bridge] Action: RESUME\n");
-                trigger_alice_suppression(quasar_fd, 2500);
-                spotify_is_active = 1;
-                run_search_and_play("включи музыку");
-                return;
-            }
         }
 
         // Censorship toggle
@@ -1876,6 +1862,20 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             }
             return;
         }
+    }
+
+    // Resume checks (Fast Action)
+    if (str_has_word_prefix(lower_buf, "продолж") ||
+        str_has_word(lower_buf, "играй") ||
+        str_has_word_prefix(lower_buf, "возобнов") ||
+        str_has_word(lower_buf, "заиграй") ||
+        str_contains(lower_buf, "вруби музыку") ||
+        (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
+        log_msg("[bridge] Action: RESUME\n");
+        trigger_alice_suppression(quasar_fd, 2500);
+        spotify_is_active = 1;
+        run_search_and_play("включи музыку");
+        return;
     }
 
     // Check PLAY / SEARCH / TRACK keywords (Search Action)
