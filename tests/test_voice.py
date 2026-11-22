@@ -110,4 +110,154 @@ with tempfile.TemporaryDirectory(prefix="soloist-voice-") as temp:
     executable = path / ("test.exe" if sys.platform == "win32" else "test")
     compiler = [sys.argv[1], "cc"] if len(sys.argv)>1 else ["cc"]
     subprocess.run(compiler + ["-std=c99", "-Wall", "-Wextra", "-I", str(ROOT / "src"), str(path / "test.c"), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True)
+
+# Exercise media ownership with the real WS and voice handlers, plus the input
+# event body from _start. Keep controller and hardware effects observable.
+media_prefix = r'''
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+static unsigned long str_len(const char *s) { return s ? strlen(s) : 0; }
+static int failures, command_calls, search_calls, resume_calls, suppressed_calls, cache_calls;
+static char command[32];
+static int64_t mock_now = 10000;
+static int64_t now_ms(void) { return mock_now; }
+static void log_msg(const char *s) { (void)s; }
+static void trigger_alice_suppression(int fd, int64_t ms) { (void)fd; (void)ms; suppressed_calls++; }
+static void run_soloist_cmd(const char *s) { command_calls++; snprintf(command, sizeof(command), "%s", s); }
+static void run_soloist_cmd2(const char *s, const char *a) { (void)a; run_soloist_cmd(s); }
+static void run_toggle(void) { run_soloist_cmd("toggle"); }
+static void run_search_and_play(const char *s) {
+    if (!strcmp(s, "включи музыку")) resume_calls++;
+    else search_calls++;
+}
+static void run_controller(const char *s, const char *a) { (void)a; if (!strcmp(s, "clean-cache-full")) cache_calls++; }
+static void publish_track(const char *s) { (void)s; }
+static int selection_needs_observation(void) { return 0; }
+static void set_led_visualizer(int enable) { (void)enable; }
+static int send_alice_tts(int fd, const char *s) { (void)fd; (void)s; return 0; }
+static const char *get_censor_path(void) { return "/tmp/unused"; }
+static int sys_open(const char *p, int f, int m) { (void)p; (void)f; (void)m; return -1; }
+static void sys_close(int fd) { (void)fd; }
+static int sys_unlink(const char *p) { (void)p; return 0; }
+static long sys_write(int fd, const void *b, unsigned long n) { (void)fd; (void)b; return n; }
+static int touch_down_start, touch_is_down;
+static int64_t touch_down_time, last_touch_release_time, cancel_alice_until_ms;
+'''
+media_production = section("static void to_lower_ru", "#ifdef __aarch64__\nstatic void set_led_visualizer_impl")
+media_production += section("static int is_web_or_culinary_intent", "/* =========================================================================")
+input_start = source.index("                            int is_play_pause_key =")
+input_end = source.index("\n                        }\n                    } else if (pfd[p_idx].revents", input_start)
+media_production += '''
+static void input(int code, int value) {
+    struct { int type, code, value; } ev = {1, code, value};
+    int quasar_fd = 0;
+    do {
+''' + source[input_start:input_end] + '''
+    } while (0);
+}
+'''
+media_driver = r'''
+static void check(int good, const char *name) {
+    printf("%s %s\n", good ? "PASS" : "FAIL", name); if (!good) failures++;
+}
+static void clear_calls(void) {
+    command_calls = search_calls = resume_calls = suppressed_calls = 0; command[0] = 0;
+}
+static void reset_media(void) {
+    spotify_is_active = spotify_device_is_active = playback_status = 0;
+    touch_down_start = touch_is_down = 0; last_touch_release_time = 0;
+    clear_calls();
+}
+static void voice(const char *s) { handle_voice_recognition(0, s, strlen(s)); }
+static int passed_to_alice(void) {
+    return command_calls == 0 && search_calls == 0 && resume_calls == 0 && suppressed_calls == 0;
+}
+static int paused_once(void) {
+    return command_calls == 1 && !strcmp(command, "pause") && suppressed_calls == 1 && search_calls == 0 && resume_calls == 0;
+}
+int main(void) {
+    for (int initial = 0; initial <= 1; initial++) {
+        reset_media(); spotify_is_active = spotify_device_is_active = initial;
+        handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":false}");
+        voice("стоп");
+        check(spotify_is_active == 0 && spotify_device_is_active == 0 && passed_to_alice(),
+              initial ? "phone playing clears stale local flags and preserves Alice" : "phone playing cannot claim idle speaker or suppress Alice");
+    }
+    reset_media(); spotify_is_active = spotify_device_is_active = 1;
+    handle_soloist_ws_json("{\"is_active\":false}"); voice("пауза");
+    check(spotify_is_active == 0 && spotify_device_is_active == 0 && passed_to_alice(),
+          "inactive update without status clears optimism and preserves Alice");
+
+    for (int voice_pause = 0; voice_pause <= 1; voice_pause++) {
+        reset_media();
+        handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+        if (voice_pause) { voice("пауза"); check(paused_once(), "voice pause invokes Spotify and suppression once"); }
+        handle_soloist_ws_json("{\"status\":\"paused\"}");
+        clear_calls(); voice("стоп"); voice("пауза");
+        check(spotify_is_active == 0 && spotify_device_is_active == 1 && passed_to_alice(),
+              voice_pause ? "WS after voice pause leaves STOP and PAUSE to Alice" : "app pause clears optimism and leaves STOP and PAUSE to Alice");
+        voice("дальше");
+        check(command_calls == 1 && !strcmp(command, "next") && suppressed_calls == 1 && search_calls == 0 && resume_calls == 0,
+              "NEXT remains allowed on active paused speaker");
+    }
+    reset_media();
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    voice("стоп"); check(paused_once(), "local playing allows STOP");
+    reset_media();
+    handle_soloist_ws_json("{\"status\":\"buffering\",\"is_active\":true}");
+    voice("стоп"); check(paused_once(), "local buffering allows STOP without optimism");
+    reset_media(); spotify_device_is_active = 1;
+    voice("стоп"); check(passed_to_alice(), "active stopped speaker leaves STOP to Alice");
+
+    for (int inactive = 0; inactive <= 1; inactive++) {
+        reset_media(); voice("включи песню Кукушка");
+        check(search_calls == 1 && resume_calls == 0 && suppressed_calls == 1 && spotify_is_active == 1,
+              "catalog search sets optimism before WS");
+        clear_calls(); voice("стоп"); check(paused_once(), "optimistic search allows STOP before WS");
+        voice("включи песню Кукушка");
+        handle_soloist_ws_json(inactive ? "{\"is_active\":false}" : "{\"status\":\"paused\",\"is_active\":true}");
+        clear_calls(); voice("стоп");
+        check(passed_to_alice(), inactive ? "inactive WS cancels optimistic STOP permission" : "paused WS cancels optimistic STOP permission");
+    }
+    const char *resume[] = {"продолжи", "включи пожалуйста музыку", "играй", "возобнови", "заиграй", "вруби музыку", "включи музыку"};
+    for (unsigned i = 0; i < sizeof(resume) / sizeof(resume[0]); i++) {
+        reset_media(); voice(resume[i]);
+        check(resume_calls == 1 && search_calls == 0 && command_calls == 0 && suppressed_calls == 1,
+              resume[i]);
+    }
+    const int keys[] = {163, 159, 208, 165, 158, 168};
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        reset_media(); input(keys[i], 1);
+        check(command_calls == 1 && !strcmp(command, i < 3 ? "next" : "prev") && suppressed_calls == 1 &&
+              search_calls == 0 && resume_calls == 0 && spotify_is_active == 0 && spotify_device_is_active == 0,
+              i < 3 ? "hardware NEXT sends command without claiming local playback" : "hardware PREV sends command without claiming local playback");
+    }
+    const int taps[] = {164, 0x246};
+    for (unsigned i = 0; i < sizeof(taps) / sizeof(taps[0]); i++) {
+        reset_media(); playback_status = 2; input(taps[i], 1); input(taps[i], 0);
+        check(command_calls == 1 && !strcmp(command, "play") && suppressed_calls == 2 &&
+              search_calls == 0 && resume_calls == 0 && spotify_is_active == 0 && spotify_device_is_active == 0,
+              "button or touch resume sends play without claiming local playback");
+    }
+    reset_media(); playback_status = 2; last_touch_release_time = mock_now - 100;
+    input(0x246, 1); input(0x246, 0);
+    check(command_calls == 1 && !strcmp(command, "next") && suppressed_calls == 2 && spotify_is_active == 0,
+          "double tap sends NEXT without claiming local playback");
+    reset_media(); playback_status = 1; spotify_is_active = 1;
+    input(164, 1); input(164, 0);
+    check(command_calls == 1 && !strcmp(command, "pause") && suppressed_calls == 2 && spotify_is_active == 0,
+          "hardware pause retains optimistic reset");
+    cache_calls = 0; handle_soloist_ws_json("{\"status\":\"stopped\"}");
+    check(playback_status == 0 && spotify_is_active == 0 && cache_calls == 1 && last_cache_clean_ms == mock_now,
+          "stopped WS retains full cache cleanup");
+    return failures ? 1 : 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix="soloist-media-") as temp:
+    path = pathlib.Path(temp)
+    (path / "test.c").write_text(media_prefix + media_production + media_driver, encoding="utf-8")
+    executable = path / ("test.exe" if sys.platform == "win32" else "test")
+    subprocess.run(compiler + ["-std=c99", "-Wall", "-Wextra", str(path / "test.c"), "-o", str(executable)], check=True)
     sys.exit(subprocess.run([str(executable)]).returncode)
