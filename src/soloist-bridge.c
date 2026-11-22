@@ -1751,13 +1751,14 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         // another device of the same account arrive with is_active=false, so
         // this also stops a phone or car from steering the speaker.
         if (spotify_is_active || spotify_device_is_active) {
-            if (str_contains(lower_buf, "пауз") ||
-                str_contains(lower_buf, "стоп") ||
-                str_contains(lower_buf, "хватит") ||
-                str_contains(lower_buf, "замолчи") ||
-                str_contains(lower_buf, "останови") ||
-                str_contains(lower_buf, "выключи музыку") ||
-                str_contains(lower_buf, "отключи музыку")) {
+            if (((spotify_device_is_active && (playback_status == 1 || playback_status == 3)) || spotify_is_active) &&
+                (str_contains(lower_buf, "пауз") ||
+                 str_contains(lower_buf, "стоп") ||
+                 str_contains(lower_buf, "хватит") ||
+                 str_contains(lower_buf, "замолчи") ||
+                 str_contains(lower_buf, "останови") ||
+                 str_contains(lower_buf, "выключи музыку") ||
+                 str_contains(lower_buf, "отключи музыку"))) {
                 log_msg("[bridge] Action: PAUSE\n");
                 trigger_alice_suppression(quasar_fd, 3000);
                 spotify_is_active = 0;
