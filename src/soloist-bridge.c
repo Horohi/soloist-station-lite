@@ -1453,15 +1453,22 @@ static void handle_soloist_ws_json(const char *json) {
         }
     }
 
+    int active_bool = 0;
+    if (json_find_bool(json, "is_active", &active_bool)) {
+        spotify_device_is_active = active_bool;
+        if (!active_bool) spotify_is_active = 0;
+    }
+
     char status_str[32];
     if (json_find_str(json, "status", status_str, sizeof(status_str))) {
         if (str_equal(status_str, "playing")) {
             playback_status = 1;
             playback_speed = 1;
-            spotify_is_active = 1;
+            spotify_is_active = spotify_device_is_active;
         } else if (str_equal(status_str, "paused")) {
             playback_status = 2;
             playback_speed = 0;
+            spotify_is_active = 0;
         } else if (str_equal(status_str, "buffering")) {
             playback_status = 3;
             playback_speed = 0;
@@ -1472,11 +1479,6 @@ static void handle_soloist_ws_json(const char *json) {
             last_cache_clean_ms = now_ms();
             run_controller("clean-cache-full", 0);
         }
-    }
-
-    int active_bool = 0;
-    if (json_find_bool(json, "is_active", &active_bool)) {
-        spotify_device_is_active = active_bool;
     }
 
     uint64_t dur = 0;
@@ -3121,6 +3123,7 @@ void _start(void) {
                 quasar_vol_buf_pos = 0;
             }
 
+            // shortcut: аппаратный старт подтверждается следующим WS; пересмотреть, если задержка мешает обычному управлению.
             // Check Input devices (Multi-device monitoring across all Stations)
             if (input_start_idx >= 0) {
                 for (int i = 0; i < num_input_fds; i++) {
@@ -3156,14 +3159,12 @@ void _start(void) {
                                 if (is_next_key && ev.value == 1) {
                                     log_msg("[bridge] Hardware key NEXT pressed\n");
                                     trigger_alice_suppression(quasar_fd, 3000);
-                                    spotify_is_active = 1;
                                     run_soloist_cmd("next");
                                     continue;
                                 }
                                 if (is_prev_key && ev.value == 1) {
                                     log_msg("[bridge] Hardware key PREV pressed\n");
                                     trigger_alice_suppression(quasar_fd, 3000);
-                                    spotify_is_active = 1;
                                     run_soloist_cmd("prev");
                                     continue;
                                 }
@@ -3184,7 +3185,6 @@ void _start(void) {
                                                     log_msg("[bridge] Double-tap detected -> NEXT TRACK\n");
                                                     last_touch_release_time = 0;
                                                     trigger_alice_suppression(quasar_fd, 3000);
-                                                    spotify_is_active = 1;
                                                     run_soloist_cmd("next");
                                                 } else {
                                                     last_touch_release_time = now_tap;
@@ -3196,7 +3196,6 @@ void _start(void) {
                                                         run_soloist_cmd("pause");
                                                     } else if (playback_status == 2) {
                                                         log_msg("[bridge] Instant action: PLAY\n");
-                                                        spotify_is_active = 1;
                                                         run_soloist_cmd("play");
                                                     } else {
                                                         run_toggle();
