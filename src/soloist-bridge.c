@@ -1953,6 +1953,10 @@ static int g_led_color_mode = 0;    // 0=white (Nothing Phone style), 1=rainbow,
 static int g_led_brightness = 180;  // 1-255, default 180
 static uint64_t g_led_frame = 0;
 static int g_led_last_active = 0;
+/* Set when the equalizer has painted the ring and not yet erased it. Unlike
+ * g_led_last_active it survives Alice borrowing the LEDs, so the "nothing is
+ * playing" branch below still knows a stale frame is sitting in the hardware. */
+static int g_led_ring_dirty = 0;
 static int64_t g_last_led_tick_ms = 0;
 static uint8_t g_led_last_rgb[24][3] = {{0}};
 static int g_led_rgb_cache_valid = 0;
@@ -2242,10 +2246,14 @@ static void led_reset_internal_state(void) {
     g_led_last_active = 0;
     g_led_rgb_cache_valid = 0;
     g_last_led_tick_ms = 0;
+    /* g_led_ring_dirty is intentionally NOT cleared here: this runs whenever
+     * Alice takes the LEDs for her own animation, while the last equalizer
+     * frame is still lit in hardware. */
 }
 
 static void led_all_off(void) {
     led_reset_internal_state();
+    g_led_ring_dirty = 0;
     if (!g_led_hw.detected) return;
     int start = g_led_hw.is_zero_indexed ? 0 : 1;
     int end = start + g_led_hw.num_zones;
@@ -2436,7 +2444,7 @@ static void led_visualizer_tick(int64_t now) {
     }
 
     if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
-        if (g_led_last_active) {
+        if (g_led_last_active || g_led_ring_dirty) {
             led_all_off();
         }
         return;
@@ -2449,6 +2457,7 @@ static void led_visualizer_tick(int64_t now) {
     g_last_led_tick_ms = now;
 
     g_led_last_active = 1;
+    g_led_ring_dirty = 1;
     g_led_frame++;
 
     audio_shm_ensure_attached();
