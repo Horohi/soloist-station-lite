@@ -324,6 +324,50 @@ int main(void) {{
         fprintf(stderr, "FAIL dirty-check wrote unchanged zero LEDs (%d -> %d)\\n", w_steady, g_led_writes);
         return 17;
     }}
+
+    // 7. Ring still clears on stop after Alice borrowed LEDs (PR #29 regression check)
+    g_mock_shmid = -1;
+    playback_status = 1;
+    spotify_device_is_active = 1;
+    g_alice_state = 0;
+    g_led_alice_yield_until_ms = 0;
+    led_reset_internal_state();
+    g_led_ring_dirty = 0;
+    g_led_frame = 9;
+    led_visualizer_tick(5000);
+    if (!g_led_ring_dirty || g_last_r1 <= 0) {{
+        fprintf(stderr, "FAIL expected lit ring before Alice borrow: dirty=%d r1=%d\\n", g_led_ring_dirty, g_last_r1);
+        return 19;
+    }}
+    g_alice_state = 1; // LISTENING -> borrows LEDs and calls led_reset_internal_state()
+    led_visualizer_tick(5040);
+    if (g_led_last_active != 0 || g_led_ring_dirty != 1) {{
+        fprintf(stderr, "FAIL expected dirty bit preserved while Alice owns LEDs: active=%d dirty=%d\\n",
+                g_led_last_active, g_led_ring_dirty);
+        return 20;
+    }}
+    g_led_writes = 0;
+    g_zero_writes = 0;
+    playback_status = 2; // paused while Alice still owns LEDs
+    led_visualizer_tick(5080);
+    if (g_led_writes != 0) {{
+        fprintf(stderr, "FAIL wrote to LEDs while Alice still owned them on pause: writes=%d\\n", g_led_writes);
+        return 21;
+    }}
+    g_alice_state = 0;
+    g_led_alice_yield_until_ms = 5100;
+    led_visualizer_tick(5200);
+    if (g_zero_writes == 0 || g_last_r1 != 0 || g_led_ring_dirty != 0) {{
+        fprintf(stderr, "FAIL failed to clear dirty ring after Alice finished on stop: zeros=%d r1=%d dirty=%d\\n",
+                g_zero_writes, g_last_r1, g_led_ring_dirty);
+        return 22;
+    }}
+    int w_after_clear = g_led_writes;
+    led_visualizer_tick(5240);
+    if (g_led_writes != w_after_clear) {{
+        fprintf(stderr, "FAIL repeated clear attempts after dirty bit cleared: %d -> %d\\n", w_after_clear, g_led_writes);
+        return 23;
+    }}
     return 0;
 }}
 """

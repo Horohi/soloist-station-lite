@@ -503,7 +503,8 @@ esac
         for path in ("bin/soloist", "bin/soloist-bridge", "bin/curl", "lib64/ld-linux-aarch64.so.1",
                      "scripts/soloist-cli", "scripts/control.sh", "scripts/request_state.sh",
                      "scripts/search_and_play.sh", "scripts/stop.sh", "scripts/status.sh",
-                     "scripts/soloist-ram-guard.sh", "scripts/migrate-standalone-guard.sh"):
+                     "scripts/soloist-ram-guard.sh", "scripts/migrate-standalone-guard.sh",
+                     "scripts/migrate-standalone-start.sh"):
             file = payload / path
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text(cli_text if path == "scripts/soloist-cli" else "new release\n")
@@ -612,6 +613,128 @@ def test_alsa_card_name():
         print("PASS ALSA card IDs and fallback in YAM service and generated standalone startup")
 
 
+def test_plum_external_volume():
+    with tempfile.TemporaryDirectory(prefix="soloist-plum-vol-") as d:
+        tmp = pathlib.Path(d)
+        cards = tmp / "cards"
+        cards.write_text(" 0 [AMLAUGESOUND   ]: AML-AUGESOUND\n")
+        sources = ((ROOT / "scripts/soloist-service.sh").read_text(),
+                   (ROOT / "install.sh").read_text())
+        for idx, source in enumerate(sources):
+            lines = source.splitlines()
+            start = next(i for i, line in enumerate(lines) if line.startswith("CARD_NAME="))
+            end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("export APULSE_DIAG=")) + 1
+            raw_fragment = "\n".join(lines[start:end])
+            for compat_val, expected in (("yandex,plum", "sysdefault:CARD=AMLAUGESOUND:0"),
+                                         ("yandex,micro", "plug:default:1")):
+                if idx == 1:
+                    fragment = subprocess.run(
+                        ["sh", "-c", f'DT_COMPAT="{compat_val}"\ncat <<GENERATED\n' + raw_fragment + "\nGENERATED\n"],
+                        capture_output=True, text=True, check=True,
+                    ).stdout
+                else:
+                    fragment = f'COMPAT="{compat_val}"\n' + raw_fragment
+                fragment = fragment.replace("/proc/asound/cards", str(cards))
+                res = subprocess.run(
+                    ["sh", "-c", fragment + '\nprintf "%s:%s" "$APULSE_PLAYBACK_DEVICE" "$APULSE_EXTERNAL_VOLUME"'],
+                    capture_output=True, text=True, check=True,
+                )
+                assert res.stdout == expected, (idx, compat_val, res.stdout, res.stderr)
+        print("PASS plum uses sysdefault with APULSE_EXTERNAL_VOLUME=0 and non-plum keeps external volume")
+
+
+def test_standalone_start_migration():
+    helper = ROOT / "scripts/migrate-standalone-start.sh"
+    with tempfile.TemporaryDirectory(prefix="soloist-start-mig-") as d:
+        app = pathlib.Path(d) / "app"
+        app.mkdir()
+        start = app / "start.sh"
+        env_micro = {"PATH": "/bin:/usr/bin", "SOLOIST_DT_COMPAT": "yandex,micro"}
+        env_plum = {"PATH": "/bin:/usr/bin", "SOLOIST_DT_COMPAT": "yandex,plum"}
+
+        # 1. Legacy v1.0.0 start.sh without LD_LIBRARY_PATH line continuation
+        v100 = '''#!/bin/sh
+export LD_LIBRARY_PATH=/data/opt/soloist/lib64:$LD_LIBRARY_PATH
+export APULSE_PLAYBACK_DEVICE=plug:default
+export APULSE_DIAG=0
+
+API_KEY="k_v100"
+
+nohup /data/opt/soloist/bin/soloist \\
+    -n "Old Speaker" \\
+    -k "$API_KEY" \\
+    -D /data/opt/soloist/data > /tmp/soloist.log 2>&1 &
+'''
+        start.write_text(v100)
+        subprocess.run(["sh", str(helper), str(app)], env=env_micro, check=True)
+        subprocess.run(["sh", "-n", str(start)], check=True)
+        migrated = start.read_text()
+        assert 'API_KEY="k_v100"' in migrated and '-n "Old Speaker"' in migrated, migrated
+        assert "export APULSE_EXTERNAL_VOLUME=1" in migrated, migrated
+        assert "export APULSE_YIELD_PATH=/tmp/soloist.yield" in migrated, migrated
+        assert f'export ALSA_PLUGIN_DIR="{app}/lib64/alsa-lib"' in migrated, migrated
+        assert f'"{app}/lib64/libsoloist_duck.so"' in migrated, migrated
+        assert 'LD_PRELOAD="$DUCK_PRELOAD" \\\nnohup ' in migrated, migrated
+        assert start.stat().st_mode & 0o777 == 0o700
+        subprocess.run(["sh", str(helper), str(app)], env=env_micro, check=True)
+        assert start.read_text() == migrated
+
+        # 2. Legacy v1.3.0 start.sh with LD_LIBRARY_PATH continuation before nohup and broken CARD_NAME
+        v130_exact = (
+            '#!/bin/sh\n'
+            'CARD_NAME=$(cat /proc/asound/cards 2>/dev/null | awk \'/\\[/{print $2; exit}\' || echo "default")\n'
+            'export APULSE_PLAYBACK_DEVICE="plug:default"\n'
+            'export APULSE_DIAG=0\n'
+            'API_KEY="k_v130"\n'
+            'LD_LIBRARY_PATH="/data/opt/soloist/lib64" \\\n'
+            'nohup /data/opt/soloist/bin/soloist \\\n'
+            '    -n "Lite 1" \\\n'
+            '    -k "$API_KEY" > /tmp/soloist.log 2>&1 &\n'
+        )
+        start.write_text(v130_exact)
+        subprocess.run(["sh", str(helper), str(app)], env=env_micro, check=True)
+        subprocess.run(["sh", "-n", str(start)], check=True)
+        m130 = start.read_text()
+        assert "awk -F'[][]'" in m130 and 'awk \'/\\[/{print $2; exit}\'' not in m130, m130
+        assert 'export APULSE_YIELD_PATH=/tmp/soloist.yield' in m130, m130
+        assert 'LD_LIBRARY_PATH="/data/opt/soloist/lib64" \\\nLD_PRELOAD="$DUCK_PRELOAD" \\\nnohup ' in m130, m130
+        assert m130.index("export APULSE_EXTERNAL_VOLUME=1") < m130.index('LD_LIBRARY_PATH="/data/opt/soloist/lib64" \\'), m130
+        subprocess.run(["sh", str(helper), str(app)], env=env_micro, check=True)
+        assert start.read_text() == m130
+
+        # 3. Legacy v1.3.13 start.sh on plum: flips APULSE_EXTERNAL_VOLUME=1 -> 0 and fixes CARD_NAME without duplicating preload
+        v1313_plum = (
+            '#!/bin/sh\n'
+            'CARD_NAME=$(cat /proc/asound/cards 2>/dev/null | awk \'/\\[/{print $2; exit}\' || echo "default")\n'
+            'export APULSE_PLAYBACK_DEVICE="sysdefault:CARD=$CARD_NAME"\n'
+            'export APULSE_DIAG=0\n'
+            'export APULSE_EXTERNAL_VOLUME=1\n'
+            'export APULSE_YIELD_PATH=/tmp/soloist.yield\n'
+            'export ALSA_PLUGIN_DIR=/data/opt/soloist/lib64/alsa-lib\n'
+            'DUCK_PRELOAD=""\n'
+            '[ -f "/data/opt/soloist/lib64/libsoloist_duck.so" ] && DUCK_PRELOAD="/data/opt/soloist/lib64/libsoloist_duck.so"\n'
+            'LD_LIBRARY_PATH="/data/opt/soloist/lib64" \\\n'
+            'LD_PRELOAD="$DUCK_PRELOAD" \\\n'
+            'nohup /data/opt/soloist/bin/soloist \\\n'
+            '    -n "Lite 2" > /tmp/soloist.log 2>&1 &\n'
+        )
+        start.write_text(v1313_plum)
+        subprocess.run(["sh", str(helper), str(app)], env=env_plum, check=True)
+        subprocess.run(["sh", "-n", str(start)], check=True)
+        mplum = start.read_text()
+        assert "export APULSE_EXTERNAL_VOLUME=0" in mplum and "export APULSE_EXTERNAL_VOLUME=1" not in mplum, mplum
+        assert mplum.count("LD_PRELOAD=") == 1 and "awk -F'[][]'" in mplum, mplum
+        subprocess.run(["sh", str(helper), str(app)], env=env_plum, check=True)
+        assert start.read_text() == mplum
+
+        # 4. Unrecognized custom start.sh is left untouched
+        custom = '#!/bin/sh\necho custom runner\n'
+        start.write_text(custom)
+        subprocess.run(["sh", str(helper), str(app)], env=env_micro, check=True)
+        assert start.read_text() == custom
+        print("PASS standalone start.sh migration handles v1.0.0, v1.3.0 continuation, plum extvol, and custom scripts")
+
+
 if __name__ == "__main__":
     test_c_yam_paths()
     test_shell_yam_layout()
@@ -621,4 +744,6 @@ if __name__ == "__main__":
     test_standalone_update_download_failures()
     test_standalone_guard_migration()
     test_alsa_card_name()
+    test_plum_external_volume()
+    test_standalone_start_migration()
     print("ALL YAM V2 MODE TESTS PASSED!")

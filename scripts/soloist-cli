@@ -408,7 +408,7 @@ cmd_update() {
     fi
     for required in bin/soloist bin/soloist-bridge bin/curl lib64/ld-linux-aarch64.so.1 \
                     scripts/soloist-cli scripts/control.sh scripts/request_state.sh scripts/search_and_play.sh scripts/stop.sh scripts/status.sh \
-                    scripts/soloist-ram-guard.sh scripts/migrate-standalone-guard.sh; do
+                    scripts/soloist-ram-guard.sh scripts/migrate-standalone-guard.sh scripts/migrate-standalone-start.sh; do
         if ! grep -Fx "./$required" "$UPDATE_DIR/files" >/dev/null &&
            ! grep -Fx "$required" "$UPDATE_DIR/files" >/dev/null; then
             printf "${RED}Ошибка: в релизе отсутствует %s; текущая установка сохранена.${NC}\n" "$required"
@@ -470,6 +470,10 @@ cmd_update() {
 
     # Cleanup any old update debris
     rm -rf /tmp/soloist_update* /data/local/tmp/soloist* 2>/dev/null || true
+
+    # Ensure legacy standalone start.sh gets new runtime env & guard before restart
+    [ ! -f "$INSTALL_DIR/scripts/migrate-standalone-guard.sh" ] || sh "$INSTALL_DIR/scripts/migrate-standalone-guard.sh" "$INSTALL_DIR" || true
+    [ ! -f "$INSTALL_DIR/scripts/migrate-standalone-start.sh" ] || sh "$INSTALL_DIR/scripts/migrate-standalone-start.sh" "$INSTALL_DIR" || true
 
     # Restart
     printf "Запуск обновлённого Soloist...\n"

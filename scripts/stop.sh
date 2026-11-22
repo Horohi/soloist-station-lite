@@ -84,4 +84,7 @@ rm -f /tmp/soloist.yield 2>/dev/null || true
 if [ -f /data/opt/soloist/scripts/migrate-standalone-guard.sh ]; then
     sh /data/opt/soloist/scripts/migrate-standalone-guard.sh /data/opt/soloist || true
 fi
+if [ -f /data/opt/soloist/scripts/migrate-standalone-start.sh ]; then
+    sh /data/opt/soloist/scripts/migrate-standalone-start.sh /data/opt/soloist || true
+fi
 echo "Spotify Soloist and Bridge stopped."

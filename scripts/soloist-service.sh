@@ -98,13 +98,14 @@ CARD_NAME=$(awk -F'[][]' '/\[/{gsub(/[[:space:]]/, "", $2); if ($2 != "") {print
 case "$COMPAT" in
     *plum*)
         export APULSE_PLAYBACK_DEVICE="sysdefault:CARD=$CARD_NAME"
+        export APULSE_EXTERNAL_VOLUME=0
         ;;
     *)
         export APULSE_PLAYBACK_DEVICE=plug:default
+        export APULSE_EXTERNAL_VOLUME=1
         ;;
 esac
 export APULSE_DIAG=0
-export APULSE_EXTERNAL_VOLUME=1
 export APULSE_YIELD_PATH=/tmp/soloist.yield
 export ALSA_PLUGIN_DIR="$PKG_DIR/lib64/alsa-lib"
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
