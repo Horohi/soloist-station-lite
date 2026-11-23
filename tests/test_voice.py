@@ -138,9 +138,10 @@ static int selection_needs_observation(void) { return 0; }
 static void set_led_visualizer(int enable) { (void)enable; }
 static int send_alice_tts(int fd, const char *s) { (void)fd; (void)s; return 0; }
 static const char *get_censor_path(void) { return "/tmp/unused"; }
-static int sys_open(const char *p, int f, int m) { (void)p; (void)f; (void)m; return -1; }
+static int censor_on_calls, censor_off_calls;
+static int sys_open(const char *p, int f, int m) { (void)p; (void)f; (void)m; censor_on_calls++; return -1; }
 static void sys_close(int fd) { (void)fd; }
-static int sys_unlink(const char *p) { (void)p; return 0; }
+static int sys_unlink(const char *p) { (void)p; censor_off_calls++; return 0; }
 static long sys_write(int fd, const void *b, unsigned long n) { (void)fd; (void)b; return n; }
 static int touch_down_start, touch_is_down;
 static int64_t touch_down_time, last_touch_release_time, cancel_alice_until_ms;
@@ -168,6 +169,7 @@ static void clear_calls(void) {
 static void reset_media(void) {
     spotify_is_active = spotify_device_is_active = playback_status = 0;
     touch_down_start = touch_is_down = 0; last_touch_release_time = 0;
+    censor_on_calls = censor_off_calls = 0;
     clear_calls();
 }
 static void voice(const char *s) { handle_voice_recognition(0, s, strlen(s)); }
@@ -227,6 +229,29 @@ int main(void) {
         check(resume_calls == 1 && search_calls == 0 && command_calls == 0 && suppressed_calls == 1,
               resume[i]);
     }
+    const char *censorship[] = {"включи цензуру", "включи детский режим"};
+    for (unsigned i = 0; i < sizeof(censorship) / sizeof(censorship[0]); i++) {
+        for (int active = 0; active <= 1; active++) {
+            reset_media(); spotify_is_active = spotify_device_is_active = active;
+            voice(censorship[i]);
+            check(censor_on_calls == 1 && censor_off_calls == 0 && search_calls == 0 &&
+                  resume_calls == 0 && command_calls == 0,
+                  "censorship toggle is not swallowed by explicit-search guard");
+        }
+    }
+    reset_media(); voice("выключи цензуру");
+    check(censor_off_calls == 1 && censor_on_calls == 0 && search_calls == 0 && resume_calls == 0,
+          "censorship off is not swallowed by explicit-search guard");
+    const char *qualified[] = {"включи грустную музыку", "включи музыку Linkin Park", "включи песню Играй",
+                               "включи музыку Алиса", "включи музыку Пожалуйста"};
+    for (unsigned i = 0; i < sizeof(qualified) / sizeof(qualified[0]); i++) {
+        reset_media(); voice(qualified[i]);
+        check(search_calls == 1 && resume_calls == 0, "qualified search is not treated as resume");
+    }
+    reset_media(); voice("включи пожалуйстапесня музыку");
+    check(search_calls == 1 && resume_calls == 0, "filler must match a whole word");
+    reset_media(); voice("алиса, давай включи пожалуйста музыку");
+    check(resume_calls == 1 && search_calls == 0, "leading address and fillers still resume");
     const int keys[] = {163, 159, 208, 165, 158, 168};
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         reset_media(); input(keys[i], 1);

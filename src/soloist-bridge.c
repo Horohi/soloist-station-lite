@@ -1248,11 +1248,62 @@ static int is_explicit_search(const char *lower) {
                    str_has_word_prefix(lower, "слушать");
     if (!has_verb) return 0;
 
-    // Check if it is a simple resume command rather than a specific track/artist query
-    if (str_equal(lower, "включи музыку") || str_equal(lower, "вруби музыку") ||
-        str_equal(lower, "включить музыку") || str_equal(lower, "алиса включи музыку") ||
-        str_equal(lower, "алиса вруби музыку") || str_equal(lower, "слушать музыку")) {
-        return 0;
+    // Check if it is a simple resume command rather than a specific track/artist query.
+    // Polite fillers are allowed at the start ("алиса, давай") and between the verb and
+    // "музыку" ("включи пожалуйста музыку"). Anything after "музыку" keeps the phrase a search.
+    {
+        const char *p = lower;
+        int ok = 1;
+        unsigned long n;
+
+        for (;;) {
+            unsigned long rest;
+            while (*p == ' ') p++;
+            rest = str_len(p);
+            n = str_len("алиса");
+            if (rest > n && mem_equal(p, "алиса", n) && !is_word_byte((uint8_t)p[n])) {
+                p += n;
+                if (*p == ',') p++;
+                continue;
+            }
+            n = str_len("пожалуйста");
+            if (rest > n && mem_equal(p, "пожалуйста", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+            n = str_len("давай");
+            if (rest > n && mem_equal(p, "давай", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+            break;
+        }
+
+        n = str_len("включи");
+        if (str_len(p) >= n && mem_equal(p, "включи", n) && !is_word_byte((uint8_t)p[n])) p += n;
+        else {
+            n = str_len("вруби");
+            if (str_len(p) >= n && mem_equal(p, "вруби", n) && !is_word_byte((uint8_t)p[n])) p += n;
+            else {
+                n = str_len("включить");
+                if (str_len(p) >= n && mem_equal(p, "включить", n) && !is_word_byte((uint8_t)p[n])) p += n;
+                else {
+                    n = str_len("слушать");
+                    if (str_len(p) >= n && mem_equal(p, "слушать", n) && !is_word_byte((uint8_t)p[n])) p += n;
+                    else ok = 0;
+                }
+            }
+        }
+
+        if (ok) {
+            for (;;) {
+                unsigned long rest;
+                while (*p == ' ') p++;
+                rest = str_len(p);
+                n = str_len("пожалуйста");
+                if (rest > n && mem_equal(p, "пожалуйста", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+                n = str_len("давай");
+                if (rest > n && mem_equal(p, "давай", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+                break;
+            }
+            while (*p == ' ') p++;
+            n = str_len("музыку");
+            if (str_len(p) == n && mem_equal(p, "музыку", n)) return 0;
+        }
     }
     return 1;
 }
@@ -1839,42 +1890,42 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             }
         }
 
-        // Censorship toggle
-        if (str_contains(lower_buf, "цензур") ||
-            str_contains(lower_buf, "без мата") ||
-            str_contains(lower_buf, "с матом") ||
-            str_contains(lower_buf, "детский режим") ||
-            str_contains(lower_buf, "взрослый режим")) {
+        // Resume checks (Fast Action)
+        if (str_has_word_prefix(lower_buf, "продолж") ||
+            str_has_word(lower_buf, "играй") ||
+            str_has_word_prefix(lower_buf, "возобнов") ||
+            str_has_word(lower_buf, "заиграй") ||
+            str_contains(lower_buf, "вруби музыку") ||
+            (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
+            log_msg("[bridge] Action: RESUME\n");
             trigger_alice_suppression(quasar_fd, 2500);
-            if (str_contains(lower_buf, "выключ") ||
-                str_contains(lower_buf, "отключ") ||
-                str_contains(lower_buf, "с матом") ||
-                str_contains(lower_buf, "взрослый режим")) {
-                log_msg("[bridge] Action: CENSORSHIP OFF\n");
-                sys_unlink(get_censor_path());
-            } else {
-                log_msg("[bridge] Action: CENSORSHIP ON\n");
-                int fd = sys_open(get_censor_path(), 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
-                if (fd >= 0) {
-                    sys_write(fd, "1\n", 2);
-                    sys_close(fd);
-                }
-            }
+            spotify_is_active = 1;
+            run_search_and_play("включи музыку");
             return;
         }
     }
 
-    // Resume checks (Fast Action)
-    if (str_has_word_prefix(lower_buf, "продолж") ||
-        str_has_word(lower_buf, "играй") ||
-        str_has_word_prefix(lower_buf, "возобнов") ||
-        str_has_word(lower_buf, "заиграй") ||
-        str_contains(lower_buf, "вруби музыку") ||
-        (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
-        log_msg("[bridge] Action: RESUME\n");
+    // Censorship toggle
+    if (str_contains(lower_buf, "цензур") ||
+        str_contains(lower_buf, "без мата") ||
+        str_contains(lower_buf, "с матом") ||
+        str_contains(lower_buf, "детский режим") ||
+        str_contains(lower_buf, "взрослый режим")) {
         trigger_alice_suppression(quasar_fd, 2500);
-        spotify_is_active = 1;
-        run_search_and_play("включи музыку");
+        if (str_contains(lower_buf, "выключ") ||
+            str_contains(lower_buf, "отключ") ||
+            str_contains(lower_buf, "с матом") ||
+            str_contains(lower_buf, "взрослый режим")) {
+            log_msg("[bridge] Action: CENSORSHIP OFF\n");
+            sys_unlink(get_censor_path());
+        } else {
+            log_msg("[bridge] Action: CENSORSHIP ON\n");
+            int fd = sys_open(get_censor_path(), 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
+            if (fd >= 0) {
+                sys_write(fd, "1\n", 2);
+                sys_close(fd);
+            }
+        }
         return;
     }
 
