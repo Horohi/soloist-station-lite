@@ -209,6 +209,14 @@ function select_item(root, item_type,    items, i, uri, name, score, best_score,
         if (item_type == "track" && censor && !flag_is(i, "explicit", "false")) continue
         name = normalize(field(i, "name"))
         if (name == "") continue
+        if (item_type == "playlist") {
+            # A fuzzy hit or two different playlists with the same name is unsafe to autoplay.
+            if (name != query || length(uri) != length("spotify:playlist:") + 22) continue
+            if (flag_is(i, "public", "false")) continue
+            if (best != "" && uri != best) return ""
+            best = uri
+            continue
+        }
         if (item_type == "track") score = score_track(i, name)
         else score = query != "" && query == name ? 2 : contains_words(name, query)
         if (score > best_score) {

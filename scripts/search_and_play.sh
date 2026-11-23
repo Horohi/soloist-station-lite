@@ -101,6 +101,11 @@ EXPLICIT_TYPE=0
 ARTIST=""
 ALLOW_GENERIC=0
 case "$TERM" in
+    "плейлист")
+        personal_error 'Missing playlist name' ;;
+    "плейлист "*)
+        [ "$RADIO" = 0 ] || personal_error 'Radio needs a track name'
+        TYPE="playlist"; EXPLICIT_TYPE=1; TERM="${TERM#* }" ;;
     "альбом "*)
         TYPE="album"; EXPLICIT_TYPE=1; TERM="${TERM#* }" ;;
     "группу "*|"группа "*|"исполнителя "*|"исполнитель "*|"артиста "*|"артист "*|"певца "*|"певицу "*)
@@ -149,6 +154,17 @@ if [ "$RADIO" = 0 ] && [ "$EXPLICIT_TYPE" = 0 ] &&
     TYPE="track"
     ALLOW_GENERIC=1
     echo "[search] Nothing was active, searching '$TERM'..." >> "$LOG"
+fi
+
+# The catalog search cannot guarantee the contents of a full context.
+CENSORSHIP=0
+if [ -f "$CENSOR_FILE" ]; then
+    CENSORSHIP=1
+    echo "[search] Censorship filter ACTIVE (filtering explicit tracks)" >> "$LOG"
+    case "$TYPE" in
+        playlist) personal_error 'Cannot filter explicit tracks in a playlist context' ;;
+        album|artist) personal_error 'Cannot filter explicit tracks in an album or artist context' ;;
+    esac
 fi
 
 # Spotify API Configuration
@@ -240,17 +256,6 @@ request_current || exit 0
 
 echo "[search] Querying Spotify API: term='$TERM', type='$TYPE'..." >> "$LOG"
 
-CENSORSHIP=0
-if [ -f "$CENSOR_FILE" ]; then
-    CENSORSHIP=1
-    echo "[search] Censorship filter ACTIVE (filtering explicit tracks)" >> "$LOG"
-fi
-
-# Album and artist contexts can contain explicit tracks that cannot be checked here.
-if [ "$CENSORSHIP" = 1 ] && [ "$TYPE" != track ]; then
-    personal_error 'Cannot filter explicit tracks in an album or artist context'
-fi
-
 MARKET=$(printf '%s' "${SPOTIFY_MARKET:-}" | LC_ALL=C tr '[:lower:]' '[:upper:]')
 case "$MARKET" in
     [A-Z][A-Z]) ;;
@@ -305,6 +310,7 @@ if [ -n "$URI" ]; then
     echo "[search] Found a catalog URI; checking current request before playback" >> "$LOG"
     request_dispatch play "$URI"
 else
+    [ "$TYPE" != playlist ] || personal_error 'Playlist name not found or ambiguous'
     echo "[search] No usable match; playback unchanged" >> "$LOG"
     exit 1
 fi

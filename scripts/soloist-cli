@@ -85,6 +85,7 @@ cmd_help() {
     printf "${BOLD}Команды управления:${NC}\n"
     printf "  ${CYAN}setup${NC}        Интерактивный мастер настройки ключей API, имени колонки и SNI-прокси\n"
     printf "  ${CYAN}status${NC}       Статус плеера, моста, памяти, подсветки и текущего трека\n"
+    printf "  ${CYAN}doctor${NC} [--offline]  Диагностика для отчёта об ошибке\n"
     printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|status]  Управление эквалайзером подсветки\n"
     printf "  ${CYAN}restart${NC}      Перезапустить службу Spotify и мост управления\n"
     printf "  ${CYAN}start${NC}        Запустить службу\n"
@@ -217,6 +218,119 @@ cmd_status() {
     df -h /data 2>/dev/null | awk 'NR<=2{printf "  %s\n", $0}' || true
 }
 
+doctor_has_key() {
+    [ -r "$1" ] || return 1
+    LC_ALL=C awk -v key="$2" '
+        $0 ~ "^[ \t]*" key "=" {
+            value = substr($0, index($0, "=") + 1)
+            if (value ~ /^"[^"]*"$/ || value ~ /^\047[^\047]*\047$/)
+                value = substr(value, 2, length(value) - 2)
+            present = value ~ /^[A-Za-z0-9_-]+$/ && value != "dummy"
+        }
+        END {exit !present}
+    ' "$1" 2>/dev/null
+}
+
+doctor_events() {
+    # Emit known events instead of the voice requests and other data in raw logs.
+    {
+        tail -n 120 /tmp/soloist-bridge.log 2>/dev/null || true
+        tail -n 120 /tmp/soloist-search.log 2>/dev/null || true
+        tail -n 120 "$DATA_ROOT/requests/control.log" 2>/dev/null || true
+    } | LC_ALL=C awk '
+        /^\[bridge\] Connected to Quasar on 127\.0\.0\.1:9875$/ {print "quasar_connected"}
+        /^\[bridge\] Connected to Quasar Volume state on 127\.0\.0\.1:9921$/ {print "quasar_volume_connected"}
+        /^\[bridge\] Quasar (socket error|connection closed), reconnecting\.\.\.$/ {print "quasar_reconnecting"}
+        /^\[bridge\] Alice TTS cancelled: ALSA SHM still present or inaccessible$/ {print "tts_waiting_for_alsa"}
+        /^\[bridge\] Action: PLAYLIST SEARCH$/ {print "playlist_request"}
+        /^\[bridge\] (Voice command triggered:|Action: SEARCH & PLAY query=)/ {print "voice_activity"}
+        /^\[search\] (Playlist name not found or ambiguous|No usable match); playback unchanged$/ {print "catalog_no_match"}
+        /^\[search\] Cannot filter explicit tracks in a (playlist context|album or artist context); playback unchanged$/ {print "catalog_censorship"}
+        /^\[search\] HTTP transport failed; playback unchanged$/ {print "spotify_transport_failed"}
+        /^\[search\] HTTP [1-5][0-9][0-9]; playback unchanged$/ {print "spotify_http_" substr($3, 1, 3)}
+        /^\[search\] Spotify cooldown active; request discarded$/ {print "spotify_rate_limited"}
+        /^\[control\] action=(play|pause|next|prev|toggle|seek|volume|repeat|shuffle|auto-next|auto-repeat|radio) stage=(admission|now|activate|selection|dispatch) status=[0-9][0-9]?[0-9]?$/ {
+            print "control_failure", $2, $3, $4
+        }
+    ' | tail -n 16
+}
+
+cmd_doctor() {
+    case "${1:-}" in
+        ""|--offline) ;;
+        *) printf 'Использование: soloist doctor [--offline]\n' >&2; return 2 ;;
+    esac
+    local model firmware version mode player bridge cards master shm hook api_config soloist_config http events
+    model=$(detect_station_model)
+    firmware=$(LC_ALL=C awk 'NR == 1 && $1 ~ /^[0-9]+(\.[0-9]+)+$/ {print $1}' \
+        /system/vendor/quasar/version_full 2>/dev/null || true)
+    if [ -z "$firmware" ] && command -v getprop >/dev/null 2>&1; then
+        firmware=$(getprop ro.build.version.incremental 2>/dev/null || true)
+        case "$firmware" in *[!0-9A-Za-z._+-]*) firmware="" ;; esac
+    fi
+    version=$(get_current_version)
+    case "$version" in *[!0-9vx.]*) version="" ;; esac
+    mode=Standalone
+    [ "$IS_YAM" = 0 ] || mode='YAM v2'
+    printf 'Soloist %s (%s)\n' "${version:-unknown}" "$mode"
+    printf 'Device: %s\nFirmware: %s\nKernel: %s %s\n' \
+        "$model" "${firmware:-unknown}" "$(uname -r)" "$(uname -m)"
+
+    player=$(find_live_pid soloist || true)
+    bridge=$(find_live_pid soloist-bridge || true)
+    if [ -n "$player" ]; then printf 'Soloist process: running\n'; else printf 'Soloist process: stopped\n'; fi
+    if [ -n "$bridge" ]; then printf 'Bridge process: running\n'; else printf 'Bridge process: stopped\n'; fi
+    soloist_config="$CONF_DIR/config.env"
+    [ "$IS_YAM" = 1 ] || soloist_config="$INSTALL_DIR/start.sh"
+    if doctor_has_key "$soloist_config" API_KEY; then
+        printf 'Soloist key: configured\n'
+    else
+        printf 'Soloist key: missing\n'
+    fi
+    api_config="$CONF_DIR/spotify_api.conf"
+    [ -f "$api_config" ] || api_config="$INSTALL_DIR/spotify_api.conf"
+    if doctor_has_key "$api_config" SPOTIFY_CLIENT_ID && doctor_has_key "$api_config" SPOTIFY_CLIENT_SECRET; then
+        printf 'Spotify Web API keys: configured\n'
+    else
+        printf 'Spotify Web API keys: missing\n'
+    fi
+    if [ "${1:-}" = --offline ]; then
+        printf 'Spotify API reachability: skipped\n'
+    elif http=$("$CURL_BIN" -q --noproxy '*' -sS -o /dev/null --connect-timeout 2 --max-time 4 \
+        -w '%{http_code}' 'https://api.spotify.com/v1/me' 2>/dev/null); then
+        case "$http" in
+            401|200) printf 'Spotify API reachability: reachable (HTTP %s without credentials)\n' "$http" ;;
+            [1-5][0-9][0-9]) printf 'Spotify API reachability: HTTP %s\n' "$http" ;;
+            *) printf 'Spotify API reachability: unknown\n' ;;
+        esac
+    else
+        printf 'Spotify API reachability: connection failed\n'
+    fi
+
+    cards=$(LC_ALL=C awk -F '[][]' 'NF >= 3 {id=$2; gsub(/[ \t]/,"",id); if (id ~ /^[A-Za-z0-9_-]+$/) print id}' \
+        /proc/asound/cards 2>/dev/null || true)
+    printf 'ALSA cards: %s\n' "${cards:-unavailable}"
+    master=$({
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 3 amixer get Master
+        elif command -v amixer >/dev/null 2>&1; then
+            amixer get Master
+        fi
+    } 2>/dev/null | LC_ALL=C awk '
+        /Playback [0-9]+ \[/ {for (i=1; i<=NF; i++) if ($i ~ /^\[[0-9]+%\]$/) printf "%s ", $i}
+    ')
+    printf 'ALSA Master: %s\n' "${master:-unavailable}"
+    shm=$(awk '$1 == 1024 && $4 ~ /^[0-9]+$/ {print $4; exit}' /proc/sysvipc/shm 2>/dev/null || true)
+    printf 'ALSA SHM 1024 bytes: %s\n' "${shm:-not observed}"
+    hook='not observed'
+    if [ -n "$player" ] && grep -q '/libsoloist_duck\.so$' "/proc/$player/maps" 2>/dev/null; then hook=loaded; fi
+    printf 'ALSA ducking hook: %s\n' "$hook"
+    if [ -e /tmp/soloist.yield ]; then printf 'ALSA yield marker: present\n'; else printf 'ALSA yield marker: absent\n'; fi
+
+    events=$(doctor_events)
+    printf 'Recent diagnostic events:\n%s\n' "${events:-none}"
+}
+
 cmd_led() {
     ACTION="${1:-status}"
     REQ_FILE="$DATA_ROOT/requests/led"
@@ -319,7 +433,7 @@ cmd_clean() {
     SPACE_BEFORE=$(df /data | awk 'NR==2 {print $4}')
 
     # 1. Clean installer leftover in /data/local/tmp
-    rm -rf /data/local/tmp/soloist* /data/local/tmp/*.tar.gz 2>/dev/null || true
+    rm -rf /data/local/tmp/soloist_update* /data/local/tmp/*.tar.gz 2>/dev/null || true
 
     # 2. Clean bloated logs in /tmp
     for l in /tmp/soloist.log /tmp/soloist-bridge.log /tmp/soloist-search.log; do
@@ -362,6 +476,11 @@ cmd_clean() {
 }
 
 cmd_update() {
+    if [ -x /system/bin/getprop ] &&
+       [ "$(/system/bin/getprop ro.product.device 2>/dev/null || true)" = yandexstation_2 ]; then
+        printf 'Для Станции Макс требуется обновление через её Android-комплект.\n' >&2
+        return 1
+    fi
     if [ "$IS_YAM" = 1 ]; then
         CURR=$(get_current_version)
         printf "${BOLD}Пакет установлен через YAM v2 (${CYAN}horohi/soloist${NC}${BOLD}, текущая версия: %s).${NC}\n" "$CURR"
@@ -469,7 +588,7 @@ cmd_update() {
     fi
 
     # Cleanup any old update debris
-    rm -rf /tmp/soloist_update* /data/local/tmp/soloist* 2>/dev/null || true
+    rm -rf /tmp/soloist_update* /data/local/tmp/soloist_update* 2>/dev/null || true
 
     # Ensure legacy standalone start.sh gets new runtime env & guard before restart
     [ ! -f "$INSTALL_DIR/scripts/migrate-standalone-guard.sh" ] || sh "$INSTALL_DIR/scripts/migrate-standalone-guard.sh" "$INSTALL_DIR" || true
@@ -852,6 +971,10 @@ case "${1:-}" in
         ;;
     status|st)
         cmd_status
+        ;;
+    doctor)
+        shift
+        cmd_doctor "$@"
         ;;
     led)
         shift

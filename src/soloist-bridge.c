@@ -1235,6 +1235,35 @@ static int str_has_word(const char *haystack, const char *needle) {
     return 0;
 }
 
+static const char *after_voice_word(const char *text, const char *word) {
+    unsigned long len = str_len(word);
+    if (str_len(text) < len || !mem_equal(text, word, len)) return 0;
+    text += len;
+    if (*text && *text != ' ' && *text != '\t') return 0;
+    while (*text == ' ' || *text == '\t') text++;
+    return text;
+}
+
+static int is_named_playlist_request(const char *text) {
+    static const char *const fillers[] = {"алиса,", "алиса", "пожалуйста", "давай"};
+    static const char *const verbs[] = {"включи", "поставь", "сыграй", "запусти", "найди", "вруби", "слушать"};
+    while (*text == ' ' || *text == '\t') text++;
+    for (;;) {
+        const char *rest = 0;
+        for (unsigned long i = 0; i < sizeof(fillers) / sizeof(fillers[0]); i++) {
+            rest = after_voice_word(text, fillers[i]);
+            if (rest) break;
+        }
+        if (!rest) break;
+        text = rest;
+    }
+    for (unsigned long i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
+        const char *rest = after_voice_word(text, verbs[i]);
+        if (rest) return after_voice_word(rest, "плейлист") != 0;
+    }
+    return 0;
+}
+
 /* "включи песню Назад в СССР" / "поставь группу Стоп" / "включи Кино" etc.: a play verb
  * means a catalog search, even if the title contains control words such as "назад",
  * "дальше", "стоп" or "пауза". */
@@ -1652,6 +1681,17 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     log_msg("[bridge] Voice command triggered: \"");
     log_msg(lower_buf);
     log_msg("\"\n");
+
+    // The words after an explicit playlist command belong to its title.
+    if (is_named_playlist_request(lower_buf)) {
+        if (str_contains(lower_buf, "в яндекс") || str_contains(lower_buf, "на яндекс") ||
+            str_contains(lower_buf, "из яндекс") || str_contains(lower_buf, "в я.музык")) return;
+        log_msg("[bridge] Action: PLAYLIST SEARCH\n");
+        trigger_alice_suppression(quasar_fd, 5000);
+        spotify_is_active = 1;
+        run_search_and_play(lower_buf);
+        return;
+    }
 
     if (is_web_or_culinary_intent(lower_buf)) {
         log_msg("[bridge] Web search or culinary intent, leaving for Alice / Quasar Bridge\n");

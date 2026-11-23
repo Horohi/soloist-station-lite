@@ -22,6 +22,7 @@ prefix = '''#include <stdint.h>
 
 static int g_led_state = -1; // -1=none, 0=off, 1=on
 static int g_suppressed = 0;
+static int g_searches = 0;
 static int spotify_is_active = 0;
 static void trigger_alice_suppression(int fd, int64_t ms) { (void)fd; (void)ms; g_suppressed++; }
 #define set_led_visualizer(enable) do { g_led_state = (enable); } while(0)
@@ -29,7 +30,7 @@ static void log_msg(const char *s) { (void)s; }
 static int is_explicit_search(const char *s) { (void)s; return 0; }
 static void run_soloist_cmd(const char *s) { (void)s; }
 static void run_soloist_cmd2(const char *s, const char *a) { (void)s; (void)a; }
-static void run_search_and_play(const char *s) { (void)s; }
+static void run_search_and_play(const char *s) { (void)s; g_searches++; }
 static const char *get_censor_path(void) { return "/tmp/censor"; }
 static int is_web_or_culinary_intent(const char *s) { (void)s; return 0; }
 static int is_yandex_music_preference(const char *s) { (void)s; return 0; }
@@ -106,6 +107,15 @@ int main(void) {
 
     g_led_state = -1; handle_voice_recognition(0, "выключи эквалайзер", 35);
     if (g_led_state != -1) return 18; // Ignored by LED because it contains "выключи"
+
+    // Playlist titles can contain words used by LED and household commands.
+    g_searches = 0;
+    const char *playlist = "алиса, давай включи плейлист погаси свет";
+    handle_voice_recognition(0, playlist, strlen(playlist));
+    if (g_searches != 1 || g_led_state != -1) return 19;
+    const char *yandex_playlist = "включи плейлист джаз в яндекс музыке";
+    handle_voice_recognition(0, yandex_playlist, strlen(yandex_playlist));
+    if (g_searches != 1) return 20;
 
     return 0;
 }

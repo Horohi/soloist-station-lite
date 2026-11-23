@@ -473,7 +473,8 @@ def test_standalone_update_download_failures():
             (app / directory).mkdir(parents=True)
         cli_text = (ROOT / "scripts/soloist-cli").read_text()
         cli_text = cli_text.replace("/data/opt/bin", str(tmp / "opt-bin"))
-        cli_text = cli_text.replace("/tmp/soloist_update* /data/local/tmp/soloist*", str(tmp / "update-debris-*"))
+        cli_text = cli_text.replace("/tmp/soloist_update* /data/local/tmp/soloist_update*", str(tmp / "update-debris-*"))
+        cli_text = cli_text.replace("/system/bin/getprop", str(tmp / "getprop"))
         cli = app / "bin/soloist-cli"
         cli.write_text(cli_text)
         (app / "version").write_text("v1.3.12\n")
@@ -486,6 +487,7 @@ def test_standalone_update_download_failures():
         (app / "start.sh").write_text(f'#!/bin/sh\ntouch "{tmp / "started"}"\n')
         curl = app / "bin/curl"
         curl.write_text('''#!/bin/sh
+[ -z "${TEST_GITHUB_CALLED:-}" ] || touch "$TEST_GITHUB_CALLED"
 case "$*" in
     *api.github.com*) printf '%s\\n' '  "tag_name": "v1.3.13",';;
     *)
@@ -520,6 +522,18 @@ esac
         def run_update(extra_env=None):
             return subprocess.run(["sh", str(cli), "update"], env={**env, **(extra_env or {})},
                                   capture_output=True, text=True, timeout=15)
+
+        getprop = tmp / "getprop"
+        getprop.write_text('#!/bin/sh\n[ "$1" = ro.product.device ] && printf "yandexstation_2\\n"\n')
+        getprop.chmod(0o755)
+        github_called = tmp / "github-called"
+        result = run_update({"TEST_GITHUB_CALLED": str(github_called)})
+        assert result.returncode != 0 and "Станции Макс" in result.stderr, result.stdout + result.stderr
+        assert not github_called.exists()
+        assert not (tmp / "stopped").exists() and not (tmp / "started").exists()
+        assert (app / "bin/soloist").read_text() == "old executable\n"
+        getprop.unlink()
+        print("PASS Max refuses the Linux updater before contacting GitHub or touching the service")
 
         for extra in ({"TEST_DOWNLOAD_FAIL": "1"}, {"TEST_ARCHIVE": str(tmp / "truncated.tar.gz")}):
             (tmp / "truncated.tar.gz").write_bytes(archive.read_bytes()[:-16])
@@ -735,6 +749,56 @@ nohup /data/opt/soloist/bin/soloist \\
         print("PASS standalone start.sh migration handles v1.0.0, v1.3.0 continuation, plum extvol, and custom scripts")
 
 
+def test_doctor_report():
+    with tempfile.TemporaryDirectory(prefix="soloist-doctor-") as temporary:
+        root = pathlib.Path(temporary)
+        (root / "bin").mkdir()
+        (root / "data/requests").mkdir(parents=True)
+        cli = root / "soloist-cli"
+        cli.write_text((ROOT / "scripts/soloist-cli").read_text()
+                       .replace("/tmp/soloist-bridge.log", str(root / "bridge.log"))
+                       .replace("/tmp/soloist-search.log", str(root / "search.log")))
+        (root / "version").write_text("v1.3.15\n")
+        (root / "start.sh").write_text('API_KEY="SECRET_SOLOIST"\n')
+        sentinel = root / "side-effect"
+        (root / "spotify_api.conf").write_text(
+            f"SPOTIFY_CLIENT_ID='SECRET_CLIENT'\nSPOTIFY_CLIENT_SECRET='SECRET_WEB'\ntouch '{sentinel}'\n")
+        (root / "bridge.log").write_text(
+            '[bridge] Voice command triggered: "SECRET_QUERY"\n'
+            "[bridge] Alice TTS cancelled: ALSA SHM still present or inaccessible\n")
+        (root / "search.log").write_text(
+            "[search] HTTP 403; playback unchanged\n[search] raw SECRET_TOKEN\n")
+        (root / "data/requests/control.log").write_text(
+            "[control] action=play stage=activate status=23\n"
+            "[control] action=play stage=private_marker status=23\n")
+        curl = root / "bin/curl"
+        curl.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "${0%/*}/../curl-args"\nprintf 401\n')
+        curl.chmod(0o755)
+        env = {**os.environ, "INSTALL_DIR": str(root)}
+
+        for flags in (["--offline"], []):
+            result = subprocess.run(["sh", str(cli), "doctor", *flags], env=env,
+                                    capture_output=True, text=True, timeout=7, check=True)
+            assert "Soloist v1.3.15 (Standalone)" in result.stdout, result.stdout
+            assert "Soloist key: configured" in result.stdout, result.stdout
+            assert "Spotify Web API keys: configured" in result.stdout, result.stdout
+            assert "voice_activity\ntts_waiting_for_alsa" in result.stdout, result.stdout
+            assert "spotify_http_403" in result.stdout, result.stdout
+            assert "control_failure action=play stage=activate status=23" in result.stdout, result.stdout
+            assert "SECRET_" not in result.stdout + result.stderr
+            assert "private_marker" not in result.stdout
+            assert not sentinel.exists(), "doctor executed configuration"
+            if flags:
+                assert "Spotify API reachability: skipped" in result.stdout
+                assert not (root / "curl-args").exists()
+            else:
+                assert "Spotify API reachability: reachable (HTTP 401 without credentials)" in result.stdout
+                args = (root / "curl-args").read_text().splitlines()
+                assert args[0] == "-q" and args[-1] == "https://api.spotify.com/v1/me"
+                assert not any("SECRET_" in arg or "Authorization" in arg for arg in args)
+        print("PASS doctor reports ALSA and Spotify diagnostics without exposing secrets or running configuration")
+
+
 if __name__ == "__main__":
     test_c_yam_paths()
     test_shell_yam_layout()
@@ -746,4 +810,5 @@ if __name__ == "__main__":
     test_alsa_card_name()
     test_plum_external_volume()
     test_standalone_start_migration()
+    test_doctor_report()
     print("ALL YAM V2 MODE TESTS PASSED!")

@@ -191,6 +191,40 @@ sh "$SEARCH" 'включи трек Rain' || true
 label='a valid track inside a malformed response is not played'
 check test ! -s "$TEST/controls"
 
+reset
+echo catalog > "$TEST/mode"
+cat > "$TEST/catalog.json" <<'EOF'
+{"playlists":{"items":[null,
+    {"name":"Вечерний джаз и блюз","uri":"spotify:playlist:CCCCCCCCCCCCCCCCCCCCCC"},
+    {"name":"ВЕЧЕРНИЙ ДЖАЗ","uri":"spotify:playlist:AAAAAAAAAAAAAAAAAAAAAA"},
+    {"name":"Вечерний джаз","uri":"spotify:playlist:AAAAAAAAAAAAAAAAAAAAAA"},
+    {"name":"Вечерний джаз","uri":"spotify:playlist:SHORT"}
+]}}
+EOF
+sh "$SEARCH" 'алиса, включи плейлист «Вечерний джаз»' || true
+label='named playlist uses a single exact public match and requests only playlists'
+check sh -c 'grep -q "play spotify:playlist:AAAAAAAAAAAAAAAAAAAAAA$" "$TEST/controls" &&
+    grep -q -- "--data-urlencode type=playlist --data-urlencode limit=10" "$TEST/calls"'
+
+for mode in ambiguous no-exact; do
+    reset
+    echo catalog > "$TEST/mode"
+    case "$mode" in
+        ambiguous) title='Вечерний джаз' ;;
+        no-exact) title='Вечерний джаз и блюз' ;;
+    esac
+    printf '%s\n' '{"playlists":{"items":[{"name":"'"$title"'","uri":"spotify:playlist:AAAAAAAAAAAAAAAAAAAAAA"},{"name":"'"$title"'","uri":"spotify:playlist:BBBBBBBBBBBBBBBBBBBBBB"}]},"tracks":{"items":[{"name":"Вечерний джаз","uri":"spotify:track:OTHER"}]}}' > "$TEST/catalog.json"
+    sh "$SEARCH" 'включи плейлист Вечерний джаз' || true
+    label="$mode playlist does not change playback or fall back to another type"
+    check sh -c '[ ! -s "$TEST/controls" ] && [ "$(grep -c "api.spotify.com/v1/search" "$TEST/calls")" = 1 ]'
+done
+
+reset
+touch "$TEST/app/data/censorship"
+sh "$SEARCH" 'включи плейлист Вечерний джаз' || true
+label='censorship blocks named playlist before any catalog request'
+check sh -c '[ ! -s "$TEST/controls" ] && [ ! -s "$TEST/calls" ]'
+
 for action in pause next prev toggle; do
     reset
     touch "$TEST/delay"
