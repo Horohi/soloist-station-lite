@@ -1339,6 +1339,7 @@ static int is_explicit_search(const char *lower) {
 
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify Connect device
+static int yandex_music_active = 0;      // 1 = user handed playback to Yandex Music / Radio
 static int repeat_mode = 0; // 0=off, 1=context, 2=track
 static char current_track_uri[128] = {0};
 static char current_track_name[128] = {0};
@@ -1545,6 +1546,7 @@ static void handle_soloist_ws_json(const char *json) {
             playback_status = 1;
             playback_speed = 1;
             spotify_is_active = spotify_device_is_active;
+            if (spotify_device_is_active) yandex_music_active = 0;
         } else if (str_equal(status_str, "paused")) {
             playback_status = 2;
             playback_speed = 0;
@@ -1738,9 +1740,17 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     // The words after an explicit playlist command belong to its title.
     if (is_named_playlist_request(lower_buf)) {
         if (str_contains(lower_buf, "в яндекс") || str_contains(lower_buf, "на яндекс") ||
-            str_contains(lower_buf, "из яндекс") || str_contains(lower_buf, "в я.музык")) return;
+            str_contains(lower_buf, "из яндекс") || str_contains(lower_buf, "в я.музык")) {
+            yandex_music_active = 1;
+            spotify_is_active = 0;
+            if (playback_status == 1 || playback_status == 3) {
+                run_soloist_cmd("pause");
+            }
+            return;
+        }
         log_msg("[bridge] Action: PLAYLIST SEARCH\n");
         trigger_alice_suppression(quasar_fd, 5000);
+        yandex_music_active = 0;
         spotify_is_active = 1;
         run_search_and_play(lower_buf);
         return;
@@ -1753,11 +1763,16 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 
     if (is_yandex_music_preference(lower_buf)) {
         log_msg("[bridge] Yandex Music/Radio preference requested, leaving to native Alice\n");
+        yandex_music_active = 1;
+        spotify_is_active = 0;
+        if (playback_status == 1 || playback_status == 3) {
+            run_soloist_cmd("pause");
+        }
         return;
     }
 
     // Check "что играет" / track info query (only when not an explicit search like "включи песню ...")
-    if (!is_explicit_search(lower_buf) &&
+    if (!yandex_music_active && !is_explicit_search(lower_buf) &&
         (str_contains(lower_buf, "что играет") ||
          str_contains(lower_buf, "что сейчас играет") ||
          str_contains(lower_buf, "что играет сейчас") ||
@@ -1841,7 +1856,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         // Music playlist likewise skips a Spotify track instead. Events from
         // another device of the same account arrive with is_active=false, so
         // this also stops a phone or car from steering the speaker.
-        if (spotify_is_active || spotify_device_is_active) {
+        if (!yandex_music_active && (spotify_is_active || spotify_device_is_active)) {
             if (((spotify_device_is_active && (playback_status == 1 || playback_status == 3)) || spotify_is_active) &&
                 (str_contains(lower_buf, "пауз") ||
                  str_contains(lower_buf, "стоп") ||
@@ -1939,6 +1954,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             (str_contains(lower_buf, "включи") && str_contains(lower_buf, "музык"))) {
             log_msg("[bridge] Action: RESUME\n");
             trigger_alice_suppression(quasar_fd, 2500);
+            yandex_music_active = 0;
             spotify_is_active = 1;
             run_search_and_play("включи музыку");
             return;
@@ -2043,6 +2059,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         }
 
         trigger_alice_suppression(quasar_fd, 5000);
+        yandex_music_active = 0;
         spotify_is_active = 1;
 
         log_msg("[bridge] Action: SEARCH & PLAY query='");
@@ -3165,14 +3182,22 @@ void _start(void) {
                                         uint64_t m_id = 0;
                                         if (find_field(method_body, method_len, 1, 0, 0, 0, &m_id)) {
                                             log_msg("[bridge] Gesture PlaybackControlCapability received\n");
-                                            if (m_id == 1) { // PAUSE
-                                                handle_voice_recognition(quasar_fd, "пауза", 10);
-                                            } else if (m_id == 2) { // PLAY / RESUME
-                                                handle_voice_recognition(quasar_fd, "играй", 10);
-                                            } else if (m_id == 3) { // NEXT
-                                                handle_voice_recognition(quasar_fd, "дальше", 12);
-                                            } else if (m_id == 4) { // PREV
-                                                handle_voice_recognition(quasar_fd, "назад", 10);
+                                            if (!yandex_music_active) {
+                                                if (m_id == 0) { // PLAY
+                                                    handle_voice_recognition(quasar_fd, "играй", 10);
+                                                } else if (m_id == 1) { // PAUSE
+                                                    handle_voice_recognition(quasar_fd, "пауза", 10);
+                                                } else if (m_id == 2) { // TOGGLE_PLAY_PAUSE
+                                                    if (playback_status == 1) {
+                                                        handle_voice_recognition(quasar_fd, "пауза", 10);
+                                                    } else {
+                                                        handle_voice_recognition(quasar_fd, "играй", 10);
+                                                    }
+                                                } else if (m_id == 6) { // NEXT
+                                                    handle_voice_recognition(quasar_fd, "дальше", 12);
+                                                } else if (m_id == 7) { // PREV
+                                                    handle_voice_recognition(quasar_fd, "назад", 10);
+                                                }
                                             }
                                         }
                                     }

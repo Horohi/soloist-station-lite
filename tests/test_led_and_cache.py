@@ -25,6 +25,7 @@ static int g_suppressed = 0;
 static int g_searches = 0;
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0;
+static int yandex_music_active = 0;
 static void trigger_alice_suppression(int fd, int64_t ms) { (void)fd; (void)ms; g_suppressed++; }
 #define set_led_visualizer(enable) do { g_led_state = (enable); } while(0)
 static void log_msg(const char *s) { (void)s; }

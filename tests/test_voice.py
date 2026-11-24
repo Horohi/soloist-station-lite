@@ -167,7 +167,7 @@ static void clear_calls(void) {
     command_calls = search_calls = resume_calls = suppressed_calls = 0; command[0] = 0;
 }
 static void reset_media(void) {
-    spotify_is_active = spotify_device_is_active = playback_status = 0;
+    spotify_is_active = spotify_device_is_active = yandex_music_active = playback_status = 0;
     touch_down_start = touch_is_down = 0; last_touch_release_time = 0;
     censor_on_calls = censor_off_calls = 0;
     clear_calls();
@@ -277,6 +277,47 @@ int main(void) {
     cache_calls = 0; handle_soloist_ws_json("{\"status\":\"stopped\"}");
     check(playback_status == 0 && spotify_is_active == 0 && cache_calls == 1 && last_cache_clean_ms == mock_now,
           "stopped WS retains full cache cleanup");
+
+    // Issue #33: handing playback to Yandex Music yields NEXT/PREV/SHUFFLE/REPEAT/"что играет" even if Spotify stayed active/paused.
+    reset_media();
+    handle_soloist_ws_json("{\"status\":\"paused\",\"is_active\":true}");
+    voice("включи яндекс музыку");
+    check(yandex_music_active == 1 && spotify_is_active == 0 && passed_to_alice(),
+          "paused Spotify leaves Yandex Music request to Alice and marks Yandex Music active");
+    const char *ym_pass[] = {"дальше", "назад", "перемешай", "повторяй", "что играет"};
+    for (unsigned i = 0; i < sizeof(ym_pass) / sizeof(ym_pass[0]); i++) {
+        clear_calls(); voice(ym_pass[i]);
+        check(passed_to_alice(), "active Yandex Music passes media/info command to Alice");
+    }
+
+    reset_media();
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    voice("включи яндекс музыку");
+    check(yandex_music_active == 1 && spotify_is_active == 0 && command_calls == 1 &&
+          !strcmp(command, "pause") && suppressed_calls == 0,
+          "playing Spotify pauses cleanly without suppressing Alice when switching to Yandex Music");
+    clear_calls(); voice("дальше");
+    check(passed_to_alice(), "дальше after Yandex Music handoff reaches Alice");
+
+    reset_media();
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    voice("включи плейлист утренний в яндекс музыке");
+    check(yandex_music_active == 1 && spotify_is_active == 0 && command_calls == 1 &&
+          !strcmp(command, "pause") && suppressed_calls == 0,
+          "Yandex playlist handoff pauses playing Spotify without suppressing Alice");
+
+    clear_calls(); voice("включи музыку");
+    check(yandex_music_active == 0 && resume_calls == 1 && suppressed_calls == 1,
+          "explicit Spotify resume clears yandex_music_active");
+    clear_calls();
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    yandex_music_active = 1;
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    check(yandex_music_active == 0, "active Spotify WS playback clears yandex_music_active");
+    clear_calls(); voice("дальше");
+    check(command_calls == 1 && !strcmp(command, "next") && suppressed_calls == 1,
+          "дальше controls Spotify again once Spotify resumes");
+
     return failures ? 1 : 0;
 }
 '''
