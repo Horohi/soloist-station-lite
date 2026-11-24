@@ -1978,36 +1978,66 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         str_contains(lower_buf, "вруби") ||
         str_contains(lower_buf, "слушать")) {
 
-        // Ignore household smart home commands (word-aware: short tokens must be whole words)
-        if (str_has_word_prefix(lower_buf, "свет") ||
-            str_has_word_prefix(lower_buf, "ламп") ||
-            str_has_word_prefix(lower_buf, "люстр") ||
-            str_has_word_prefix(lower_buf, "розетк") ||
-            str_has_word_prefix(lower_buf, "ночник") ||
-            str_has_word_prefix(lower_buf, "подсветк") ||
-            str_has_word(lower_buf, "бра") ||
-            str_has_word_prefix(lower_buf, "торшер") ||
-            str_has_word_prefix(lower_buf, "гирлянд") ||
-            str_has_word_prefix(lower_buf, "чайник") ||
-            str_has_word_prefix(lower_buf, "пылесос") ||
-            str_has_word_prefix(lower_buf, "кондиционер") ||
-            str_has_word_prefix(lower_buf, "телевизор") ||
-            str_has_word(lower_buf, "тв") ||
-            str_has_word_prefix(lower_buf, "таймер") ||
-            str_has_word_prefix(lower_buf, "будильник") ||
-            str_has_word_prefix(lower_buf, "блютуз") ||
-            str_has_word_prefix(lower_buf, "bluetooth") ||
-            str_has_word_prefix(lower_buf, "увлажнител") ||
-            str_has_word_prefix(lower_buf, "очистител") ||
-            str_has_word_prefix(lower_buf, "обогревател") ||
-            str_has_word_prefix(lower_buf, "вентилятор") ||
-            str_has_word_prefix(lower_buf, "робот") ||
-            str_has_word_prefix(lower_buf, "кофеварк") ||
-            str_has_word_prefix(lower_buf, "кофемашин") ||
-            str_has_word_prefix(lower_buf, "карниз") ||
-            str_has_word_prefix(lower_buf, "штор") ||
-            str_has_word_prefix(lower_buf, "выключател") ||
-            str_has_word_prefix(lower_buf, "реле")) {
+        // Explicit media-type/service markers keep track/artist names containing
+        // smart-home words (e.g. "включи трек светофор") routed to Spotify, while
+        // excluding generic "музык" so "поставь будильник с музыкой" stays with Alice.
+        int has_explicit_media =
+            str_has_word_prefix(lower_buf, "песн") ||
+            str_has_word_prefix(lower_buf, "трек") ||
+            str_has_word_prefix(lower_buf, "альбом") ||
+            str_has_word_prefix(lower_buf, "групп") ||
+            str_has_word_prefix(lower_buf, "исполнител") ||
+            str_has_word_prefix(lower_buf, "артист") ||
+            str_contains(lower_buf, "спотифай") ||
+            str_contains(lower_buf, "spotify");
+
+        // Ignore household smart home commands (word-aware: narrow nouns + safe prefixes
+        // so unrelated titles like "светофор", "шторм", or "лампасы" are not dropped).
+        if (!has_explicit_media &&
+            (str_has_word(lower_buf, "свет") ||
+             str_has_word(lower_buf, "света") ||
+             str_has_word(lower_buf, "свету") ||
+             str_has_word(lower_buf, "светом") ||
+             str_has_word(lower_buf, "свете") ||
+             str_has_word_prefix(lower_buf, "светильник") ||
+             str_has_word(lower_buf, "лампа") ||
+             str_has_word(lower_buf, "лампу") ||
+             str_has_word(lower_buf, "лампы") ||
+             str_has_word(lower_buf, "лампочку") ||
+             str_has_word(lower_buf, "лампочки") ||
+             str_has_word(lower_buf, "лампочка") ||
+             str_has_word_prefix(lower_buf, "люстр") ||
+             str_has_word_prefix(lower_buf, "розетк") ||
+             str_has_word_prefix(lower_buf, "ночник") ||
+             str_has_word_prefix(lower_buf, "подсветк") ||
+             str_has_word(lower_buf, "бра") ||
+             str_has_word_prefix(lower_buf, "торшер") ||
+             str_has_word_prefix(lower_buf, "гирлянд") ||
+             str_has_word_prefix(lower_buf, "чайник") ||
+             str_has_word_prefix(lower_buf, "пылесос") ||
+             str_has_word_prefix(lower_buf, "кондиционер") ||
+             str_has_word_prefix(lower_buf, "телевизор") ||
+             str_has_word(lower_buf, "тв") ||
+             str_has_word_prefix(lower_buf, "таймер") ||
+             str_has_word_prefix(lower_buf, "будильник") ||
+             str_has_word_prefix(lower_buf, "блютуз") ||
+             str_has_word_prefix(lower_buf, "bluetooth") ||
+             str_has_word_prefix(lower_buf, "увлажнител") ||
+             str_has_word_prefix(lower_buf, "очистител") ||
+             str_has_word_prefix(lower_buf, "обогревател") ||
+             str_has_word_prefix(lower_buf, "вентилятор") ||
+             str_has_word_prefix(lower_buf, "робот") ||
+             str_has_word_prefix(lower_buf, "кофеварк") ||
+             str_has_word_prefix(lower_buf, "кофемашин") ||
+             str_has_word_prefix(lower_buf, "карниз") ||
+             str_has_word(lower_buf, "шторы") ||
+             str_has_word(lower_buf, "штору") ||
+             str_has_word(lower_buf, "штора") ||
+             str_has_word(lower_buf, "шторку") ||
+             str_has_word(lower_buf, "шторки") ||
+             str_has_word(lower_buf, "шторка") ||
+             str_has_word_prefix(lower_buf, "выключател") ||
+             str_has_word(lower_buf, "реле"))) {
             log_msg("[bridge] Household smart command, ignoring\n");
             return;
         }

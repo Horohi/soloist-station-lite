@@ -118,6 +118,36 @@ int main(void) {
     handle_voice_recognition(0, yandex_playlist, strlen(yandex_playlist));
     if (g_searches != 1) return 20;
 
+    // Russian tracks sharing prefixes with smart-home nouns must reach Spotify search,
+    // including explicit media requests containing exact smart-home nouns.
+    const char *music_ok[] = {
+        "включи трек светофор",
+        "включи светофор",
+        "включи шторм",
+        "включи песню свет",
+        "включи группу лампасы",
+    };
+    int expected_searches = 1;
+    for (unsigned i = 0; i < sizeof(music_ok) / sizeof(music_ok[0]); i++) {
+        handle_voice_recognition(0, music_ok[i], strlen(music_ok[i]));
+        expected_searches++;
+        if (g_searches != expected_searches) return 21 + (int)i;
+    }
+
+    // Actual smart-home commands and musical alarms must stay ignored for Alice.
+    const char *smart_home[] = {
+        "включи свет",
+        "включи свет на кухне",
+        "включи светильник",
+        "включи шторы",
+        "включи лампу",
+        "поставь будильник с музыкой",
+    };
+    for (unsigned i = 0; i < sizeof(smart_home) / sizeof(smart_home[0]); i++) {
+        handle_voice_recognition(0, smart_home[i], strlen(smart_home[i]));
+        if (g_searches != expected_searches) return 30 + (int)i;
+    }
+
     return 0;
 }
 '''

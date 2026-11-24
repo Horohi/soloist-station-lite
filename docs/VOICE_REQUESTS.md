@@ -16,21 +16,21 @@ as “включи песню любимые треки” remains a normal titl
 
 ### Configure Liked Songs once
 
-Use Spotify to start your **Liked Songs** on this Soloist device. Inspect the
-local player state:
+Spotify does not provide a shareable link for **Liked Songs** that can start
+playback from scratch. To use commands like «Алиса, включи любимые треки» or
+«избранное» from any state, **create a separate regular Spotify playlist** with
+your favorite tracks and save its link (`https://open.spotify.com/playlist/...`)
+or URI (`spotify:playlist:<22-char-id>`) in `soloist setup` (or write the URI to
+`/data/opt/soloist/data/favorites.uri` / `/data/yam/var/horohi.soloist/favorites.uri`
+and protect it with `chmod 600`).
 
-```sh
-LD_LIBRARY_PATH=/data/opt/soloist/lib64 /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 now --json
-```
-
-Confirm that `context.decorations.identity.name` identifies Liked Songs, then
-copy **context.uri**, not `item.uri`, into
-`/data/opt/soloist/data/favorites.uri`. The file must contain only that
-`spotify:playlist:` URI with its 22-character alphanumeric ID and an optional
-trailing newline. Keep it private with `chmod 600` and use the same Spotify
-account. No URI is bundled in the repository. Re-capture it after switching
-accounts. This reuses Soloist's account-specific collection context; it does not
-copy or synchronize saved tracks into a new playlist.
+Spotify only exposes Liked Songs internally as `spotify:user:<account>:collection`
+(inspectable via `LD_LIBRARY_PATH=/data/opt/soloist/lib64 /data/opt/soloist/bin/soloist ctl -w 127.0.0.1:9090 now --json`
+while Liked Songs is already playing — check `context.decorations.identity.name`
+and `context.uri`, not `item.uri`). However, that collection URI can only resume
+an already-loaded Liked Songs queue on the speaker; it cannot cold-start Liked
+Songs from another playback context. For reliable playback by voice, use a
+separate regular playlist instead. Capture a fresh URI if switching accounts.
 
 Missing, empty, oversized or invalid configuration fails without a catalog
 lookup or changing playback. This avoids playing an unrelated song titled

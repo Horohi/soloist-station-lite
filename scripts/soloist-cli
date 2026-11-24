@@ -625,9 +625,19 @@ detect_station_model() {
     esac
 }
 
-normalize_playlist_uri() {
+normalize_favorites_uri() {
     _raw=$(trim_ws "$1")
     case "$_raw" in
+        spotify:user:*:collection)
+            _user=${_raw#spotify:user:}
+            _user=${_user%:collection}
+            case "$_user" in
+                ''|*[!A-Za-z0-9._-]*) return 1;;
+            esac
+            [ "${#_raw}" -le 127 ] || return 1
+            printf '%s\n' "$_raw"
+            return
+            ;;
         spotify:playlist:*)
             _pid="${_raw#spotify:playlist:}"
             _pid="${_pid%%\?*}"
@@ -832,9 +842,10 @@ cmd_setup() {
     fi
     printf "\n"
 
-    # 4. Liked Songs playlist URI
-    printf "${BOLD}4. Плейлист «Любимые треки» / «Мне нравится» (опционально)${NC}\n"
-    printf "   Можно вставить ссылку https://open.spotify.com/playlist/... или URI spotify:playlist:...\n"
+    # 4. Favorites playlist URI
+    printf "${BOLD}4. Плейлист для «Любимые треки» / «Мне нравится» (опционально)${NC}\n"
+    printf "   У Spotify нет прямой ссылки на раздел «Любимые треки» для запуска с нуля.\n"
+    printf "   Создайте отдельный обычный плейлист в Spotify и вставьте ссылку на него (open.spotify.com/playlist/...) или spotify:playlist:...\n"
     NEW_FAV="$CURR_FAV"
     while true; do
         if [ -n "$CURR_FAV" ]; then
@@ -850,7 +861,7 @@ cmd_setup() {
         elif [ "$_in_fav" = "clear" ] || [ "$_in_fav" = "-" ]; then
             NEW_FAV=""
             break
-        elif _norm=$(normalize_playlist_uri "$_in_fav"); then
+        elif _norm=$(normalize_favorites_uri "$_in_fav"); then
             NEW_FAV="$_norm"
             break
         else
@@ -858,7 +869,7 @@ cmd_setup() {
                 printf "\n${RED}Ошибка: некорректный URI плейлиста (EOF).${NC}\n" >&2
                 exit 1
             fi
-            printf "${RED}   Не удалось распознать playlist URI/ссылку (нужен 22-символьный ID).${NC}\n"
+            printf "${RED}   Не удалось распознать URI избранного или ссылку на плейлист.${NC}\n"
         fi
     done
     printf "\n"
