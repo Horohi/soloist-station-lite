@@ -669,6 +669,16 @@ def test_plum_external_volume():
                     capture_output=True, text=True, check=True,
                 )
                 assert res.stdout == expected, (idx, compat_val, res.stdout, res.stderr)
+        service_lines = (ROOT / "scripts/soloist-service.sh").read_text().splitlines()
+        s_start = next(i for i, line in enumerate(service_lines) if line.startswith("CARD_NAME="))
+        s_end = next(i for i, line in enumerate(service_lines[s_start:], s_start) if line.startswith("export APULSE_DIAG=")) + 1
+        service_frag = ('COMPAT="yandex,micro"\nAPULSE_EXTERNAL_VOLUME=0\n' +
+                        "\n".join(service_lines[s_start:s_end]).replace("/proc/asound/cards", str(cards)))
+        override_res = subprocess.run(
+            ["sh", "-c", service_frag + '\nprintf "%s:%s" "$APULSE_PLAYBACK_DEVICE" "$APULSE_EXTERNAL_VOLUME"'],
+            capture_output=True, text=True, check=True,
+        )
+        assert override_res.stdout == "plug:default:0", (override_res.stdout, override_res.stderr)
         print("PASS plum uses sysdefault with APULSE_EXTERNAL_VOLUME=0 and non-plum keeps external volume")
 
 

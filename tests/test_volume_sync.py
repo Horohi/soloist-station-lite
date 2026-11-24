@@ -39,6 +39,7 @@ prefix = r"""
 
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0;
+static int quasar_uses_f252 = -1;
 static int mem_equal(const void *a, const void *b, unsigned long n) { return memcmp(a, b, n) == 0; }
 static int64_t mock_now = 10000;
 static int64_t now_ms(void) { return mock_now; }
@@ -98,6 +99,7 @@ static uint32_t f_to_u32(float f) {
 }
 
 static void reset_vol_state(void) {
+    quasar_uses_f252 = -1;
     quasar_vol = -1;
     quasar_vol_known = 0;
     last_quasar_reported_vol = -1;
@@ -111,6 +113,10 @@ static void reset_vol_state(void) {
     last_sent_to_soloist_vol = -1;
     last_sent_to_soloist_ms = 0;
     last_user_ws_vol_ms = 0;
+    vol_verify_target = -1;
+    vol_verify_prev_qvol = -1;
+    vol_verify_sent_ms = 0;
+    quasar_vol_fallback_amixer = 0;
 }
 
 int main(void) {
@@ -148,8 +154,8 @@ int main(void) {
         0x38, 0x01      // field 7 (source = 1 Button)
     };
     int qvol = -1; uint64_t qsrc = 999;
-    CHECK(parse_quasar_vol_frame(sp_frame, sizeof(sp_frame), &qvol, &qsrc) == 1 && qvol == 25 && qsrc == 1,
-          "parse_quasar_vol_frame direct field 198");
+    CHECK(parse_quasar_vol_frame(sp_frame, sizeof(sp_frame), &qvol, &qsrc) == 1 && qvol == 25 && qsrc == 1 && quasar_uses_f252 == 0,
+          "parse_quasar_vol_frame direct field 198 sets quasar_uses_f252=0");
 
     sp_frame[8] = 0x01; // is_muted = 1
     CHECK(parse_quasar_vol_frame(sp_frame, sizeof(sp_frame), &qvol, &qsrc) == 1 && qvol == 0,
@@ -163,24 +169,47 @@ int main(void) {
         0x38, 0x00,
         0xe8, 0x0f, 0xc6, 0x01 // field 253 = 198
     };
-    CHECK(parse_quasar_vol_frame(sp_wrapped_ok, sizeof(sp_wrapped_ok), &qvol, &qsrc) == 1 && qvol == 25 && qsrc == 0,
-          "parse_quasar_vol_frame SharedMessage 252/253");
+    CHECK(parse_quasar_vol_frame(sp_wrapped_ok, sizeof(sp_wrapped_ok), &qvol, &qsrc) == 1 && qvol == 25 && qsrc == 0 && quasar_uses_f252 == 1,
+          "parse_quasar_vol_frame SharedMessage 252/253 sets quasar_uses_f252=1");
 
     uint8_t sp_unrelated[] = { 0xb2, 0x0c, 4, 0x0a, 2, 0x08, 0x01 };
     CHECK(parse_quasar_vol_frame(sp_unrelated, sizeof(sp_unrelated), &qvol, &qsrc) == 0,
           "parse_quasar_vol_frame ignores StereoPair frame without VolumeManager.State");
 
-    // 3. send_quasar_volume binary wire packet check
+    // 3. send_quasar_volume binary wire packet checks (direct 88, SharedMessage 252/253=88, unknown dual-frame)
     int pfd[2];
-    pipe(pfd);
-    CHECK(send_quasar_volume(pfd[1], 35) == 0, "send_quasar_volume writes packet");
-    uint8_t qpkt[64] = {0};
-    ssize_t qn = read(pfd[0], qpkt, sizeof(qpkt));
     uint32_t b35 = int_to_f32_bits(35);
+    pipe(pfd);
+    quasar_uses_f252 = 0;
+    CHECK(send_quasar_volume(pfd[1], 35) == 0, "send_quasar_volume writes direct field 88 packet");
+    uint8_t qpkt[128] = {0};
+    ssize_t qn = read(pfd[0], qpkt, sizeof(qpkt));
     CHECK(qn == 57 && qpkt[0] == 53 && qpkt[4] == 0xc2 && qpkt[5] == 0x05 &&
           qpkt[47] == 0x0d && memcmp(qpkt + 48, &b35, 4) == 0 &&
           qpkt[54] == 0x18 && qpkt[55] == 0xe8 && qpkt[56] == 0x07,
-          "send_quasar_volume wire format matches IOControlCommand ExternalDirectives volume_set 35% ESourceOther");
+          "send_quasar_volume direct wire format matches IOControlCommand volume_set 35%");
+    close(pfd[0]); close(pfd[1]);
+
+    pipe(pfd);
+    quasar_uses_f252 = 1;
+    CHECK(send_quasar_volume(pfd[1], 35) == 0, "send_quasar_volume writes SharedMessage 252/253 packet");
+    memset(qpkt, 0, sizeof(qpkt));
+    qn = read(pfd[0], qpkt, sizeof(qpkt));
+    CHECK(qn == 60 && qpkt[0] == 56 && qpkt[4] == 0xe2 && qpkt[5] == 0x0f && qpkt[6] == 50 &&
+          qpkt[47] == 0x0d && memcmp(qpkt + 48, &b35, 4) == 0 &&
+          qpkt[57] == 0xe8 && qpkt[58] == 0x0f && qpkt[59] == 0x58,
+          "send_quasar_volume SharedMessage 252/253=88 wire format matches 60B IOControlCommand");
+    close(pfd[0]); close(pfd[1]);
+
+    pipe(pfd);
+    quasar_uses_f252 = -1;
+    CHECK(send_quasar_volume(pfd[1], 35) == 0, "send_quasar_volume writes dual-frame when schema unknown");
+    memset(qpkt, 0, sizeof(qpkt));
+    qn = read(pfd[0], qpkt, sizeof(qpkt));
+    CHECK(qn == 117 && qpkt[0] == 53 && qpkt[4] == 0xc2 && qpkt[5] == 0x05 &&
+          qpkt[57] == 56 && qpkt[61] == 0xe2 && qpkt[62] == 0x0f &&
+          qpkt[114] == 0xe8 && qpkt[115] == 0x0f && qpkt[116] == 0x58,
+          "send_quasar_volume unknown schema emits 57B direct + 60B SharedMessage");
     close(pfd[0]); close(pfd[1]);
 
     // 4. send_soloist_ws_volume masked WebSocket text frame
@@ -259,6 +288,31 @@ int main(void) {
     on_quasar_volume_state(60, 1000, mock_now);
     CHECK(need_soloist_vol_sync == 1 && quasar_vol == 60,
           "External Yandex App change (source=1000 after echo window) syncs to Soloist");
+
+    // 10. 9921 confirmation watchdog and amixer fallback
+    reset_vol_state();
+    quasar_vol_known = 1;
+    quasar_vol = 20;
+    last_quasar_reported_vol = 20;
+    vol_verify_target = 50;
+    vol_verify_prev_qvol = 20;
+    vol_verify_sent_ms = 30000;
+    int fb_target = -1;
+    CHECK(check_quasar_vol_fallback(30899, &fb_target) == 0 && quasar_vol_fallback_amixer == 0,
+          "Watchdog does not trigger amixer fallback before 900ms");
+    CHECK(check_quasar_vol_fallback(30900, &fb_target) == 1 && fb_target == 50 &&
+          quasar_vol_fallback_amixer == 1 && vol_verify_target == -1,
+          "Watchdog triggers amixer fallback at 900ms with target=50");
+    on_quasar_volume_state(30, 1, 31500);
+    CHECK(quasar_vol_fallback_amixer == 1,
+          "Unrelated hardware button change preserves amixer fallback latch");
+    vol_verify_target = 60;
+    vol_verify_prev_qvol = 30;
+    vol_verify_sent_ms = 32000;
+    on_quasar_volume_state(60, 1000, 32100);
+    CHECK(vol_verify_target == -1 && quasar_vol_fallback_amixer == 0 &&
+          check_quasar_vol_fallback(34000, &fb_target) == 0,
+          "Confirmed 9921 update clears verification timer and amixer fallback");
 
     return fails ? 1 : 0;
 }

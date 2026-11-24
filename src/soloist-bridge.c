@@ -685,11 +685,13 @@ static int parse_quasar_vol_frame(const uint8_t *frame, unsigned long frame_len,
     const uint8_t *sp_body = 0;
     unsigned long sp_len = 0;
     uint64_t msg_type = 0;
-    if (!find_field(frame, frame_len, 198, 2, &sp_body, &sp_len, 0)) {
-        if (!find_field(frame, frame_len, 253, 0, 0, 0, &msg_type) || msg_type != 198 ||
-            !find_field(frame, frame_len, 252, 2, &sp_body, &sp_len, 0)) {
-            return 0;
-        }
+    if (find_field(frame, frame_len, 198, 2, &sp_body, &sp_len, 0)) {
+        quasar_uses_f252 = 0;
+    } else if (find_field(frame, frame_len, 253, 0, 0, 0, &msg_type) && msg_type == 198 &&
+               find_field(frame, frame_len, 252, 2, &sp_body, &sp_len, 0)) {
+        quasar_uses_f252 = 1;
+    } else {
+        return 0;
     }
     const uint8_t *state_body = 0;
     unsigned long state_len = 0;
@@ -723,10 +725,10 @@ static int send_quasar_volume(int io_fd, int vol_pct) {
     uint32_t fbits = int_to_f32_bits(vol_pct);
 
     // PayloadRaw = TVolumeSetDirective { 1: float PercentLevel, 2: Mode=0, 3: Source=1000 }
-    // Wrapped inside TDirective -> DirectiveList -> ExternalDirectives -> IOControlCommand(95) -> QuasarMessage(88)
-    uint8_t frame[57] = {
-        53, 0x00, 0x00, 0x00, // frame length = 53 bytes
-        0xc2, 0x05, 50,       // QuasarMessage field 88 (io_control), len 50
+    // Wrapped inside TDirective -> DirectiveList -> ExternalDirectives -> IOControlCommand(95) -> QuasarMessage(88) or SharedMessage(252/253=88)
+    uint8_t frame[60] = {
+        53, 0x00, 0x00, 0x00, // [0..3] frame length LE (53 for field 88, 56 for field 252/253)
+        0xc2, 0x05, 50,       // [4..6] QuasarMessage field 88 (or 252: 0xe2, 0x0f), len 50
         0xfa, 0x05, 47,       // IOControlCommand field 95 (external_directives), len 47
         0x0a, 45,             // ExternalDirectives field 1 (directive_list), len 45
         0x0a, 43,             // DirectiveList field 1 (directives), len 43
@@ -741,11 +743,23 @@ static int send_quasar_volume(int io_fd, int vol_pct) {
         (uint8_t)((fbits >> 16) & 0xff),
         (uint8_t)((fbits >> 24) & 0xff),
         0x10, 0x00,           // TVolumeSetDirective field 2 (Mode = 0 Default)
-        0x18, 0xe8, 0x07      // TVolumeSetDirective field 3 (Source = 1000 ESourceOther)
+        0x18, 0xe8, 0x07,     // TVolumeSetDirective field 3 (Source = 1000 ESourceOther)
+        0xe8, 0x0f, 0x58      // [57..59] SharedMessage field 253 (message_type = 88 io_control)
     };
 
-    long n = sys_write(io_fd, frame, sizeof(frame));
-    return (n == (long)sizeof(frame)) ? 0 : -1;
+    if (quasar_uses_f252 != 1) {
+        frame[0] = 53;
+        frame[4] = 0xc2;
+        frame[5] = 0x05;
+        if (sys_write(io_fd, frame, 57) != 57) return -1;
+    }
+    if (quasar_uses_f252 != 0) {
+        frame[0] = 56;
+        frame[4] = 0xe2;
+        frame[5] = 0x0f;
+        if (sys_write(io_fd, frame, 60) != 60) return -1;
+    }
+    return 0;
 }
 
 /* Send masked WebSocket set_volume JSON frame to Soloist WS (port 9090). */
@@ -1357,9 +1371,24 @@ static int64_t last_sent_to_quasar_ms = 0;
 static int last_sent_to_soloist_vol = -1;
 static int64_t last_sent_to_soloist_ms = 0;
 static int64_t last_user_ws_vol_ms = 0;
+static int vol_verify_target = -1;
+static int vol_verify_prev_qvol = -1;
+static int64_t vol_verify_sent_ms = 0;
+static int quasar_vol_fallback_amixer = 0;
 
 static int abs_diff_int(int a, int b) {
     return a >= b ? (a - b) : (b - a);
+}
+
+static int check_quasar_vol_fallback(int64_t now, int *target_out) {
+    if (vol_verify_target < 0 || vol_verify_sent_ms <= 0) return 0;
+    if (now - vol_verify_sent_ms < 900) return 0;
+    int target = vol_verify_target;
+    vol_verify_target = -1;
+    vol_verify_sent_ms = 0;
+    quasar_vol_fallback_amixer = 1;
+    if (target_out) *target_out = target;
+    return 1;
 }
 
 static void on_quasar_volume_state(int qvol, uint64_t src, int64_t now) {
@@ -1370,6 +1399,11 @@ static void on_quasar_volume_state(int qvol, uint64_t src, int64_t now) {
         quasar_vol_known = 1;
         quasar_vol = qvol;
         last_quasar_reported_vol = qvol;
+        if (vol_verify_target >= 0 && abs_diff_int(qvol, vol_verify_target) <= 6) {
+            vol_verify_target = -1;
+            vol_verify_sent_ms = 0;
+            quasar_vol_fallback_amixer = 0;
+        }
         if (last_user_ws_vol_ms == 0 && (current_soloist_vol != qvol || !ws_initial_vol_synced)) {
             need_soloist_vol_sync = 1;
         }
@@ -1377,6 +1411,13 @@ static void on_quasar_volume_state(int qvol, uint64_t src, int64_t now) {
     }
 
     quasar_vol = qvol;
+    if (vol_verify_target >= 0 &&
+        (abs_diff_int(qvol, vol_verify_target) <= 6 ||
+         (vol_verify_prev_qvol >= 0 && qvol != vol_verify_prev_qvol))) {
+        vol_verify_target = -1;
+        vol_verify_sent_ms = 0;
+        quasar_vol_fallback_amixer = 0;
+    }
     if (qvol == last_quasar_reported_vol) {
         return;
     }
@@ -3463,16 +3504,34 @@ void _start(void) {
             pending_quasar_vol = -1;
             last_sent_to_quasar_vol = target;
             last_sent_to_quasar_ms = now_sync;
-            if (quasar_io_fd >= 0) {
+            int sent_quasar = 0;
+            if (quasar_io_fd >= 0 && !quasar_vol_fallback_amixer) {
                 if (send_quasar_volume(quasar_io_fd, target) < 0) {
                     sys_close(quasar_io_fd);
                     quasar_io_fd = -1;
+                } else {
+                    sent_quasar = 1;
+                    if (!quasar_vol_known || abs_diff_int(target, quasar_vol) >= 10) {
+                        vol_verify_target = target;
+                        vol_verify_prev_qvol = quasar_vol_known ? quasar_vol : -1;
+                        vol_verify_sent_ms = now_sync;
+                    }
                 }
-            } else {
+            }
+            if (!sent_quasar) {
+                vol_verify_target = -1;
+                vol_verify_sent_ms = 0;
                 char vol_str[12];
                 format_uint_ascii(vol_str, target);
                 run_controller("volume", vol_str);
             }
+        }
+        int fallback_target = -1;
+        if (check_quasar_vol_fallback(now_sync, &fallback_target)) {
+            log_msg("[bridge] Quasar 9910 volume_set unconfirmed on 9921; falling back to ALSA amixer volume\n");
+            char vol_str[12];
+            format_uint_ascii(vol_str, fallback_target);
+            run_controller("volume", vol_str);
         }
         if (need_soloist_vol_sync && quasar_vol_known && soloist_ws_fd >= 0 && soloist_ws_handshake) {
             need_soloist_vol_sync = 0;
