@@ -2,10 +2,10 @@
 
 Клиент Spotify Connect для Яндекс Станций на Linux ARM64 (`aarch64`): голосовое управление и поиск музыки через Алису, синхронизация громкости с колонкой, управление кнопками и LED-эквалайзер.
 
-[![Release](https://img.shields.io/github/v/release/Horohi/soloist-station-lite?label=release&color=0969da)](https://github.com/Horohi/soloist-station-lite/releases/latest)
-![Arch](https://img.shields.io/badge/arch-ARM64-blue)
-![Install](https://img.shields.io/badge/install-Standalone%20%7C%20YAM%20v2-2da44e)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+[![Release](https://badgen.net/github/tag/Horohi/soloist-station-lite?label=release&color=blue)](https://github.com/Horohi/soloist-station-lite/releases/latest)
+![Arch](https://badgen.net/badge/arch/ARM64/blue)
+![Install](https://badgen.net/badge/install/Standalone%20%7C%20YAM%20v2/green)
+![License](https://badgen.net/badge/license/MIT/grey)
 
 Техническая документация на английском: [Voice request lifecycle](docs/VOICE_REQUESTS.md) и [Alice dialog lifecycle](docs/ALICE_DIALOG_LIFECYCLE.md).
 
