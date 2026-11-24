@@ -10,28 +10,38 @@ CONF_FILE="${SOLOIST_NET_CONF:-$BASE_DIR/spotify-network.conf}"
 HOSTS_FILE="${SOLOIST_HOSTS_FILE:-/etc/hosts}"
 CURL_BIN="${SOLOIST_NET_CURL:-$BASE_DIR/bin/curl}"
 [ -x "$CURL_BIN" ] || CURL_BIN=curl
-DOMAIN=api.spotify.com
-URL="https://$DOMAIN/v1/me"
 BEGIN='# BEGIN SOLOIST SPOTIFY PROXY'
 END='# END SOLOIST SPOTIFY PROXY'
-CANDIDATES="${SOLOIST_NET_CANDIDATES:-5.175.161.3 5.175.161.40 37.221.93.141 37.221.93.128 45.13.237.213 31.25.239.132 143.20.64.192 107.175.76.134 192.255.159.240 192.255.159.241 192.3.233.253 193.233.112.68 193.233.112.67 193.233.112.88 159.194.200.33 37.230.192.51}"
+CANDIDATES="${SOLOIST_NET_CANDIDATES:-5.175.161.40 107.175.76.134 192.255.159.240 192.255.159.241 192.3.233.253 193.233.112.67 193.233.112.88}"
 
 valid_ip() {
     printf '%s\n' "$1" | awk -F. 'NF != 4 { exit 1 } {for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1}'
 }
 
-probe() {
+probe_endpoint() {
     ip=${1:-}
+    host=$2
+    url=$3
+    expected=$4
     if [ -n "$ip" ]; then
         valid_ip "$ip" || return 1
         status=$("$CURL_BIN" --noproxy '*' -sS -o /dev/null --connect-timeout 2 --max-time 4 \
-            --resolve "$DOMAIN:443:$ip" -w '%{http_code}' "$URL" 2>/dev/null) || return 1
+            --resolve "$host:443:$ip" -w '%{http_code}' "$url" 2>/dev/null) || return 1
     else
         status=$("$CURL_BIN" --noproxy '*' -sS -o /dev/null --connect-timeout 2 --max-time 4 \
-            -w '%{http_code}' "$URL" 2>/dev/null) || return 1
+            -w '%{http_code}' "$url" 2>/dev/null) || return 1
     fi
-    # An unauthenticated /v1/me request returns 401 when Spotify is reachable.
-    [ "$status" = 401 ] || [ "$status" = 200 ]
+    case "$expected" in
+        *"|$status|"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+probe() {
+    ip=${1:-}
+    probe_endpoint "$ip" api.spotify.com 'https://api.spotify.com/v1/me' '|200|401|' &&
+    probe_endpoint "$ip" accounts.spotify.com 'https://accounts.spotify.com/api/token' '|200|400|401|405|' &&
+    probe_endpoint "$ip" spclient.wg.spotify.com 'https://spclient.wg.spotify.com/' '|200|401|404|'
 }
 
 current_ip() {
@@ -129,14 +139,32 @@ check() {
             return 1
         fi
     done
+    if [ -n "$existing" ]; then
+        [ "$(read_mode)" = auto ] || return 0
+        if write_hosts ''; then
+            if probe; then
+                echo "[network] Cleared dead Spotify proxy $existing; direct network reaches Spotify."
+                return 0
+            fi
+            [ "$(read_mode)" != auto ] || write_hosts "$existing" >/dev/null 2>&1 || true
+        fi
+    fi
     echo '[network] No Spotify proxy passed the check; existing entries are unchanged.' >&2
     return 1
+}
+
+status_cmd() {
+    mode=$(read_mode)
+    [ -n "$mode" ] || mode=off
+    ip=$(current_ip || true)
+    printf 'mode=%s\nproxy=%s\n' "$mode" "${ip:-none}"
 }
 
 case "${1:-check}" in
     check) check ;;
     probe) probe "${2:-}" ;;
     current) current_ip ;;
+    status) status_cmd ;;
     recommend)
         if probe; then echo current; exit 0; fi
         for ip in $CANDIDATES; do
@@ -153,5 +181,5 @@ case "${1:-check}" in
         exec 9>"$STATE_DIR/spotify-network.lock" || exit 1
         flock -w 10 9 || { echo '[network] Network check is busy; retry disabling.' >&2; exit 1; }
         write_hosts '' ;;
-    *) echo 'Usage: spotify-network.sh {check|probe [IP]|current|off}' >&2; exit 2 ;;
+    *) echo 'Usage: spotify-network.sh {check|probe [IP]|current|recommend|status|off}' >&2; exit 2 ;;
 esac

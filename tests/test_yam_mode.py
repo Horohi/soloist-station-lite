@@ -793,22 +793,31 @@ def test_doctor_report():
             "[bridge] Alice TTS cancelled: ALSA SHM still present or inaccessible\n")
         (root / "search.log").write_text(
             "[search] HTTP 403; playback unchanged\n[search] raw SECRET_TOKEN\n")
+        (root / "soloist.log").write_text(
+            "ERROR login failed with SECRET_CREDENTIAL\n")
+        (root / "hosts").write_text("127.0.0.1 localhost\n")
+        (root / "spotify-network.conf").write_text('SOLOIST_NETWORK_MODE="off"\n')
         (root / "data/requests/control.log").write_text(
             "[control] action=play stage=activate status=23\n"
             "[control] action=play stage=private_marker status=23\n")
         curl = root / "bin/curl"
         curl.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "${0%/*}/../curl-args"\nprintf 401\n')
         curl.chmod(0o755)
-        env = {**os.environ, "INSTALL_DIR": str(root)}
+        env = {**os.environ, "INSTALL_DIR": str(root),
+               "SOLOIST_LOG_FILE": str(root / "soloist.log"),
+               "SOLOIST_HOSTS_FILE": str(root / "hosts")}
 
         for flags in (["--offline"], []):
             result = subprocess.run(["sh", str(cli), "doctor", *flags], env=env,
                                     capture_output=True, text=True, timeout=7, check=True)
             assert "Soloist v1.3.15 (Standalone)" in result.stdout, result.stdout
+            assert "Soloist session: unavailable (player stopped)" in result.stdout, result.stdout
             assert "Soloist key: configured" in result.stdout, result.stdout
             assert "Spotify Web API keys: configured" in result.stdout, result.stdout
+            assert "Spotify network mode: off" in result.stdout, result.stdout
+            assert "Spotify hosts proxy: none" in result.stdout, result.stdout
             assert "voice_activity\ntts_waiting_for_alsa" in result.stdout, result.stdout
-            assert "spotify_http_403" in result.stdout, result.stdout
+            assert "spotify_http_403\nsoloist_auth_failed" in result.stdout, result.stdout
             assert "control_failure action=play stage=activate status=23" in result.stdout, result.stdout
             assert "SECRET_" not in result.stdout + result.stderr
             assert "private_marker" not in result.stdout

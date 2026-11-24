@@ -85,6 +85,7 @@ cmd_help() {
     printf "${BOLD}Команды управления:${NC}\n"
     printf "  ${CYAN}setup${NC}        Интерактивный мастер настройки ключей API, имени колонки и SNI-прокси\n"
     printf "  ${CYAN}status${NC}       Статус плеера, моста, памяти, подсветки и текущего трека\n"
+    printf "  ${CYAN}network${NC} [status|auto|off|check]  Управление SNI-прокси Spotify\n"
     printf "  ${CYAN}doctor${NC} [--offline]  Диагностика для отчёта об ошибке\n"
     printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|status]  Управление эквалайзером подсветки\n"
     printf "  ${CYAN}restart${NC}      Перезапустить службу Spotify и мост управления\n"
@@ -231,16 +232,41 @@ doctor_has_key() {
     ' "$1" 2>/dev/null
 }
 
+read_network_mode() {
+    _net_conf="$CONF_DIR/spotify-network.conf"
+    [ -f "$_net_conf" ] || _net_conf="${SOLOIST_NET_CONF:-$_net_conf}"
+    if [ -f "$_net_conf" ]; then
+        _net_mode=$(sed -n 's/^SOLOIST_NETWORK_MODE="\{0,1\}\([a-z]*\)"\{0,1\}$/\1/p' "$_net_conf" 2>/dev/null | head -n 1 || true)
+        printf '%s\n' "${_net_mode:-default}"
+    else
+        printf 'default\n'
+    fi
+}
+
+read_network_proxy() {
+    _hosts="${SOLOIST_HOSTS_FILE:-/etc/hosts}"
+    if [ -f "$INSTALL_DIR/scripts/spotify-network.sh" ]; then
+        SOLOIST_NET_BASE="$INSTALL_DIR" SOLOIST_NET_STATE="$DATA_ROOT" SOLOIST_NET_CONF="$CONF_DIR/spotify-network.conf" \
+            sh "$INSTALL_DIR/scripts/spotify-network.sh" current 2>/dev/null || true
+    else
+        awk '/^# BEGIN SOLOIST SPOTIFY PROXY$/{m=1;next} /^# END SOLOIST SPOTIFY PROXY$/{m=0;next}
+             m && $2=="api.spotify.com"{print $1; exit}' "$_hosts" 2>/dev/null || true
+    fi
+}
+
 doctor_events() {
     # Emit known events instead of the voice requests and other data in raw logs.
+    _soloist_log="${SOLOIST_LOG_FILE:-/tmp/soloist.log}"
     {
         tail -n 120 /tmp/soloist-bridge.log 2>/dev/null || true
         tail -n 120 /tmp/soloist-search.log 2>/dev/null || true
+        tail -n 120 "$_soloist_log" 2>/dev/null || true
         tail -n 120 "$DATA_ROOT/requests/control.log" 2>/dev/null || true
     } | LC_ALL=C awk '
         /^\[bridge\] Connected to Quasar on 127\.0\.0\.1:9875$/ {print "quasar_connected"}
         /^\[bridge\] Connected to Quasar Volume state on 127\.0\.0\.1:9921$/ {print "quasar_volume_connected"}
         /^\[bridge\] Quasar (socket error|connection closed), reconnecting\.\.\.$/ {print "quasar_reconnecting"}
+        /^\[bridge\] Quasar 9910 volume_set unconfirmed on 9921; falling back to ALSA amixer volume$/ {print "quasar_volume_fallback_amixer"}
         /^\[bridge\] Alice TTS cancelled: ALSA SHM still present or inaccessible$/ {print "tts_waiting_for_alsa"}
         /^\[bridge\] Action: PLAYLIST SEARCH$/ {print "playlist_request"}
         /^\[bridge\] (Voice command triggered:|Action: SEARCH & PLAY query=)/ {print "voice_activity"}
@@ -252,6 +278,22 @@ doctor_events() {
         /^\[control\] action=(play|pause|next|prev|toggle|seek|volume|repeat|shuffle|auto-next|auto-repeat|radio) stage=(admission|now|activate|selection|dispatch) status=[0-9][0-9]?[0-9]?$/ {
             print "control_failure", $2, $3, $4
         }
+        {
+            low = tolower($0)
+            if (low !~ /^\[bridge\]/ && low !~ /^\[search\]/ && low !~ /^\[control\]/) {
+                if (low ~ /(access token|client token|login|auth|credential).*(fail|error|denied|invalid|401|403)|logged in:[ \t]*no/) {
+                    print "soloist_auth_failed"
+                } else if (low ~ /(tls|ssl|certificate|handshake)/ && low ~ /(fail|error|verify|unable)/) {
+                    print "soloist_tls_error"
+                } else if (low ~ /(resolve|dns|name resolution|getaddrinfo|could not resolve)/ && low ~ /(fail|error)/) {
+                    print "soloist_dns_error"
+                } else if (low ~ /(403 forbidden|http[^0-9]*403)/) {
+                    print "soloist_http_403"
+                } else if (low ~ /(connect|connection|socket|spclient|accesspoint).*(fail|error|refused|timed out|timeout|reset)/) {
+                    print "soloist_connect_failed"
+                }
+            }
+        }
     ' | tail -n 16
 }
 
@@ -260,7 +302,7 @@ cmd_doctor() {
         ""|--offline) ;;
         *) printf 'Использование: soloist doctor [--offline]\n' >&2; return 2 ;;
     esac
-    local model firmware version mode player bridge cards master shm hook api_config soloist_config http events
+    local model firmware version mode player bridge cards master shm hook api_config soloist_config http events net_mode net_proxy session_out
     model=$(detect_station_model)
     firmware=$(LC_ALL=C awk 'NR == 1 && $1 ~ /^[0-9]+(\.[0-9]+)+$/ {print $1}' \
         /system/vendor/quasar/version_full 2>/dev/null || true)
@@ -280,6 +322,18 @@ cmd_doctor() {
     bridge=$(find_live_pid soloist-bridge || true)
     if [ -n "$player" ]; then printf 'Soloist process: running\n'; else printf 'Soloist process: stopped\n'; fi
     if [ -n "$bridge" ]; then printf 'Bridge process: running\n'; else printf 'Bridge process: stopped\n'; fi
+    if [ -z "$player" ]; then
+        printf 'Soloist session: unavailable (player stopped)\n'
+    elif [ -x "$INSTALL_DIR/bin/soloist" ]; then
+        session_out=$(run_soloist_ctl ctl -w 127.0.0.1:9090 status 2>/dev/null || true)
+        case "$session_out" in
+            *'logged in: yes'*) printf 'Soloist session: logged in\n' ;;
+            *'logged in: no'*) printf 'Soloist session: not logged in\n' ;;
+            *) printf 'Soloist session: unknown\n' ;;
+        esac
+    else
+        printf 'Soloist session: unknown\n'
+    fi
     soloist_config="$CONF_DIR/config.env"
     [ "$IS_YAM" = 1 ] || soloist_config="$INSTALL_DIR/start.sh"
     if doctor_has_key "$soloist_config" API_KEY; then
@@ -294,6 +348,10 @@ cmd_doctor() {
     else
         printf 'Spotify Web API keys: missing\n'
     fi
+    net_mode=$(read_network_mode)
+    net_proxy=$(read_network_proxy)
+    printf 'Spotify network mode: %s\n' "${net_mode:-default}"
+    printf 'Spotify hosts proxy: %s\n' "${net_proxy:-none}"
     if [ "${1:-}" = --offline ]; then
         printf 'Spotify API reachability: skipped\n'
     elif http=$("$CURL_BIN" -q --noproxy '*' -sS -o /dev/null --connect-timeout 2 --max-time 4 \
@@ -975,6 +1033,47 @@ EOF
     printf "\nПроверить работу: ${CYAN}soloist status${NC}\n"
 }
 
+cmd_network() {
+    case "${1:-status}" in
+        status|st)
+            _net_mode=$(read_network_mode)
+            _net_proxy=$(read_network_proxy)
+            printf "Режим Spotify SNI: %s\n" "${_net_mode:-default}"
+            printf "Прокси в hosts:    %s\n" "${_net_proxy:-none}"
+            ;;
+        auto|on|1)
+            update_hosts_sni 1
+            if [ "${SOLOIST_SETUP_NO_RESTART:-0}" != 1 ]; then
+                cmd_restart
+            fi
+            ;;
+        off|0)
+            update_hosts_sni 0
+            if [ "${SOLOIST_SETUP_NO_RESTART:-0}" != 1 ]; then
+                cmd_restart
+            fi
+            ;;
+        check|probe)
+            _net_mode=$(read_network_mode)
+            if [ "$_net_mode" != auto ]; then
+                printf "Режим SNI Сейчас '%s'. Включите автоподбор: soloist network auto\n" "${_net_mode:-default}"
+                return 0
+            fi
+            if [ -f "$INSTALL_DIR/scripts/spotify-network.sh" ]; then
+                SOLOIST_NET_BASE="$INSTALL_DIR" SOLOIST_NET_STATE="$DATA_ROOT" SOLOIST_NET_CONF="$CONF_DIR/spotify-network.conf" \
+                    sh "$INSTALL_DIR/scripts/spotify-network.sh" check
+            else
+                printf "Скрипт spotify-network.sh не найден.\n" >&2
+                return 1
+            fi
+            ;;
+        *)
+            printf "Использование: soloist network [status|auto|off|check]\n" >&2
+            return 2
+            ;;
+    esac
+}
+
 # Main entrypoint
 case "${1:-}" in
     setup|configure|wizard)
@@ -982,6 +1081,10 @@ case "${1:-}" in
         ;;
     status|st)
         cmd_status
+        ;;
+    network|net)
+        shift
+        cmd_network "$@"
         ;;
     doctor)
         shift

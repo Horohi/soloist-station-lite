@@ -20,8 +20,10 @@ def main():
         fake_curl = tmp / "curl"
         fake_curl.write_text('''#!/bin/sh
 ip=direct
+url=''
 while [ "$#" -gt 0 ]; do
     if [ "$1" = --resolve ]; then ip=${2##*:}; shift; fi
+    url=$1
     shift
 done
 printf '%s\\n' "$ip" >> "$TEST_CALLS"
@@ -29,7 +31,13 @@ if [ "${TEST_PAUSE_IP:-}" = "$ip" ]; then
     touch "$TEST_STARTED"
     while [ ! -f "$TEST_RELEASE" ]; do sleep 0.05; done
 fi
-if grep -Fxq "$ip" "$TEST_HEALTH"; then printf 401; else printf 403; fi
+if [ -n "${TEST_FAIL_RULE:-}" ] && [ "$ip" = "${TEST_FAIL_RULE%%:*}" ] && printf '%s\\n' "$url" | grep -Fq "${TEST_FAIL_RULE#*:}"; then
+    printf 403
+elif grep -Fxq "$ip" "$TEST_HEALTH"; then
+    printf 401
+else
+    printf 403
+fi
 ''')
         fake_curl.chmod(0o755)
         config.write_text('SOLOIST_NETWORK_MODE="auto"\n')
@@ -48,7 +56,7 @@ if grep -Fxq "$ip" "$TEST_HEALTH"; then printf 401; else printf 403; fi
         hosts.write_text(legacy)
         health.write_text("5.175.161.40\n37.221.93.141\n")
         assert invoke().returncode == 0 and hosts.read_text() == legacy
-        assert calls.read_text().splitlines() == ["5.175.161.40"]
+        assert calls.read_text().splitlines() == ["5.175.161.40"] * 3
 
         health.write_text("37.221.93.141\n")
         assert invoke().returncode == 0
@@ -60,6 +68,22 @@ if grep -Fxq "$ip" "$TEST_HEALTH"; then printf 401; else printf 403; fi
 
         health.write_text("")
         assert invoke().returncode != 0 and hosts.read_text() == selected
+
+        # Half-broken proxy (api works, accounts fails) must be replaced.
+        hosts.write_text(legacy)
+        health.write_text("5.175.161.40\n37.221.93.141\n")
+        half_res = subprocess.run(["sh", str(HELPER), "check"],
+                                  env={**env, "TEST_FAIL_RULE": "5.175.161.40:accounts.spotify.com"},
+                                  text=True, capture_output=True)
+        assert half_res.returncode == 0 and "37.221.93.141 api.spotify.com" in hosts.read_text(), half_res.stdout + half_res.stderr
+
+        # Dead managed proxy must be cleared when direct network works cleanly.
+        hosts.write_text(selected)
+        health.write_text("direct\n")
+        rec_res = invoke()
+        assert rec_res.returncode == 0 and "Cleared dead Spotify proxy 37.221.93.141" in rec_res.stdout
+        assert "api.spotify.com" not in hosts.read_text() and "10.0.0.4 my-home-device" in hosts.read_text()
+
         health.write_text("direct\n37.221.93.141\n")
         hosts.write_text("127.0.0.1 localhost\n")
         assert invoke().returncode == 0 and hosts.read_text() == "127.0.0.1 localhost\n"
@@ -123,6 +147,28 @@ if grep -Fxq "$ip" "$TEST_HEALTH"; then printf 401; else printf 403; fi
         assert 'SOLOIST_NETWORK_MODE="auto"' in (app / "spotify-network.conf").read_text()
         assert "37.221.93.141 api.spotify.com" in hosts.read_text(), hosts.read_text()
         assert "найден рабочий прокси" in setup.stdout
+
+        # Test spotify-network.sh status and soloist-cli network subcommands.
+        net_stat = subprocess.run(["sh", str(HELPER), "status"],
+                                  env={**env, "SOLOIST_NET_CONF": str(app / "spotify-network.conf")},
+                                  text=True, capture_output=True, check=True)
+        assert "mode=auto" in net_stat.stdout and "proxy=37.221.93.141" in net_stat.stdout, net_stat.stdout
+        cli_stat = subprocess.run(["sh", str(app / "scripts/soloist-cli"), "network", "status"],
+                                  env=setup_env, text=True, capture_output=True, check=True)
+        assert "auto" in cli_stat.stdout and "37.221.93.141" in cli_stat.stdout, cli_stat.stdout
+        subprocess.run(["sh", str(app / "scripts/soloist-cli"), "network", "off"],
+                       env=setup_env, text=True, capture_output=True, check=True)
+        assert 'SOLOIST_NETWORK_MODE="off"' in (app / "spotify-network.conf").read_text()
+        assert "api.spotify.com" not in hosts.read_text()
+        subprocess.run(["sh", str(app / "scripts/soloist-cli"), "network", "auto"],
+                       env=setup_env, text=True, capture_output=True, check=True)
+        assert 'SOLOIST_NETWORK_MODE="auto"' in (app / "spotify-network.conf").read_text()
+        assert "37.221.93.141 api.spotify.com" in hosts.read_text()
+
+        # Verify dead default SNI candidates were pruned.
+        helper_src = HELPER.read_text()
+        assert "5.175.161.3 " not in helper_src and "37.221.93.141 " not in helper_src
+        assert "5.175.161.40" in helper_src and "193.233.112.67" in helper_src
 
     print("PASS Spotify proxy selection preserves current, handles failures and protects custom hosts")
 
