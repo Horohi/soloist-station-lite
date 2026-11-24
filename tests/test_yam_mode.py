@@ -324,7 +324,22 @@ def test_soloist_setup():
         assert "5.175.161.40" not in hosts_after and "127.0.0.1 localhost" in hosts_after, hosts_after
         assert (hosts_file.stat().st_mode & 0o777) == 0o644
 
-        # 4. Standalone /data/opt/soloist start.sh update mode
+        # 4. Empty usernames are rejected and an account collection is saved intact.
+        favorites_input = "\n".join(["", "", "", "spotify:user::collection",
+                                      "spotify:user:account_123-example.4:collection", "n", ""])
+        result = subprocess.run(
+            [str(yam_root / "bin/soloist"), "setup"],
+            env=setup_env,
+            input=favorites_input,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        assert "Не удалось распознать URI избранного" in result.stdout, result.stdout
+        assert (yam_root / "var/horohi.soloist/favorites.uri").read_text() == "spotify:user:account_123-example.4:collection\n"
+
+        # 5. Standalone /data/opt/soloist start.sh update mode
         sa_dir = tmp / "standalone"
         (sa_dir / "bin").mkdir(parents=True)
         (sa_dir / "scripts").mkdir(parents=True)

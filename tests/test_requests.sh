@@ -271,7 +271,23 @@ for phrase in 'любимые треки' 'мои любимые треки' 'п
     label="$phrase plays configured Liked Songs without catalog lookup"
     check sh -c 'grep -q "play spotify:playlist:BBBBBBBBBBBBBBBBBBBBBB$" "$TEST/controls" && [ ! -s "$TEST/calls" ]'
 done
-for value in missing empty spotify:track:AAAAAAAAAAAAAAAAAAAAAA spotify:playlist:short multiline; do
+reset
+printf '%s\n' 'spotify:user:account_123-example.4:collection' > "$TEST/app/data/favorites.uri"
+printf '%s\n' '{"context":{"uri":"spotify:user:account_123-example.4:collection"},"item":{"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}}' > "$TEST/now_state"
+sh "$SEARCH" 'включи понравившиеся треки'
+label='Spotify personal collection resumes its loaded queue without sending a URI'
+check sh -c 'grep -q " play$" "$TEST/controls" && [ ! -s "$TEST/calls" ]'
+for state in '{"context":{"uri":"spotify:user:other:collection"},"item":{"uri":"spotify:track:AAAAAAAAAAAAAAAAAAAAAA"}}' \
+             '{"context":{"uri":"spotify:user:account_123-example.4:collection"},"item":{"uri":""}}' \
+             '{"context":{"uri":"spotify:user:account_123-example.4:collection"},"item":null}' 'invalid'; do
+    reset
+    printf '%s\n' 'spotify:user:account_123-example.4:collection' > "$TEST/app/data/favorites.uri"
+    printf '%s\n' "$state" > "$TEST/now_state"
+    result=0; sh "$SEARCH" 'включи понравившиеся треки' || result=$?
+    label='Unloaded Spotify personal collection leaves existing playback unchanged'
+    check sh -c '[ "$1" != 0 ] && [ ! -s "$TEST/calls" ] && ! grep -Eq " (activate|play)( |$)" "$TEST/controls"' -- "$result"
+done
+for value in missing empty spotify:track:AAAAAAAAAAAAAAAAAAAAAA spotify:playlist:short spotify:user::collection spotify:user:user:collection:extra spotify:user:user:top:collection multiline; do
     reset
     case "$value" in
         missing) :;;

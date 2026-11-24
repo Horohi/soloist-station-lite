@@ -11,6 +11,13 @@ END {
     skip_space()
     if (!root || pos <= length(json) || !is_object(root) || member(root, "error")) exit 2
 
+    if (collection != "") {
+        uri = field(member(root, "item"), "uri")
+        if (field(member(root, "context"), "uri") != collection ||
+            uri !~ /^spotify:track:[A-Za-z0-9]+$/ || length(uri) != length("spotify:track:") + 22) exit 1
+        exit 0
+    }
+
     query = normalize(ENVIRON["SOLOIST_SEARCH_TERM"])
     artist_hint = normalize(ENVIRON["SOLOIST_SEARCH_ARTIST"])
     count = split(query, words, " ")

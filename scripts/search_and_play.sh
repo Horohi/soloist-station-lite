@@ -77,8 +77,24 @@ case "$TERM" in
         [ -f "$FAVORITES" ] || personal_error 'Liked Songs not configured (favorites.uri)'
         [ "$(wc -c < "$FAVORITES")" -le 128 ] || personal_error 'Invalid Liked Songs URI'
         URI=$(cat "$FAVORITES") || personal_error 'Could not read Liked Songs URI'
-        case "$URI" in spotify:playlist:*) valid_id "${URI#spotify:playlist:}" || personal_error 'Invalid Liked Songs URI';;
-            *) personal_error 'Invalid Liked Songs URI';; esac
+        case "$URI" in
+            spotify:playlist:*)
+                valid_id "${URI#spotify:playlist:}" || personal_error 'Invalid Liked Songs URI';;
+            spotify:user:*:collection)
+                collection_user=${URI#spotify:user:}
+                collection_user=${collection_user%:collection}
+                case "$collection_user" in
+                    ''|*[!A-Za-z0-9._-]*) personal_error 'Invalid Liked Songs URI';;
+                esac
+                NOW_STATE=$(request_cli now --json) || personal_error 'Could not read the current Spotify context'
+                if ! printf '%s\n' "$NOW_STATE" |
+                    LC_ALL=C awk -v collection="$URI" -f "$BASE_DIR/scripts/spotify-search.awk"; then
+                    personal_error 'Start Liked Songs on this device in the Spotify app first'
+                fi
+                request_dispatch play
+                exit $?;;
+            *) personal_error 'Invalid Liked Songs URI';;
+        esac
         request_dispatch play "$URI"
         exit $?;;
     'волну'|'радио'|'волну по этому треку'|'волну по текущему треку'|'радио по этому треку'|'радио по текущему треку')
