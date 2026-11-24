@@ -1277,11 +1277,62 @@ static int is_explicit_search(const char *lower) {
                    str_has_word_prefix(lower, "слушать");
     if (!has_verb) return 0;
 
-    // Check if it is a simple resume command rather than a specific track/artist query
-    if (str_equal(lower, "включи музыку") || str_equal(lower, "вруби музыку") ||
-        str_equal(lower, "включить музыку") || str_equal(lower, "алиса включи музыку") ||
-        str_equal(lower, "алиса вруби музыку") || str_equal(lower, "слушать музыку")) {
-        return 0;
+    // Check if it is a simple resume command rather than a specific track/artist query.
+    // Polite fillers are allowed at the start ("алиса, давай") and between the verb and
+    // "музыку" ("включи пожалуйста музыку"). Anything after "музыку" keeps the phrase a search.
+    {
+        const char *p = lower;
+        int ok = 1;
+        unsigned long n;
+
+        for (;;) {
+            unsigned long rest;
+            while (*p == ' ') p++;
+            rest = str_len(p);
+            n = str_len("алиса");
+            if (rest > n && mem_equal(p, "алиса", n) && !is_word_byte((uint8_t)p[n])) {
+                p += n;
+                if (*p == ',') p++;
+                continue;
+            }
+            n = str_len("пожалуйста");
+            if (rest > n && mem_equal(p, "пожалуйста", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+            n = str_len("давай");
+            if (rest > n && mem_equal(p, "давай", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+            break;
+        }
+
+        n = str_len("включи");
+        if (str_len(p) >= n && mem_equal(p, "включи", n) && !is_word_byte((uint8_t)p[n])) p += n;
+        else {
+            n = str_len("вруби");
+            if (str_len(p) >= n && mem_equal(p, "вруби", n) && !is_word_byte((uint8_t)p[n])) p += n;
+            else {
+                n = str_len("включить");
+                if (str_len(p) >= n && mem_equal(p, "включить", n) && !is_word_byte((uint8_t)p[n])) p += n;
+                else {
+                    n = str_len("слушать");
+                    if (str_len(p) >= n && mem_equal(p, "слушать", n) && !is_word_byte((uint8_t)p[n])) p += n;
+                    else ok = 0;
+                }
+            }
+        }
+
+        if (ok) {
+            for (;;) {
+                unsigned long rest;
+                while (*p == ' ') p++;
+                rest = str_len(p);
+                n = str_len("пожалуйста");
+                if (rest > n && mem_equal(p, "пожалуйста", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+                n = str_len("давай");
+                if (rest > n && mem_equal(p, "давай", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
+                break;
+            }
+            while (*p == ' ') p++;
+            n = str_len("музыку");
+            if (str_len(p) == n && mem_equal(p, "музыку", n)) return 0;
+        }
     }
     return 1;
 }
@@ -1482,15 +1533,22 @@ static void handle_soloist_ws_json(const char *json) {
         }
     }
 
+    int active_bool = 0;
+    if (json_find_bool(json, "is_active", &active_bool)) {
+        spotify_device_is_active = active_bool;
+        if (!active_bool) spotify_is_active = 0;
+    }
+
     char status_str[32];
     if (json_find_str(json, "status", status_str, sizeof(status_str))) {
         if (str_equal(status_str, "playing")) {
             playback_status = 1;
             playback_speed = 1;
-            spotify_is_active = 1;
+            spotify_is_active = spotify_device_is_active;
         } else if (str_equal(status_str, "paused")) {
             playback_status = 2;
             playback_speed = 0;
+            spotify_is_active = 0;
         } else if (str_equal(status_str, "buffering")) {
             playback_status = 3;
             playback_speed = 0;
@@ -1501,11 +1559,6 @@ static void handle_soloist_ws_json(const char *json) {
             last_cache_clean_ms = now_ms();
             run_controller("clean-cache-full", 0);
         }
-    }
-
-    int active_bool = 0;
-    if (json_find_bool(json, "is_active", &active_bool)) {
-        spotify_device_is_active = active_bool;
     }
 
     uint64_t dur = 0;
@@ -1781,90 +1834,100 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         }
 
         // Check PAUSE / STOP keywords (Instant Action)
-        if (str_contains(lower_buf, "пауз") ||
-            str_contains(lower_buf, "стоп") ||
-            str_contains(lower_buf, "хватит") ||
-            str_contains(lower_buf, "замолчи") ||
-            str_contains(lower_buf, "останови") ||
-            str_contains(lower_buf, "выключи музыку") ||
-            str_contains(lower_buf, "отключи музыку")) {
-            log_msg("[bridge] Action: PAUSE\n");
-            trigger_alice_suppression(quasar_fd, 3000);
-            spotify_is_active = 0;
-            run_soloist_cmd("pause");
-            return;
-        }
+        // Media words belong to Spotify only while this speaker is the active
+        // Spotify Connect device. Without this guard an ordinary "Алиса, стоп"
+        // aimed at a timer or alarm is consumed here, Alice's cloud reply is
+        // suppressed, and her dialog is cancelled; "дальше" during a Yandex
+        // Music playlist likewise skips a Spotify track instead. Events from
+        // another device of the same account arrive with is_active=false, so
+        // this also stops a phone or car from steering the speaker.
+        if (spotify_is_active || spotify_device_is_active) {
+            if (((spotify_device_is_active && (playback_status == 1 || playback_status == 3)) || spotify_is_active) &&
+                (str_contains(lower_buf, "пауз") ||
+                 str_contains(lower_buf, "стоп") ||
+                 str_contains(lower_buf, "хватит") ||
+                 str_contains(lower_buf, "замолчи") ||
+                 str_contains(lower_buf, "останови") ||
+                 str_contains(lower_buf, "выключи музыку") ||
+                 str_contains(lower_buf, "отключи музыку"))) {
+                log_msg("[bridge] Action: PAUSE\n");
+                trigger_alice_suppression(quasar_fd, 3000);
+                spotify_is_active = 0;
+                run_soloist_cmd("pause");
+                return;
+            }
 
-        // Check NEXT TRACK keywords (Instant Action)
-        if (str_contains(lower_buf, "дальше") ||
-            str_contains(lower_buf, "следующ") ||
-            str_contains(lower_buf, "переключи") ||
-            str_contains(lower_buf, "пропусти")) {
-            log_msg("[bridge] Action: NEXT TRACK\n");
-            trigger_alice_suppression(quasar_fd, 3000);
-            spotify_is_active = 1;
-            run_soloist_cmd("next");
-            return;
-        }
+            // Check NEXT TRACK keywords (Instant Action)
+            if (str_contains(lower_buf, "дальше") ||
+                str_contains(lower_buf, "следующ") ||
+                str_contains(lower_buf, "переключи") ||
+                str_contains(lower_buf, "пропусти")) {
+                log_msg("[bridge] Action: NEXT TRACK\n");
+                trigger_alice_suppression(quasar_fd, 3000);
+                spotify_is_active = 1;
+                run_soloist_cmd("next");
+                return;
+            }
 
-        // Check PREVIOUS TRACK keywords (Instant Action)
-        if (str_contains(lower_buf, "назад") ||
-            str_contains(lower_buf, "предыдущ") ||
-            str_contains(lower_buf, "прошл")) {
-            log_msg("[bridge] Action: PREVIOUS TRACK\n");
-            trigger_alice_suppression(quasar_fd, 3000);
-            spotify_is_active = 1;
-            run_soloist_cmd("prev");
-            return;
-        }
+            // Check PREVIOUS TRACK keywords (Instant Action)
+            if (str_contains(lower_buf, "назад") ||
+                str_contains(lower_buf, "предыдущ") ||
+                str_contains(lower_buf, "прошл")) {
+                log_msg("[bridge] Action: PREVIOUS TRACK\n");
+                trigger_alice_suppression(quasar_fd, 3000);
+                spotify_is_active = 1;
+                run_soloist_cmd("prev");
+                return;
+            }
 
-        // Check SHUFFLE keywords (Instant Action)
-        if (str_contains(lower_buf, "перемешай") ||
-            str_contains(lower_buf, "случайный порядок") ||
-            str_contains(lower_buf, "случайном порядке") ||
-            str_contains(lower_buf, "включи перемешивание")) {
-            log_msg("[bridge] Action: SHUFFLE ON\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("shuffle", "on");
-            return;
-        }
-        if (str_contains(lower_buf, "по порядку") ||
-            str_contains(lower_buf, "выключи перемешивание") ||
-            str_contains(lower_buf, "отключи перемешивание")) {
-            log_msg("[bridge] Action: SHUFFLE OFF\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("shuffle", "off");
-            return;
-        }
+            // Check SHUFFLE keywords (Instant Action)
+            if (str_contains(lower_buf, "перемешай") ||
+                str_contains(lower_buf, "случайный порядок") ||
+                str_contains(lower_buf, "случайном порядке") ||
+                str_contains(lower_buf, "включи перемешивание")) {
+                log_msg("[bridge] Action: SHUFFLE ON\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("shuffle", "on");
+                return;
+            }
+            if (str_contains(lower_buf, "по порядку") ||
+                str_contains(lower_buf, "выключи перемешивание") ||
+                str_contains(lower_buf, "отключи перемешивание")) {
+                log_msg("[bridge] Action: SHUFFLE OFF\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("shuffle", "off");
+                return;
+            }
 
-        // Check REPEAT keywords (Instant Action)
-        if (str_contains(lower_buf, "повторяй трек") ||
-            str_contains(lower_buf, "повторяй песню") ||
-            str_contains(lower_buf, "повторяй этот трек") ||
-            str_contains(lower_buf, "повторяй эту песню") ||
-            str_contains(lower_buf, "повтор трека") ||
-            str_contains(lower_buf, "повтор песни") ||
-            str_contains(lower_buf, "повтор одного")) {
-            log_msg("[bridge] Action: REPEAT TRACK\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("repeat", "track");
-            return;
-        }
-        if (str_contains(lower_buf, "зацикли") ||
-            str_contains(lower_buf, "повторяй") ||
-            str_contains(lower_buf, "включи повтор")) {
-            log_msg("[bridge] Action: REPEAT ON\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("repeat", "context");
-            return;
-        }
-        if (str_contains(lower_buf, "не повторяй") ||
-            str_contains(lower_buf, "выключи повтор") ||
-            str_contains(lower_buf, "отключи повтор")) {
-            log_msg("[bridge] Action: REPEAT OFF\n");
-            trigger_alice_suppression(quasar_fd, 2500);
-            run_soloist_cmd2("repeat", "off");
-            return;
+            // Check REPEAT keywords (Instant Action)
+            if (str_contains(lower_buf, "повторяй трек") ||
+                str_contains(lower_buf, "повторяй песню") ||
+                str_contains(lower_buf, "повторяй этот трек") ||
+                str_contains(lower_buf, "повторяй эту песню") ||
+                str_contains(lower_buf, "повтор трека") ||
+                str_contains(lower_buf, "повтор песни") ||
+                str_contains(lower_buf, "повтор одного")) {
+                log_msg("[bridge] Action: REPEAT TRACK\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("repeat", "track");
+                return;
+            }
+            if (str_contains(lower_buf, "зацикли") ||
+                str_contains(lower_buf, "повторяй") ||
+                str_contains(lower_buf, "включи повтор")) {
+                log_msg("[bridge] Action: REPEAT ON\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("repeat", "context");
+                return;
+            }
+            if (str_contains(lower_buf, "не повторяй") ||
+                str_contains(lower_buf, "выключи повтор") ||
+                str_contains(lower_buf, "отключи повтор")) {
+                log_msg("[bridge] Action: REPEAT OFF\n");
+                trigger_alice_suppression(quasar_fd, 2500);
+                run_soloist_cmd2("repeat", "off");
+                return;
+            }
         }
 
         // Resume checks (Fast Action)
@@ -3152,6 +3215,7 @@ void _start(void) {
                 quasar_vol_buf_pos = 0;
             }
 
+            // shortcut: аппаратный старт подтверждается следующим WS; пересмотреть, если задержка мешает обычному управлению.
             // Check Input devices (Multi-device monitoring across all Stations)
             if (input_start_idx >= 0) {
                 for (int i = 0; i < num_input_fds; i++) {
@@ -3187,14 +3251,12 @@ void _start(void) {
                                 if (is_next_key && ev.value == 1) {
                                     log_msg("[bridge] Hardware key NEXT pressed\n");
                                     trigger_alice_suppression(quasar_fd, 3000);
-                                    spotify_is_active = 1;
                                     run_soloist_cmd("next");
                                     continue;
                                 }
                                 if (is_prev_key && ev.value == 1) {
                                     log_msg("[bridge] Hardware key PREV pressed\n");
                                     trigger_alice_suppression(quasar_fd, 3000);
-                                    spotify_is_active = 1;
                                     run_soloist_cmd("prev");
                                     continue;
                                 }
@@ -3215,7 +3277,6 @@ void _start(void) {
                                                     log_msg("[bridge] Double-tap detected -> NEXT TRACK\n");
                                                     last_touch_release_time = 0;
                                                     trigger_alice_suppression(quasar_fd, 3000);
-                                                    spotify_is_active = 1;
                                                     run_soloist_cmd("next");
                                                 } else {
                                                     last_touch_release_time = now_tap;
@@ -3227,7 +3288,6 @@ void _start(void) {
                                                         run_soloist_cmd("pause");
                                                     } else if (playback_status == 2) {
                                                         log_msg("[bridge] Instant action: PLAY\n");
-                                                        spotify_is_active = 1;
                                                         run_soloist_cmd("play");
                                                     } else {
                                                         run_toggle();

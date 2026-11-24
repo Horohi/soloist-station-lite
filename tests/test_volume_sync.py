@@ -21,6 +21,7 @@ state_code = bridge_src[state_start:state_end]
 ws_handler_start = bridge_src.index("static void handle_soloist_ws_json")
 ws_handler_end = bridge_src.index("    char status_str[32];")
 # Close handle_soloist_ws_json early for focused volume state-machine testing
+ws_bool_code = bridge_src[bridge_src.index("static int json_find_bool"):bridge_src.index("static int json_find_uint64")]
 ws_handler_code = (
     bridge_src[ws_handler_start:ws_handler_end]
     .replace("extract_track_info(json);\n", "")
@@ -36,6 +37,9 @@ prefix = r"""
 #include <unistd.h>
 #include <math.h>
 
+static int spotify_is_active = 0;
+static int spotify_device_is_active = 0;
+static int mem_equal(const void *a, const void *b, unsigned long n) { return memcmp(a, b, n) == 0; }
 static int64_t mock_now = 10000;
 static int64_t now_ms(void) { return mock_now; }
 static long sys_write(int fd, const void *buf, unsigned long count) { return write(fd, buf, count); }
@@ -260,7 +264,7 @@ int main(void) {
 }
 """
 
-code = prefix + vh_subset + helpers_code + state_code + ws_handler_code + test_driver
+code = prefix + vh_subset + helpers_code + state_code + ws_bool_code + ws_handler_code + test_driver
 with tempfile.TemporaryDirectory(prefix="soloist-vol-test-") as tmp:
     src = pathlib.Path(tmp) / "test.c"
     exe = pathlib.Path(tmp) / "test"
