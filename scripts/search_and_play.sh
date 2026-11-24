@@ -314,6 +314,21 @@ URI=$(search_catalog "$SEARCH_QUERY" "$TYPES" "$CONTEXTS") || exit 1
 if [ -z "$URI" ] && [ -n "$ARTIST" ] && [ "$SEARCH_QUERY" != "$TERM $ARTIST" ]; then
     URI=$(search_catalog "$TERM $ARTIST" "$TYPES" "$CONTEXTS") || exit 1
 fi
+if [ -z "$URI" ]; then
+    COMPACT_NUM_QUERY=$(printf '%s\n' "$SEARCH_QUERY" | LC_ALL=C awk '{
+        out = ""
+        n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if (c == " " && i > 1 && i < n && substr($0, i - 1, 1) ~ /^[0-9]$/ && substr($0, i + 1, 1) ~ /^[0-9]$/) continue
+            out = out c
+        }
+        print out
+    }')
+    if [ -n "$COMPACT_NUM_QUERY" ] && [ "$COMPACT_NUM_QUERY" != "$SEARCH_QUERY" ]; then
+        URI=$(search_catalog "$COMPACT_NUM_QUERY" "$TYPES" "$CONTEXTS") || exit 1
+    fi
+fi
 
 flock -u 9
 if [ "$RADIO" = 1 ]; then

@@ -426,4 +426,112 @@ for action in next shuffle; do
         label='rapid option commands preserve admission order'; check sh -c 'tail -n 1 "$TEST/controls" | grep -q "shuffle off$"'
     fi
 done
+
+# Cross-script, phonetic, digit-collapse, leetspeak and artist-corroboration regression checks.
+run_catalog_case() {
+    case_label=$1
+    phrase=$2
+    payload=$3
+    expected_uri=$4
+    reset
+    echo catalog > "$TEST/mode"
+    printf '%s\n' "$payload" > "$TEST/catalog.json"
+    sh "$SEARCH" "$phrase" || true
+    label="$case_label"
+    if [ -n "$expected_uri" ]; then
+        check grep -q "play ${expected_uri}$" "$TEST/controls"
+    else
+        check test ! -s "$TEST/controls"
+    fi
+}
+
+run_catalog_case \
+    'norman grayson resolves Cyrillic artist норман грейсон' \
+    'включи norman grayson' \
+    '{"artists":{"items":[{"name":"норман грейсон","uri":"spotify:artist:NORMANAAAAAAAAAAAAAAAA"},{"name":"Norman Matt","uri":"spotify:artist:OTHERAAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"монстр","artists":[{"name":"норман грейсон","uri":"spotify:artist:NORMANAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:TRACKAAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:artist:NORMANAAAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'norman grayson этюды picks track этюды by норман грейсон' \
+    'включи norman grayson этюды' \
+    '{"artists":{"items":[{"name":"норман грейсон","uri":"spotify:artist:NORMANAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"этюды","artists":[{"name":"норман грейсон","uri":"spotify:artist:NORMANAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:ETUDYAAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:track:ETUDYAAAAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'nine mice resolves artist 9mice instead of 9 Lives tracks' \
+    'включи nine mice' \
+    '{"artists":{"items":[{"name":"9mice","uri":"spotify:artist:NINEMICEAAAAAAAAAAAAAA"},{"name":"Nine Vicious","uri":"spotify:artist:OTHERAAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"9 Lives","artists":[{"name":"Fury","uri":"spotify:artist:FURYAAAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:LIVESAAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:artist:NINEMICEAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'найн майс resolves phonetic artist 9mice' \
+    'включи найн майс' \
+    '{"artists":{"items":[{"name":"9mice","uri":"spotify:artist:NINEMICEAAAAAAAAAAAAAA"},{"name":"ARTIK & ASTI","uri":"spotify:artist:ARTIKAAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"Пьяный май","artists":[{"name":"VEIGEL","uri":"spotify:artist:VEIGELAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:MAYAAAAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:artist:NINEMICEAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'spaced digits кретин 5 2 8 matches artist КРЕТИН 528' \
+    'включи кретин 5 2 8' \
+    '{"artists":{"items":[{"name":"КРЕТИН 528","uri":"spotify:artist:KRETINAAAAAAAAAAAAAAAA"},{"name":"5sta Family","uri":"spotify:artist:FIVESTAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"ВИЗИТ К УРОЛОГУ","artists":[{"name":"КРЕТИН 528","uri":"spotify:artist:KRETINAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:VISITAAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:artist:KRETINAAAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'spaced digits fallen 7 7 7 angel picks fallen777angel over Fallen Angel track' \
+    'включи fallen 7 7 7 angel' \
+    '{"artists":{"items":[{"name":"fallen777angel","uri":"spotify:artist:FALLENAAAAAAAAAAAAAAAA"},{"name":"fallen angel","uri":"spotify:artist:FALLENTRAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"гладиатор/рыцарь","artists":[{"name":"fallen777angel","uri":"spotify:artist:FALLENAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:GLADAAAAAAAAAAAAAAAAAA"},{"name":"Fallen Angel - Slowed","artists":[{"name":"xlout","uri":"spotify:artist:XLOUTAAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:SLOWEDAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:artist:FALLENAAAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'мэдкид prefers corroborated Russian madk1d over Japanese MADKID' \
+    'включи мэдкид' \
+    '{"artists":{"items":[{"name":"MADKID","uri":"spotify:artist:JPMADKIDAAAAAAAAAAAAAA"},{"name":"madk1d","uri":"spotify:artist:RUMADKIDAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"ДИНАСТИЯ","artists":[{"name":"VILLIAN","uri":"spotify:artist:VILLIANAAAAAAAAAAAAAAA"},{"name":"madk1d","uri":"spotify:artist:RUMADKIDAAAAAAAAAAAAAA"}],"uri":"spotify:track:DYNAAAAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:artist:RUMADKIDAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'пятёрка prefers corroborated artist 5opka over random track ПЯТЁРКА' \
+    'включи пятёрка' \
+    '{"artists":{"items":[{"name":"5opka","uri":"spotify:artist:FIVOPKAAAAAAAAAAAAAAAA"},{"name":"Пятёрка-мясокомбинат","uri":"spotify:artist:MEATAAAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"ПЯТЁРКА","artists":[{"name":"Figurant","uri":"spotify:artist:FIGURANTAAAAAAAAAAAAAA"}],"uri":"spotify:track:FIGTRACKAAAAAAAAAAAAAA"},{"name":"Жми Share","artists":[{"name":"5opka","uri":"spotify:artist:FIVOPKAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:SHAREAAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:artist:FIVOPKAAAAAAAAAAAAAAAA'
+
+for pair in \
+    'виллиан|VILLIAN' \
+    'токсис|Toxi$' \
+    'фараон|PHARAOH' \
+    'херонвотер|Heronwater' \
+    'бушидо жо|BUSHIDO ZHO' \
+    'сода лав|SODA LUV' \
+    'лил кристалл|LIL KRYSTALLL' \
+    'биг бейби тейп|Big Baby Tape' \
+    'кай энджел|Kai Angel' \
+    'моргенштерн|MORGENSHTERN' \
+    'слава марлоу|SLAVA MARLOW' \
+    'френдли таг|FRIENDLY THUG 52 NGG'
+do
+    ru_q=${pair%|*}
+    lat_a=${pair#*|}
+    run_catalog_case \
+        "Cyrillic phonetic artist $ru_q matches $lat_a" \
+        "включи $ru_q" \
+        '{"artists":{"items":[{"name":"френдли таго","uri":"spotify:artist:CLONEAAAAAAAAAAAAAAAAA"},{"name":"'"$lat_a"'","uri":"spotify:artist:TARGETAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"хит","artists":[{"name":"'"$lat_a"'","uri":"spotify:artist:TARGETAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:HITAAAAAAAAAAAAAAAAAAA"}]}}' \
+        'spotify:artist:TARGETAAAAAAAAAAAAAAAA'
+done
+
+run_catalog_case \
+    'русский канья matches track Русский Канье' \
+    'включи русский канья' \
+    '{"artists":{"items":[{"name":"Канги","uri":"spotify:artist:KANGIAAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"Русский Канье","artists":[{"name":"5opka","uri":"spotify:artist:FIVOPKAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:KANYEAAAAAAAAAAAAAAAAA"},{"name":"Русская красавица","artists":[{"name":"HANNA","uri":"spotify:artist:HANNAAAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:KRASAVAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:track:KANYEAAAAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'one percent badtrip girl matches 1% Battery Girl in top track slot' \
+    'включи one percent badtrip girl' \
+    '{"artists":{"items":[{"name":"Sān-Z","uri":"spotify:artist:SANZAAAAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"1% Battery Girl","artists":[{"name":"Sān-Z","uri":"spotify:artist:SANZAAAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:BATTERYAAAAAAAAAAAAAAA"},{"name":"one percent","artists":[{"name":"And One","uri":"spotify:artist:ANDONEAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:ONEPCTAAAAAAAAAAAAAAAA"}]}}' \
+    'spotify:track:BATTERYAAAAAAAAAAAAAAA'
+
+run_catalog_case \
+    'unmatched sun z leaves playback unchanged instead of playing random artist' \
+    'включи sun z' \
+    '{"artists":{"items":[{"name":"Sub Zero Project","uri":"spotify:artist:SUBZEROAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"Sun to Me","artists":[{"name":"mgk","uri":"spotify:artist:MGKAAAAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:SUNTOAAAAAAAAAAAAAAAAA"}]}}' \
+    ''
+
 exit "$failures"
