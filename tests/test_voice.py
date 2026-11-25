@@ -6,6 +6,9 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "src/soloist-bridge.c").read_text(encoding="utf-8")
+text_hdr = (ROOT / "src/text-json.h").read_text(encoding="utf-8")
+qipc_hdr = (ROOT / "src/quasar-ipc.h").read_text(encoding="utf-8")
+qvol_hdr = (ROOT / "src/quasar-volume.h").read_text(encoding="utf-8")
 
 def section(start, end):
     return source[source.index(start):source.index(end)]
@@ -118,21 +121,30 @@ media_prefix = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "voice-request.h"
 static unsigned long str_len(const char *s) { return s ? strlen(s) : 0; }
 static int failures, command_calls, search_calls, resume_calls, suppressed_calls, cache_calls;
 static char command[32];
+static char command_arg[512];
 static int64_t mock_now = 10000;
 static int64_t now_ms(void) { return mock_now; }
 static void log_msg(const char *s) { (void)s; }
 static void trigger_alice_suppression(int fd, int64_t ms) { (void)fd; (void)ms; suppressed_calls++; }
-static void run_soloist_cmd(const char *s) { command_calls++; snprintf(command, sizeof(command), "%s", s); }
-static void run_soloist_cmd2(const char *s, const char *a) { (void)a; run_soloist_cmd(s); }
+static void run_soloist_cmd(const char *s) { command_calls++; snprintf(command, sizeof(command), "%s", s); command_arg[0] = 0; }
+static void run_soloist_cmd2(const char *s, const char *a) {
+    command_calls++; snprintf(command, sizeof(command), "%s", s);
+    snprintf(command_arg, sizeof(command_arg), "%s", a ? a : "");
+}
 static void run_toggle(void) { run_soloist_cmd("toggle"); }
 static void run_search_and_play(const char *s) {
     if (!strcmp(s, "включи музыку")) resume_calls++;
     else search_calls++;
 }
-static void run_controller(const char *s, const char *a) { (void)a; if (!strcmp(s, "clean-cache-full")) cache_calls++; }
+static void run_controller(const char *s, const char *a) {
+    if (!strcmp(s, "clean-cache-full")) { cache_calls++; return; }
+    command_calls++; snprintf(command, sizeof(command), "%s", s);
+    snprintf(command_arg, sizeof(command_arg), "%s", a ? a : "");
+}
 static void publish_track(const char *s) { (void)s; }
 static int selection_needs_observation(void) { return 0; }
 static void set_led_visualizer(int enable) { (void)enable; }
@@ -162,8 +174,17 @@ static inline int led_fx_is_skip_recent(int64_t now) { (void)now; return 0; }
 static inline int led_fx_is_play_recent(int64_t now) { (void)now; return 0; }
 static inline int led_fx_active_type(void) { return g_ws_fx_active; }
 '''
-media_production = section("static void to_lower_ru", "#ifdef __aarch64__\nstatic void set_led_visualizer_impl")
-media_production += section("static int is_web_or_culinary_intent", "/* =========================================================================")
+media_production = (
+    section("static int quasar_uses_f252 = -1;", '#include "text-json.h"')
+    + text_hdr[text_hdr.index("static void to_lower_ru"):text_hdr.index("#endif")]
+    + "\n"
+    + qvol_hdr[qvol_hdr.index("static int quasar_vol = -1;"):qvol_hdr.index("#endif")]
+    + "\n"
+    + qipc_hdr[qipc_hdr.index("static int parse_quasar_io_media_state"):qipc_hdr.index("#endif")]
+    + "\n"
+    + section("static void handle_soloist_ws_json", "#ifdef __aarch64__\nstatic void set_led_visualizer_impl")
+)
+media_production += "\n" + section("static int is_web_or_culinary_intent", "/* =========================================================================")
 input_start = source.index("                            int is_play_pause_key =")
 input_end = source.index("\n                        }\n                    } else if (pfd[p_idx].revents", input_start)
 media_production += '''
@@ -180,13 +201,23 @@ static void check(int good, const char *name) {
     printf("%s %s\n", good ? "PASS" : "FAIL", name); if (!good) failures++;
 }
 static void clear_calls(void) {
-    command_calls = search_calls = resume_calls = suppressed_calls = 0; command[0] = 0;
+    command_calls = search_calls = resume_calls = suppressed_calls = 0; command[0] = 0; command_arg[0] = 0;
 }
 static void reset_media(void) {
     spotify_is_active = spotify_device_is_active = yandex_music_active = playback_status = 0;
+    yandex_music_handoff_ms = 0;
     touch_down_start = touch_is_down = 0; last_touch_release_time = 0;
     censor_on_calls = censor_off_calls = 0;
     clear_calls();
+}
+static unsigned long pb_vi(uint8_t *b, uint64_t n) {
+    unsigned long p = 0; do { b[p] = (uint8_t)(n & 127); n >>= 7; if (n) b[p] |= 128; p++; } while (n); return p;
+}
+static unsigned long pb_bytes(uint8_t *b, unsigned f, const void *s, unsigned long n) {
+    unsigned long p = pb_vi(b, ((uint64_t)f << 3) | 2); p += pb_vi(b + p, n); memcpy(b + p, s, n); return p + n;
+}
+static unsigned long pb_varint(uint8_t *b, unsigned f, uint64_t v) {
+    unsigned long p = pb_vi(b, ((uint64_t)f << 3) | 0); p += pb_vi(b + p, v); return p;
 }
 static void voice(const char *s) { handle_voice_recognition(0, s, strlen(s)); }
 static int passed_to_alice(void) {
@@ -298,20 +329,28 @@ int main(void) {
     reset_media();
     handle_soloist_ws_json("{\"status\":\"paused\",\"is_active\":true}");
     voice("включи яндекс музыку");
-    check(yandex_music_active == 1 && spotify_is_active == 0 && passed_to_alice(),
-          "paused Spotify leaves Yandex Music request to Alice and marks Yandex Music active");
+    check(yandex_music_active == 1 && spotify_is_active == 0 && command_calls == 1 &&
+          !strcmp(command, "deactivate") && suppressed_calls == 0,
+          "active paused Spotify deactivates cleanly when switching to Yandex Music");
     const char *ym_pass[] = {"дальше", "назад", "перемешай", "повторяй", "что играет"};
     for (unsigned i = 0; i < sizeof(ym_pass) / sizeof(ym_pass[0]); i++) {
         clear_calls(); voice(ym_pass[i]);
         check(passed_to_alice(), "active Yandex Music passes media/info command to Alice");
     }
+    // Within 5000ms handoff grace, stale WS playing frame keeps Yandex Music ownership
+    clear_calls(); mock_now += 500;
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    check(yandex_music_active == 1, "stale WS playing within 5s grace preserves Yandex Music handoff");
+    mock_now += 6000;
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    check(yandex_music_active == 0, "WS playing after 5s handoff grace reclaims Spotify ownership");
 
     reset_media();
     handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
     voice("включи яндекс музыку");
     check(yandex_music_active == 1 && spotify_is_active == 0 && command_calls == 1 &&
-          !strcmp(command, "pause") && suppressed_calls == 0,
-          "playing Spotify pauses cleanly without suppressing Alice when switching to Yandex Music");
+          !strcmp(command, "deactivate") && suppressed_calls == 0,
+          "playing Spotify deactivates cleanly without suppressing Alice when switching to Yandex Music");
     clear_calls(); voice("дальше");
     check(passed_to_alice(), "дальше after Yandex Music handoff reaches Alice");
 
@@ -319,8 +358,8 @@ int main(void) {
     handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
     voice("включи плейлист утренний в яндекс музыке");
     check(yandex_music_active == 1 && spotify_is_active == 0 && command_calls == 1 &&
-          !strcmp(command, "pause") && suppressed_calls == 0,
-          "Yandex playlist handoff pauses playing Spotify without suppressing Alice");
+          !strcmp(command, "deactivate") && suppressed_calls == 0,
+          "Yandex playlist handoff deactivates playing Spotify without suppressing Alice");
 
     clear_calls(); voice("включи музыку");
     check(yandex_music_active == 0 && resume_calls == 1 && suppressed_calls == 1,
@@ -347,6 +386,112 @@ int main(void) {
     check(g_ws_play_fx_calls == 1 && g_ws_fx_active == LED_FX_PLAY,
           "search completion on playing WS transitions LED_FX_SEARCH into LED_FX_PLAY");
 
+    // Voice queue & restart commands
+    reset_media();
+    voice("поставь следующим Кино Кукушка");
+    check(command_calls == 1 && !strcmp(command, "enqueue") && !strcmp(command_arg, "кино кукушка") &&
+          suppressed_calls == 1 && search_calls == 0 && g_ws_fx_active == LED_FX_SEARCH,
+          "поставь следующим extracts clean query and triggers enqueue + search FX");
+
+    reset_media();
+    voice("алиса, добавь в очередь Раммштайн");
+    check(command_calls == 1 && !strcmp(command, "enqueue") && !strcmp(command_arg, "раммштайн") &&
+          suppressed_calls == 1,
+          "добавь в очередь extracts clean query and triggers enqueue");
+
+    reset_media();
+    voice("поставь ДДТ в очередь");
+    check(command_calls == 1 && !strcmp(command, "enqueue") && !strcmp(command_arg, "ддт") &&
+          suppressed_calls == 1,
+          "поставь <X> в очередь extracts clean query and triggers enqueue");
+
+    reset_media(); spotify_device_is_active = 1; playback_status = 1;
+    voice("следующий трек");
+    check(command_calls == 1 && !strcmp(command, "next"), "следующий трек triggers NEXT, not enqueue");
+
+    reset_media(); spotify_device_is_active = 1; playback_status = 1;
+    voice("включи следующий трек");
+    check(strcmp(command, "enqueue") != 0, "включи следующий трек does not trigger enqueue");
+
+    reset_media();
+    voice("добавь в очередь");
+    check(passed_to_alice(), "empty добавь в очередь is passed to Alice");
+
+    const char *restarts[] = {"начни сначала", "сначала", "включи сначала", "поставь заново"};
+    for (unsigned i = 0; i < sizeof(restarts) / sizeof(restarts[0]); i++) {
+        reset_media(); spotify_is_active = spotify_device_is_active = 1; playback_status = 1;
+        voice(restarts[i]);
+        check(command_calls == 1 && !strcmp(command, "seek") && !strcmp(command_arg, "0") && suppressed_calls == 1,
+              restarts[i]);
+    }
+    reset_media(); spotify_is_active = spotify_device_is_active = 1; playback_status = 1;
+    voice("включи песню Сначала");
+    check(search_calls == 1 && command_calls == 0, "включи песню Сначала remains catalog search");
+
+    reset_media(); spotify_is_active = spotify_device_is_active = 1; playback_status = 1;
+    voice("сначала включи свет");
+    check(passed_to_alice(), "сначала включи свет is left to Alice");
+
+    reset_media(); spotify_is_active = spotify_device_is_active = 1; yandex_music_active = 1;
+    voice("начни сначала");
+    check(passed_to_alice(), "начни сначала while yandex_music_active is left to Alice");
+
+    // Port 9910 IOEvent / AppState parser checks
+    {
+        uint8_t empty_io[8] = { 0xaa, 0x05, 0x02, 0x2a, 0x00 }; // field 85 -> field 5 empty
+        int st = -1;
+        check(parse_quasar_io_media_state(empty_io, 5, &st) == 1 && st == 0,
+              "IOEvent empty AppState parses as idle (0)");
+
+        uint8_t m_sub[32]; unsigned long mp = pb_bytes(m_sub, 1, "t123", 4);
+        uint8_t app[64]; unsigned long ap = pb_bytes(app, 2, m_sub, mp);
+        uint8_t io[96]; unsigned long ip = pb_bytes(io, 5, app, ap);
+        uint8_t msg[128]; unsigned long fp = pb_bytes(msg, 85, io, ip);
+        check(parse_quasar_io_media_state(msg, fp, &st) == 1 && st == 2,
+              "IOEvent MusicState active parses as 2");
+
+        mp += pb_varint(m_sub + mp, 3, 1); // is_paused = 1
+        ap = pb_bytes(app, 2, m_sub, mp);
+        ip = pb_bytes(io, 5, app, ap);
+        fp = pb_bytes(msg, 85, io, ip);
+        check(parse_quasar_io_media_state(msg, fp, &st) == 1 && st == 1,
+              "IOEvent MusicState paused parses as 1");
+
+        uint8_t r_sub[32]; unsigned long rp = pb_bytes(r_sub, 1, "rock", 4);
+        ap = pb_bytes(app, 4, r_sub, rp);
+        ip = pb_bytes(io, 5, app, ap);
+        fp = pb_bytes(msg, 252, io, ip);
+        fp += pb_varint(msg + fp, 253, 85);
+        check(parse_quasar_io_media_state(msg, fp, &st) == 1 && st == 2,
+              "SharedMessage 252/253=85 RadioState active parses as 2");
+
+        uint8_t bt_sub[32]; unsigned long bp = pb_bytes(bt_sub, 2, "bt", 2);
+        ap = pb_bytes(app, 5, bt_sub, bp);
+        ip = pb_bytes(io, 5, app, ap);
+        fp = pb_bytes(msg, 85, io, ip);
+        check(parse_quasar_io_media_state(msg, fp, &st) == 1 && st == 2,
+              "IOEvent BluetoothPlayerState active parses as 2");
+
+        uint8_t ac_sub[16]; unsigned long acp = pb_varint(ac_sub, 2, 3); // PLAYING
+        ap = pb_bytes(app, 6, ac_sub, acp);
+        ip = pb_bytes(io, 5, app, ap);
+        fp = pb_bytes(msg, 85, io, ip);
+        check(parse_quasar_io_media_state(msg, fp, &st) == 1 && st == 2,
+              "IOEvent AudioClientEvent PLAYING parses as 2");
+        acp = pb_varint(ac_sub, 2, 4); // PAUSED
+        ap = pb_bytes(app, 6, ac_sub, acp);
+        ip = pb_bytes(io, 5, app, ap);
+        fp = pb_bytes(msg, 85, io, ip);
+        check(parse_quasar_io_media_state(msg, fp, &st) == 1 && st == 1,
+              "IOEvent AudioClientEvent PAUSED parses as 1");
+        acp = pb_varint(ac_sub, 2, 5); // STOPPED
+        ap = pb_bytes(app, 6, ac_sub, acp);
+        ip = pb_bytes(io, 5, app, ap);
+        fp = pb_bytes(msg, 85, io, ip);
+        check(parse_quasar_io_media_state(msg, fp, &st) == 1 && st == 0,
+              "IOEvent AudioClientEvent STOPPED parses as 0");
+    }
+
     return failures ? 1 : 0;
 }
 '''
@@ -354,5 +499,5 @@ with tempfile.TemporaryDirectory(prefix="soloist-media-") as temp:
     path = pathlib.Path(temp)
     (path / "test.c").write_text(media_prefix + media_production + media_driver, encoding="utf-8")
     executable = path / ("test.exe" if sys.platform == "win32" else "test")
-    subprocess.run(compiler + ["-std=c99", "-Wall", "-Wextra", str(path / "test.c"), "-o", str(executable)], check=True)
+    subprocess.run(compiler + ["-std=c99", "-Wall", "-Wextra", "-I", str(ROOT / "src"), str(path / "test.c"), "-o", str(executable)], check=True)
     sys.exit(subprocess.run([str(executable)]).returncode)

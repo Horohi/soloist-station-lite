@@ -8,14 +8,15 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "src/soloist-bridge.c").read_text()
+TEXT_SOURCE = (ROOT / "src/text-json.h").read_text()
 
 part_paths = SOURCE[
     SOURCE.index("static int is_yam_mode = 0;") :
-    SOURCE.index("/* Text and command classification helpers */")
+    SOURCE.index("#ifndef LED_FX_NONE")
 ]
-part_mem = SOURCE[
-    SOURCE.index("static int mem_equal") :
-    SOURCE.index("/* Word-boundary helpers.")
+part_mem = TEXT_SOURCE[
+    TEXT_SOURCE.index("static int mem_equal") :
+    TEXT_SOURCE.index("/* Word-boundary helpers.")
 ]
 part_init = SOURCE[
     SOURCE.index("static void join_path(char *dst, unsigned long max, const char *a, const char *b) {") :
@@ -376,9 +377,13 @@ def test_auto_repeat_and_stale_pid_status():
         c_file = tmp / "test_rep.c"
         exe = tmp / "test_rep"
         # part_paths defines selection/run_controller helpers, extract through track_observation_revision or keep clean slice
-        ws_start = SOURCE.index("static int spotify_is_active = 0;")
-        ws_slice = SOURCE[ws_start : SOURCE.index("#ifdef __aarch64__", ws_start)]
-        stub_head = C_PREFIX + part_mem + r"""
+        vol_source = (ROOT / "src/quasar-volume.h").read_text()
+        globals_slice = SOURCE[SOURCE.index("static int spotify_is_active = 0;") : SOURCE.index('#include "text-json.h"')]
+        track_slice = TEXT_SOURCE[TEXT_SOURCE.index("static void append_artist_name") : TEXT_SOURCE.index("#endif")]
+        vol_slice = vol_source[vol_source.index("static int quasar_vol = -1;") : vol_source.index("#endif")]
+        fx_start = SOURCE.index("#ifndef LED_FX_NONE")
+        ws_slice = SOURCE[fx_start : SOURCE.index("#ifdef __aarch64__", fx_start)]
+        stub_head = C_PREFIX + part_mem + globals_slice + vol_slice + track_slice + r"""
 static int is_yam_mode = 0;
 static int spotify_is_active_dummy = 0;
 static const char *get_requests_dir(void) { return "/tmp"; }
@@ -830,6 +835,26 @@ def test_doctor_report():
                 args = (root / "curl-args").read_text().splitlines()
                 assert args[0] == "-q" and args[-1] == "https://api.spotify.com/v1/me"
                 assert not any("SECRET_" in arg or "Authorization" in arg for arg in args)
+            assert "Hardware tier:" in result.stdout, result.stdout
+            assert "Audio rate shim: missing" in result.stdout, result.stdout
+            assert "LED config: visualizer=white fx=on" in result.stdout, result.stdout
+            assert "Input devices:" in result.stdout, result.stdout
+            assert "Quasar IPC: not observed" in result.stdout, result.stdout
+
+        # Also check Quasar IPC summary and new doctor_events rules with bridge schema/capability logs
+        (root / "bridge.log").write_text(
+            '[bridge] Quasar protobuf schema: direct field 3/210\n'
+            '[bridge] Quasar capability active: CommandSpotterCapability\n'
+            '[bridge] Native Quasar media playback detected, yielding Spotify\n'
+            "[bridge] Action: ENQUEUE TRACK query='SECRET_ENQUEUE'\n"
+            '[bridge] Action: RESTART TRACK (seek 0)\n'
+        )
+        res2 = subprocess.run(["sh", str(cli), "doctor", "--offline"], env=env,
+                              capture_output=True, text=True, timeout=7, check=True)
+        assert "Quasar IPC: schema=direct field 3/210 caps=CommandSpotterCapability" in res2.stdout, res2.stdout
+        assert "quasar_schema_direct" in res2.stdout and "quasar_cap_CommandSpotterCapability" in res2.stdout, res2.stdout
+        assert "native_media_handoff" in res2.stdout and "voice_enqueue" in res2.stdout and "voice_restart" in res2.stdout, res2.stdout
+        assert "SECRET_" not in res2.stdout + res2.stderr
         print("PASS doctor reports ALSA and Spotify diagnostics without exposing secrets or running configuration")
 
 

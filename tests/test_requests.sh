@@ -83,6 +83,7 @@ control() {
     sh "$TEST/app/scripts/control.sh" "$@"
     expected=$1
     [ "$expected" != toggle ] || expected=play
+    [ "$expected" != enqueue ] || expected=add-to-queue
     tries=0
     while ! grep -q " $expected" "$TEST/controls" 2>/dev/null && [ "$tries" -lt 100 ]; do sleep 0.05; tries=$((tries+1)); done
 }
@@ -554,5 +555,46 @@ rm -f "$TEST/app/data/requests/led_fx"
 touch "$TEST/release"
 wait "$older" || true
 label='superseded failing search does not flash led_fx err'; check sh -c '[ ! -e "$TEST/app/data/requests/led_fx" ]'
+
+# Voice queue, restart (seek 0), clean deactivate, and hard-error TTS signaling
+reset
+control enqueue 'песню test'
+label='enqueue searches with --queue and dispatches add-to-queue without activate'
+check sh -c 'grep -q "add-to-queue spotify:track:TEST123" "$TEST/controls" && ! grep -q " activate" "$TEST/controls" && [ "$(cat "$TEST/app/data/requests/led_fx" 2>/dev/null || true)" = "play" ]'
+
+reset
+control seek 0
+label='seek 0 dispatches seek 0 cleanly'; check grep -q " seek 0" "$TEST/controls"
+label='non-numeric seek is rejected with exit 2'; check sh -c 'rc=0; sh "$TEST/app/scripts/control.sh" seek bad || rc=$?; [ "$rc" -eq 2 ]'
+
+reset
+control deactivate
+label='deactivate pauses and deactivates Soloist cleanly'
+check sh -c 'grep -q " pause" "$TEST/controls" && grep -q " deactivate" "$TEST/controls"'
+
+reset
+mv "$TEST/app/spotify_api.conf" "$TEST/app/spotify_api.conf.bak"
+sh "$SEARCH" 'включи песню Test' || true
+mv "$TEST/app/spotify_api.conf.bak" "$TEST/app/spotify_api.conf"
+label='missing API config writes cfg to requests/tts'
+check sh -c '[ "$(cat "$TEST/app/data/requests/tts" 2>/dev/null || true)" = "cfg" ]'
+
+reset
+echo limit > "$TEST/mode"
+sh "$SEARCH" 'включи песню Test' || true
+label='HTTP 429 writes limit to requests/tts'
+check sh -c '[ "$(cat "$TEST/app/data/requests/tts" 2>/dev/null || true)" = "limit" ]'
+
+reset
+echo transport > "$TEST/mode"
+sh "$SEARCH" 'включи песню Test' || true
+label='HTTP transport failure writes net to requests/tts'
+check sh -c '[ "$(cat "$TEST/app/data/requests/tts" 2>/dev/null || true)" = "net" ]'
+
+reset
+echo empty > "$TEST/mode"
+sh "$SEARCH" 'включи несуществующий трек 999' || true
+label='ordinary catalog no-match never triggers requests/tts'
+check sh -c '[ ! -e "$TEST/app/data/requests/tts" ]'
 
 exit "$failures"

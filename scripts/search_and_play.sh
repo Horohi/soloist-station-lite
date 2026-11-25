@@ -2,6 +2,12 @@
 export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
 unset LD_LIBRARY_PATH LD_PRELOAD
 
+QUEUE=0
+if [ "${1:-}" = "--queue" ]; then
+    QUEUE=1
+    shift
+fi
+
 QUERY="$1"
 if [ -z "$QUERY" ]; then
     exit 0
@@ -54,12 +60,32 @@ signal_led_fx() {
     fi
 }
 
+signal_error_tts() {
+    request_current || return 0
+    _tts_tmp="$STATE_DIR/tts.$$"
+    if printf '%s\n' "$1" > "$_tts_tmp" 2>/dev/null; then
+        mv -f "$_tts_tmp" "$STATE_DIR/tts" 2>/dev/null || rm -f "$_tts_tmp"
+    fi
+}
+
+check_auth_error_tts() {
+    _st=$(request_cli status 2>/dev/null || true)
+    case "$_st" in
+        *'logged in: no'*) signal_error_tts auth ;;
+    esac
+}
+
 dispatch_play_fx() {
     _rc=0
-    request_dispatch play "$@" || _rc=$?
+    if [ "$QUEUE" = 1 ]; then
+        request_dispatch add-to-queue "$@" || _rc=$?
+    else
+        request_dispatch play "$@" || _rc=$?
+    fi
     if [ "$_rc" -eq 0 ]; then
         signal_led_fx play
     else
+        check_auth_error_tts
         signal_led_fx err
     fi
     return "$_rc"
@@ -90,6 +116,7 @@ valid_id() {
 }
 
 RADIO=0
+if [ "$QUEUE" = 0 ]; then
 case "$TERM" in
     'любимые треки'|'мои любимые треки'|'понравившиеся треки'|'мне нравится'|'избранное'|'мое избранное'|'моё избранное'|'избранные треки')
         FAVORITES="$YAM_DATA_ROOT/favorites.uri"
@@ -130,6 +157,7 @@ case "$TERM" in
         TERM=$(printf '%s\n' "$TERM" | sed -E 's/^(волну|радио) по (треку |песне |песни )?//')
         case "$TERM" in ''|треку|песне|песни) personal_error 'Missing radio seed track';; esac;;
 esac
+fi
 
 # Detect search type hint from the FIRST word only ("песню Группа крови" is a track, not an artist)
 TYPE="track"
@@ -149,7 +177,10 @@ case "$TERM" in
     "песню "*|"песня "*|"трек "*)
         TYPE="track"; EXPLICIT_TYPE=1; TERM="${TERM#* }" ;;
 esac
-[ "$RADIO" = 0 ] || TYPE=track
+if [ "$RADIO" = 1 ] || [ "$QUEUE" = 1 ]; then
+    TYPE=track
+fi
+[ "$QUEUE" = 0 ] || [ -n "$TERM" ] || personal_error 'Missing queue track query'
 if [ "$TYPE" = track ] && { [ "$EXPLICIT_TYPE" = 1 ] || [ "$RADIO" = 1 ]; }; then
     case "$TERM" in
         *' исполнителя '*)
@@ -166,10 +197,10 @@ fi
 echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 
 # If search term is empty or generic 'музыку' -> resume or play default
-if [ "$RADIO" = 0 ] && [ "$EXPLICIT_TYPE" = 0 ] &&
+if [ "$QUEUE" = 0 ] && [ "$RADIO" = 0 ] && [ "$EXPLICIT_TYPE" = 0 ] &&
    { [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; }; then
     echo "[search] Generic play request, resuming..." >> "$LOG"
-    request_dispatch play || { signal_led_fx err; exit 1; }
+    request_dispatch play || { check_auth_error_tts; signal_led_fx err; exit 1; }
     _resume_tries=0
     while [ "$_resume_tries" -lt 8 ]; do
         sleep 0.3
@@ -206,6 +237,7 @@ fi
 # Spotify API Configuration
 if [ ! -f "$API_CONF" ]; then
     echo "[search] Missing API configuration; playback unchanged" >> "$LOG"
+    signal_error_tts cfg
     signal_led_fx err
     exit 1
 fi
@@ -213,6 +245,7 @@ fi
 . "$API_CONF"
 if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
     echo "[search] Spotify API keys not set in $API_CONF" >> "$LOG"
+    signal_error_tts cfg
     signal_led_fx err
     exit 1
 fi
@@ -242,10 +275,12 @@ api_request() {
     case "$UNTIL" in ''|*[!0-9]*) UNTIL=0;; esac
     if [ "$NOW" -lt "$UNTIL" ]; then
         echo "[search] Spotify cooldown active; request discarded" >> "$LOG"
+        signal_error_tts limit
         return 1
     fi
     HTTP_STATUS=$("$CURL_BIN" $CURL_OPTS -D "$STATE_DIR/headers.$$" -o "$STATE_DIR/body.$$" -w '%{http_code}' "$@") || {
         echo "[search] HTTP transport failed; playback unchanged" >> "$LOG"
+        signal_error_tts net
         return 1
     }
     if [ "$HTTP_STATUS" = 429 ]; then
@@ -253,6 +288,7 @@ api_request() {
         RETRY=$(awk 'tolower($1)=="retry-after:" {gsub(/\r/,"",$2); value=$2}
             END {if(value ~ /^[0-9]+$/ && length(value)<=9) printf "%.0f",value+0; else print 60}' "$STATE_DIR/headers.$$")
         printf '%s\n' "$((NOW + RETRY))" > "$STATE_DIR/cooldown"
+        signal_error_tts limit
     fi
     case "$HTTP_STATUS" in
         2??)
@@ -261,8 +297,15 @@ api_request() {
                 return 1
             fi
             cat "$STATE_DIR/body.$$";;
-        *)
+        400|401)
             [ "$HTTP_STATUS" != 401 ] || rm -f "$STATE_DIR/token" "$STATE_DIR/token_exp"
+            echo "[search] HTTP $HTTP_STATUS; playback unchanged" >> "$LOG"
+            return 2;;
+        403|5??)
+            echo "[search] HTTP $HTTP_STATUS; playback unchanged" >> "$LOG"
+            signal_error_tts net
+            return 1;;
+        *)
             echo "[search] HTTP $HTTP_STATUS; playback unchanged" >> "$LOG"
             return 1;;
     esac
@@ -275,11 +318,17 @@ case "$EXP" in ''|*[!0-9]*) EXP=0;; esac
 TOKEN=""
 [ "$NOW" -ge "$EXP" ] || TOKEN=$(cat "$STATE_DIR/token" 2>/dev/null)
 if [ -z "$TOKEN" ]; then
+    _arc=0
     AUTH_RESP=$(api_request -X POST "https://accounts.spotify.com/api/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         --data-urlencode "grant_type=client_credentials" \
         --data-urlencode "client_id=$SPOTIFY_CLIENT_ID" \
-        --data-urlencode "client_secret=$SPOTIFY_CLIENT_SECRET") || { signal_led_fx err; exit 1; }
+        --data-urlencode "client_secret=$SPOTIFY_CLIENT_SECRET") || _arc=$?
+    if [ "$_arc" -ne 0 ]; then
+        [ "$_arc" -ne 2 ] || signal_error_tts cfg
+        signal_led_fx err
+        exit 1
+    fi
     TOKEN=$(printf '%s' "$AUTH_RESP" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     case "$TOKEN" in ''|*[!A-Za-z0-9._~+/=-]*)
         echo "[search] Invalid token response; playback unchanged" >> "$LOG"; signal_led_fx err; exit 1;;
@@ -319,7 +368,7 @@ search_catalog() {
 
 CONTEXTS=0
 TYPES=$TYPE
-if [ "$EXPLICIT_TYPE" = 0 ] && [ "$RADIO" = 0 ] && [ "$CENSORSHIP" = 0 ] &&
+if [ "$QUEUE" = 0 ] && [ "$EXPLICIT_TYPE" = 0 ] && [ "$RADIO" = 0 ] && [ "$CENSORSHIP" = 0 ] &&
    [ "$ALLOW_GENERIC" = 0 ] && [ -z "$ARTIST" ]; then
     CONTEXTS=1
     TYPES=track,artist,album

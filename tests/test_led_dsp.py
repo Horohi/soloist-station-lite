@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SRC = (ROOT / "src" / "soloist-bridge.c").read_text(encoding="utf-8")
+SRC = (ROOT / "src" / "led-subsystem.h").read_text(encoding="utf-8")
 
 
 def slice_between(src: str, start_marker: str, end_marker: str) -> str:
@@ -236,7 +236,7 @@ static void build_led_path(char *dst, unsigned long max, const char *color, int 
     snprintf(dst, max, "%s%s:ring%d/brightness", g_led_hw.prefix, color, zone_idx);
 }}
 {slice_between(SRC, "static void led_reset_internal_state(void) {", "static void set_led_visualizer_impl(")}
-{slice_between(SRC, "static void write_zone_rgb_if_changed(", "static uint8_t quasar_buf[65536];")}
+{slice_between(SRC, "static void write_zone_rgb_if_changed(", "#endif")}
 
 int main(void) {{
     g_led_hw.probed = 1;

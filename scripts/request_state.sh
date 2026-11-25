@@ -44,7 +44,7 @@ request_cleanup() {
         CLI_PID=
     fi
     [ "$SELECTION_PENDING" = 0 ] || rm -f "$STATE_DIR/selection.pending"
-    rm -f "$STATE_DIR/cli.$$" "$STATE_DIR/now.$$" "$STATE_DIR/selection.$$" "$STATE_DIR/body.$$" "$STATE_DIR/headers.$$"
+    rm -f "$STATE_DIR/cli.$$" "$STATE_DIR/now.$$" "$STATE_DIR/selection.$$" "$STATE_DIR/body.$$" "$STATE_DIR/headers.$$" "$STATE_DIR/tts.$$" "$STATE_DIR/led_fx.$$"
 }
 
 request_traps() {
@@ -160,6 +160,14 @@ request_dispatch() {
             set -- pause
         fi
         rm -f "$STATE_DIR/now.$$"
+    fi
+    if [ "$1" = deactivate ]; then
+        request_cli pause >/dev/null 2>&1 || true
+        request_cli deactivate >/dev/null
+        result=$?
+        [ "$result" = 0 ] || request_report "$action" dispatch "$result"
+        flock -u 8
+        return "$result"
     fi
     if [ "$1" = play ]; then
         request_cli activate >/dev/null

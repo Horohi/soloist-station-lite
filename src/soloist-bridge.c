@@ -304,487 +304,28 @@ static int64_t now_ms(void) {
     return 0;
 }
 
-/* Builds and sends one AliceCapability method frame via Quasar Native IPC (QuasarMessage field 210).
- * Length: 24 bytes body (0x18, 0x00, 0x00, 0x00)
- * Tag 210 (wire type 2): 0x92, 0x0d
- * Remoting length: 21 bytes (0x15)
- * Tag 7 ("AliceCapability"): 0x3a, 0x0f, 'AliceCapability'
- * Tag 8 ({ 0x08, method }): 0x42, 0x02, 0x08, method
- */
-static int send_alice_method_f210(int quasar_fd, unsigned char method) {
-    if (quasar_fd < 0) return -1;
-    static const unsigned char frame_template[28] = {
-        0x18, 0x00, 0x00, 0x00, // length = 24
-        0x92, 0x0d,             // tag: field 210, wire type 2
-        0x15,                   // remoting length = 21 bytes
-        0x3a, 0x0f,             // tag: field 7, len 15
-        'A','l','i','c','e','C','a','p','a','b','i','l','i','t','y',
-        0x42, 0x02,             // tag: field 8, len 2
-        0x08, 0x00              // method field 1 (0x08), method byte (filled at [27])
-    };
-    unsigned char frame[28];
-    for (int i = 0; i < 28; i++) frame[i] = frame_template[i];
-    frame[27] = method;
-
-    long n = sys_write(quasar_fd, frame, sizeof(frame));
-    return (n == (long)sizeof(frame)) ? 0 : -1;
-}
-
-/* Also sends SharedMessage wrapper (field 252 + field 253: 210) for newer/alternate Quasar daemons */
-static int send_alice_method_f252(int quasar_fd, unsigned char method) {
-    if (quasar_fd < 0) return -1;
-    static const unsigned char frame_template[32] = {
-        0x1c, 0x00, 0x00, 0x00, // length = 28
-        0xe2, 0x0f,             // tag: field 252, wire type 2
-        0x15,                   // remoting length = 21 bytes
-        0x3a, 0x0f,             // tag: field 7, len 15
-        'A','l','i','c','e','C','a','p','a','b','i','l','i','t','y',
-        0x42, 0x02,             // tag: field 8, len 2
-        0x08, 0x00,             // method field 1 (0x08), method byte (filled at [27])
-        0xe8, 0x0f,             // tag: field 253, wire type 0
-        0xd2, 0x01              // value = 210 (QuasarMessage::remoting)
-    };
-    unsigned char frame[32];
-    for (int i = 0; i < 32; i++) frame[i] = frame_template[i];
-    frame[27] = method;
-
-    long n = sys_write(quasar_fd, frame, sizeof(frame));
-    return (n == (long)sizeof(frame)) ? 0 : -1;
-}
-
-static int send_alice_method(int quasar_fd, unsigned char method) {
-    int r1 = send_alice_method_f210(quasar_fd, method);
-    int r2 = send_alice_method_f252(quasar_fd, method);
-    return (r1 == 0 || r2 == 0) ? 0 : -1;
-}
-
-/* Sends PlaybackControlCapability PAUSE (method kind 1) to pause any native media player */
-static void send_playback_pause(int quasar_fd) {
-    if (quasar_fd < 0) return;
-    // Native field 210: 38 bytes
-    static const unsigned char p210[38] = {
-        0x22, 0x00, 0x00, 0x00,
-        0x92, 0x0d, 0x1f,
-        0x3a, 0x19,
-        'P','l','a','y','b','a','c','k','C','o','n','t','r','o','l','C','a','p','a','b','i','l','i','t','y',
-        0x6a, 0x02, 0x08, 0x01
-    };
-    sys_write(quasar_fd, p210, sizeof(p210));
-
-    // SharedMessage field 252/253: 42 bytes
-    static const unsigned char p252[42] = {
-        0x26, 0x00, 0x00, 0x00,
-        0xe2, 0x0f, 0x1f,
-        0x3a, 0x19,
-        'P','l','a','y','b','a','c','k','C','o','n','t','r','o','l','C','a','p','a','b','i','l','i','t','y',
-        0x6a, 0x02, 0x08, 0x01,
-        0xe8, 0x0f, 0xd2, 0x01
-    };
-    sys_write(quasar_fd, p252, sizeof(p252));
-}
-
-static void send_cancel_alice(int quasar_fd) {
-    if (quasar_fd < 0) return;
-    int err = 0;
-    // Native Quasar remoting directives:
-    // kind 3: STOP_CONVERSATION
-    // kind 6: CANCEL_DIALOG_AND_CLEAR_QUEUE
-    // kind 0x0e: STOP_TTS
-    // kind 1: CANCEL_DIALOG
-    if (send_alice_method(quasar_fd, 3) < 0) err = 1;
-    if (send_alice_method(quasar_fd, 6) < 0) err = 1;
-    if (send_alice_method(quasar_fd, 0x0e) < 0) err = 1;
-    if (send_alice_method(quasar_fd, 1) < 0) err = 1;
-
-    send_playback_pause(quasar_fd);
-
-    if (!err) {
-        log_msg("[bridge] Sent cancel_alice (stop+queue+tts+dialog+pause) to Quasar\n");
-    } else {
-        log_msg("[bridge] Warning: Failed to send cancel_alice to Quasar socket\n");
-    }
-}
-
-static struct soloist_duck_shm *g_duck_shm = 0;
-static int g_ducking_active = 0;
-static int g_alsa_yield_active = 0;
-static int64_t g_alsa_yield_since_ms = 0;
-static int64_t g_tts_hold_until_ms = 0;
-static int g_tts_speaking_seen = 0;
 static int quasar_uses_f252 = -1; // -1=unknown, 0=direct field 210, 1=SharedMessage 252/253
-static uint64_t g_alice_state = 0;
-static int64_t g_led_alice_yield_until_ms = 0;
+static int spotify_is_active = 0;
+static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify Connect device
+static int yandex_music_active = 0;      // 1 = user handed playback to Yandex Music / Radio
+static int64_t yandex_music_handoff_ms = 0; // timestamp of explicit handoff to Yandex Music
+static int repeat_mode = 0; // 0=off, 1=context, 2=track
+static char current_track_uri[128] = {0};
+static char current_track_name[128] = {0};
+static char current_artist_name[128] = {0};
+static char last_auto_next_uri[128] = {0};
+static int playback_status = 0; // 0=stopped, 1=playing, 2=paused, 3=buffering
+static uint64_t track_duration_ms = 0;
+static uint64_t base_position_ms = 0;
+static int64_t local_recorded_ms = 0;
+static int playback_speed = 0;
+static int64_t stuck_since_ms = 0;
+static int64_t last_auto_next_time = 0;
+static int64_t last_cache_clean_ms = 0;
 
-static void duck_shm_init(void) {
-    sys_unlink(SOLOIST_YIELD_DEFAULT_PATH);
-    if (g_duck_shm) return;
-    int fd = sys_open(SOLOIST_DUCK_DEFAULT_PATH, 0100 | 02 /* O_CREAT | O_RDWR */, 0644);
-    if (fd < 0) return;
-    sys_ftruncate(fd, SOLOIST_DUCK_SHM_SIZE);
-    void *p = sys_mmap(0, SOLOIST_DUCK_SHM_SIZE, 3 /* PROT_READ|PROT_WRITE */, 1 /* MAP_SHARED */, fd, 0);
-    sys_close(fd);
-    if ((long)p < 0 && (long)p > -4096) return;
-    g_duck_shm = (struct soloist_duck_shm *)p;
-    g_duck_shm->magic = SOLOIST_DUCK_MAGIC;
-    __atomic_store_n(&g_duck_shm->until_ms, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_duck_shm->active, 0, __ATOMIC_RELEASE);
-}
-
-static void set_ducking(int active, int64_t now) {
-    g_ducking_active = active ? 1 : 0;
-    if (!g_duck_shm) return;
-    if (active) {
-        __atomic_store_n(&g_duck_shm->until_ms, now + 60000, __ATOMIC_RELEASE);
-        __atomic_store_n(&g_duck_shm->active, 1, __ATOMIC_RELEASE);
-    } else {
-        __atomic_store_n(&g_duck_shm->active, 0, __ATOMIC_RELEASE);
-    }
-}
-
-static inline int is_alice_visual_state(uint64_t st) {
-    return (st == 1 || st == 2 || st == 3 || st == 5);
-}
-
-/* Yield /sys/class/leds whenever maind renders Alice listening/thinking/speaking LEDs */
-static inline int alice_owns_leds(int64_t now) {
-    return is_alice_visual_state(g_alice_state) ||
-           g_ducking_active ||
-           now < g_tts_hold_until_ms ||
-           now < g_led_alice_yield_until_ms;
-}
-
-static void set_alsa_yield(int enable, int64_t now) {
-    if (enable) {
-        int probe = sys_open(SOLOIST_YIELD_DEFAULT_PATH, 0, 0);
-        if (probe >= 0) {
-            sys_close(probe);
-        } else {
-            int fd = sys_open(SOLOIST_YIELD_DEFAULT_PATH, 0100 | 01 /* O_CREAT | O_WRONLY */, 0644);
-            if (fd >= 0) sys_close(fd);
-        }
-        g_alsa_yield_active = 1;
-        if (g_alsa_yield_since_ms == 0) g_alsa_yield_since_ms = now;
-    } else if (g_alsa_yield_active || g_alsa_yield_since_ms != 0) {
-        sys_unlink(SOLOIST_YIELD_DEFAULT_PATH);
-        g_alsa_yield_active = 0;
-        g_alsa_yield_since_ms = 0;
-    }
-}
-
-static int64_t cancel_alice_until_ms = 0;
-
-/* Sends Alice START_VOCALIZE directive so Alice speaks natively on the speaker */
-static int send_alice_tts(int quasar_fd, const char *text) {
-    if (quasar_fd < 0 || !text || !*text) return -1;
-
-    // Cancel any in-flight cloud dialog so Alice won't also answer from Yandex Music,
-    // clear suppression window so our START_VOCALIZE speech isn't aborted, duck PCM,
-    // and yield /dev/snd/pcmC0D0p so 32-bit Alice can open dmix cleanly while playing.
-    send_cancel_alice(quasar_fd);
-    cancel_alice_until_ms = 0;
-    int64_t tnow = now_ms();
-    g_tts_speaking_seen = 0;
-    g_tts_hold_until_ms = tnow + 4000;
-    set_ducking(1, tnow);
-    set_alsa_yield(1, tnow);
-    int alsa_released = 0;
-    for (int waited_ms = 20; waited_ms <= 400; waited_ms += 20) {
-        sys_msleep(20);
-        if (waited_ms >= 80 && sys_shmget(1024, 0, 0) == -2 /* ENOENT */) {
-            alsa_released = 1;
-            break;
-        }
-    }
-    if (!alsa_released) {
-        log_msg("[bridge] Alice TTS cancelled: ALSA SHM still present or inaccessible\n");
-        return -1;
-    }
-
-    unsigned long text_len = str_len(text);
-    if (text_len > 350) text_len = 350;
-
-    // Build TVocalizeDirective (schema fields: 1=Text, 2=SynthesisMode(2=Interrupt)):
-    uint8_t voc_dir[400];
-    unsigned long v_pos = 0;
-    voc_dir[v_pos++] = 0x0a; // tag 1 wire 2
-    if (text_len >= 128) {
-        voc_dir[v_pos++] = (uint8_t)((text_len & 0x7f) | 0x80);
-        voc_dir[v_pos++] = (uint8_t)(text_len >> 7);
-    } else {
-        voc_dir[v_pos++] = (uint8_t)text_len;
-    }
-    for (unsigned long i = 0; i < text_len; i++) voc_dir[v_pos++] = (uint8_t)text[i];
-    voc_dir[v_pos++] = 0x10; // tag 2 wire 0
-    voc_dir[v_pos++] = 0x02; // value 2 (Interrupt)
-
-    // AliceCapabilityMethod:
-    // field 1: method = 18 (tag 0x08, val 0x12)
-    // field 13: vocalize_directive (tag (13<<3)|2 = 106 = 0x6a)
-    uint8_t meth_msg[450];
-    unsigned long m_pos = 0;
-    meth_msg[m_pos++] = 0x08;
-    meth_msg[m_pos++] = 0x12; // 18: START_VOCALIZE
-    meth_msg[m_pos++] = 0x6a; // field 13 wire 2
-    if (v_pos >= 128) {
-        meth_msg[m_pos++] = (uint8_t)((v_pos & 0x7f) | 0x80);
-        meth_msg[m_pos++] = (uint8_t)(v_pos >> 7);
-    } else {
-        meth_msg[m_pos++] = (uint8_t)v_pos;
-    }
-    for (unsigned long i = 0; i < v_pos; i++) meth_msg[m_pos++] = voc_dir[i];
-
-    // Remoting:
-    // field 7: "AliceCapability" (tag 0x3a, len 15)
-    // field 8: meth_msg (tag 0x42)
-    uint8_t remoting[500];
-    unsigned long r_pos = 0;
-    remoting[r_pos++] = 0x3a;
-    remoting[r_pos++] = 15;
-    const char *cap = "AliceCapability";
-    for (int i = 0; i < 15; i++) remoting[r_pos++] = (uint8_t)cap[i];
-    remoting[r_pos++] = 0x42;
-    if (m_pos >= 128) {
-        remoting[r_pos++] = (uint8_t)((m_pos & 0x7f) | 0x80);
-        remoting[r_pos++] = (uint8_t)(m_pos >> 7);
-    } else {
-        remoting[r_pos++] = (uint8_t)m_pos;
-    }
-    for (unsigned long i = 0; i < m_pos; i++) remoting[r_pos++] = meth_msg[i];
-
-    // Build frame for either direct field 210 (0x92, 0x0d) or SharedMessage field 252/253 (0xe2, 0x0f ... 0xe8, 0x0f, 0xd2, 0x01)
-    uint8_t frame[600];
-    unsigned long pos = 4;
-    if (quasar_uses_f252 == 1) {
-        frame[pos++] = 0xe2;
-        frame[pos++] = 0x0f; // tag 252 wire 2
-    } else {
-        frame[pos++] = 0x92;
-        frame[pos++] = 0x0d; // tag 210 wire 2
-    }
-    if (r_pos >= 128) {
-        frame[pos++] = (uint8_t)((r_pos & 0x7f) | 0x80);
-        frame[pos++] = (uint8_t)(r_pos >> 7);
-    } else {
-        frame[pos++] = (uint8_t)r_pos;
-    }
-    for (unsigned long i = 0; i < r_pos; i++) frame[pos++] = remoting[i];
-    if (quasar_uses_f252 == 1) {
-        frame[pos++] = 0xe8;
-        frame[pos++] = 0x0f; // tag 253 wire 0
-        frame[pos++] = 0xd2;
-        frame[pos++] = 0x01; // value 210 (QuasarMessage::remoting)
-    }
-    uint32_t body_len = (uint32_t)(pos - 4);
-    frame[0] = (uint8_t)(body_len & 0xff);
-    frame[1] = (uint8_t)((body_len >> 8) & 0xff);
-    frame[2] = (uint8_t)((body_len >> 16) & 0xff);
-    frame[3] = (uint8_t)((body_len >> 24) & 0xff);
-
-    long n = sys_write(quasar_fd, frame, pos);
-    log_msg("[bridge] Sent Alice TTS START_VOCALIZE: ");
-    log_msg(text);
-    log_msg("\n");
-    return (n == (long)pos) ? 0 : -1;
-}
-
-static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
-    int64_t tnow = now_ms();
-    cancel_alice_until_ms = tnow + duration_ms;
-    g_tts_hold_until_ms = 0;
-    set_ducking(0, tnow);
-    set_alsa_yield(0, tnow);
-    if (is_alice_visual_state(g_alice_state)) {
-        g_led_alice_yield_until_ms = tnow + 150;
-    }
-    send_cancel_alice(quasar_fd);
-}
-
-/* Format unsigned int into decimal ASCII; returns character count written (excluding NUL). */
-static unsigned long format_uint_ascii(char *dst, int val) {
-    if (val <= 0) {
-        dst[0] = '0';
-        dst[1] = 0;
-        return 1;
-    }
-    char digits[12];
-    int dcnt = 0;
-    int temp = val;
-    while (temp > 0 && dcnt < 12) {
-        digits[dcnt++] = (char)('0' + (temp % 10));
-        temp /= 10;
-    }
-    unsigned long len = 0;
-    while (dcnt > 0) dst[len++] = digits[--dcnt];
-    dst[len] = 0;
-    return len;
-}
-
-/* Pure bitwise IEEE-754 float <-> int (0..100) conversions without libm/libgcc. */
-static uint32_t int_to_f32_bits(int v) {
-    if (v <= 0) return 0;
-    if (v > 100) v = 100;
-    uint32_t u = (uint32_t)v;
-    int msb = 0;
-    uint32_t tmp = u;
-    while (tmp >>= 1) msb++;
-    uint32_t mant = (u << (23 - msb)) & 0x7fffffu;
-    uint32_t exp = (uint32_t)(127 + msb);
-    return (exp << 23) | mant;
-}
-
-static int f32_bits_to_int(uint32_t bits) {
-    if (bits & 0x80000000u) return 0;
-    int exp = (int)((bits >> 23) & 0xffu) - 127;
-    if (exp < -1) return 0;
-    if (exp == -1) return 1;
-    if (exp > 7) return 100;
-    uint32_t sig = (1u << 23) | (bits & 0x7fffffu);
-    int shift = 23 - exp;
-    int val = (int)((sig + (1u << (shift - 1))) >> shift);
-    if (val > 100) val = 100;
-    return val;
-}
-
-static int find_fixed32(const uint8_t *data, unsigned long len, uint32_t field_num, uint32_t *val_out) {
-    unsigned long offset = 0;
-    while (offset < len) {
-        uint64_t tag = parse_varint(data, len, &offset);
-        uint32_t fnum = (uint32_t)(tag >> 3);
-        int wire = (int)(tag & 7);
-        if (fnum == 0) return 0;
-        if (wire == 0) {
-            parse_varint(data, len, &offset);
-        } else if (wire == 2) {
-            uint64_t flen = parse_varint(data, len, &offset);
-            if (flen > len - offset) return 0;
-            offset += flen;
-        } else if (wire == 1) {
-            if (8 > len - offset) return 0;
-            offset += 8;
-        } else if (wire == 5) {
-            if (4 > len - offset) return 0;
-            if (fnum == field_num) {
-                if (val_out) {
-                    *val_out = (uint32_t)data[offset] |
-                               ((uint32_t)data[offset + 1] << 8) |
-                               ((uint32_t)data[offset + 2] << 16) |
-                               ((uint32_t)data[offset + 3] << 24);
-                }
-                return 1;
-            }
-            offset += 4;
-        } else {
-            return 0;
-        }
-    }
-    return 0;
-}
-
-/* Parse Quasar StereoPair (field 198 -> 1 -> 11 VolumeManager.State) on port 9921. */
-static int parse_quasar_vol_frame(const uint8_t *frame, unsigned long frame_len, int *vol_out, uint64_t *src_out) {
-    const uint8_t *sp_body = 0;
-    unsigned long sp_len = 0;
-    uint64_t msg_type = 0;
-    if (find_field(frame, frame_len, 198, 2, &sp_body, &sp_len, 0)) {
-        quasar_uses_f252 = 0;
-    } else if (find_field(frame, frame_len, 253, 0, 0, 0, &msg_type) && msg_type == 198 &&
-               find_field(frame, frame_len, 252, 2, &sp_body, &sp_len, 0)) {
-        quasar_uses_f252 = 1;
-    } else {
-        return 0;
-    }
-    const uint8_t *state_body = 0;
-    unsigned long state_len = 0;
-    if (!find_field(sp_body, sp_len, 1, 2, &state_body, &state_len, 0)) return 0;
-
-    const uint8_t *vol_body = 0;
-    unsigned long vol_len = 0;
-    if (!find_field(state_body, state_len, 11, 2, &vol_body, &vol_len, 0)) return 0;
-
-    uint32_t pct_bits = 0;
-    int has_pct = find_fixed32(vol_body, vol_len, 6, &pct_bits);
-    uint64_t is_muted = 0;
-    int has_mute = find_field(vol_body, vol_len, 3, 0, 0, 0, &is_muted);
-    if (!has_pct && !has_mute) return 0;
-
-    uint64_t src = 0;
-    find_field(vol_body, vol_len, 7, 0, 0, 0, &src);
-
-    int v = (has_mute && is_muted) ? 0 : (has_pct ? f32_bits_to_int(pct_bits) : 0);
-    if (vol_out) *vol_out = v;
-    if (src_out) *src_out = src;
-    return 1;
-}
-
-/* Send silent volume_set directive (ESourceOther=1000, IsLedSilent=1) via Quasar iohub_clients (port 9910). */
-static int send_quasar_volume(int io_fd, int vol_pct) {
-    if (io_fd < 0) return -1;
-    if (vol_pct < 0) vol_pct = 0;
-    if (vol_pct > 100) vol_pct = 100;
-
-    uint32_t fbits = int_to_f32_bits(vol_pct);
-
-    // PayloadRaw = TVolumeSetDirective { 1: float PercentLevel, 2: Mode=0, 3: Source=1000 }
-    // Wrapped inside TDirective -> DirectiveList -> ExternalDirectives -> IOControlCommand(95) -> QuasarMessage(88) or SharedMessage(252/253=88)
-    uint8_t frame[60] = {
-        53, 0x00, 0x00, 0x00, // [0..3] frame length LE (53 for field 88, 56 for field 252/253)
-        0xc2, 0x05, 50,       // [4..6] QuasarMessage field 88 (or 252: 0xe2, 0x0f), len 50
-        0xfa, 0x05, 47,       // IOControlCommand field 95 (external_directives), len 47
-        0x0a, 45,             // ExternalDirectives field 1 (directive_list), len 45
-        0x0a, 43,             // DirectiveList field 1 (directives), len 43
-        0x0a, 13, 'c','l','i','e','n','t','_','a','c','t','i','o','n', // TDirective.Type
-        0x12, 10, 'v','o','l','u','m','e','_','s','e','t',             // TDirective.Name
-        0x20, 0x01,           // TDirective.IgnoreAnswer = 1
-        0x40, 0x01,           // TDirective.IsLedSilent = 1
-        0x7a, 10,             // TDirective.PayloadRaw, len 10
-        0x0d,                 // TVolumeSetDirective field 1 (PercentLevel, wire 5)
-        (uint8_t)(fbits & 0xff),
-        (uint8_t)((fbits >> 8) & 0xff),
-        (uint8_t)((fbits >> 16) & 0xff),
-        (uint8_t)((fbits >> 24) & 0xff),
-        0x10, 0x00,           // TVolumeSetDirective field 2 (Mode = 0 Default)
-        0x18, 0xe8, 0x07,     // TVolumeSetDirective field 3 (Source = 1000 ESourceOther)
-        0xe8, 0x0f, 0x58      // [57..59] SharedMessage field 253 (message_type = 88 io_control)
-    };
-
-    if (quasar_uses_f252 != 1) {
-        frame[0] = 53;
-        frame[4] = 0xc2;
-        frame[5] = 0x05;
-        if (sys_write(io_fd, frame, 57) != 57) return -1;
-    }
-    if (quasar_uses_f252 != 0) {
-        frame[0] = 56;
-        frame[4] = 0xe2;
-        frame[5] = 0x0f;
-        if (sys_write(io_fd, frame, 60) != 60) return -1;
-    }
-    return 0;
-}
-
-/* Send masked WebSocket set_volume JSON frame to Soloist WS (port 9090). */
-static int send_soloist_ws_volume(int ws_fd, int vol_pct) {
-    if (ws_fd < 0) return -1;
-    if (vol_pct < 0) vol_pct = 0;
-    if (vol_pct > 100) vol_pct = 100;
-
-    char json[64];
-    const char *hdr = "{\"type\":\"command\",\"command\":\"set_volume\",\"volume\":";
-    unsigned long pos = 0;
-    while (hdr[pos]) { json[pos] = hdr[pos]; pos++; }
-    pos += format_uint_ascii(json + pos, vol_pct);
-    json[pos++] = '}';
-
-    uint8_t frame[72];
-    frame[0] = 0x81; // FIN + text frame
-    frame[1] = (uint8_t)(0x80 | pos); // MASK + payload length (<126)
-    static const uint8_t mask[4] = { 0x12, 0x34, 0x56, 0x78 };
-    for (int i = 0; i < 4; i++) frame[2 + i] = mask[i];
-    for (unsigned long i = 0; i < pos; i++) frame[6 + i] = (uint8_t)json[i] ^ mask[i & 3];
-
-    long n = sys_write(ws_fd, frame, 6 + pos);
-    return (n == (long)(6 + pos)) ? 0 : -1;
-}
+#include "text-json.h"
+#include "quasar-ipc.h"
+#include "quasar-volume.h"
 
 static int is_yam_mode = 0;
 static char g_ctrl_sh[320] = {0};
@@ -798,6 +339,7 @@ static char g_gen_path[320] = {0};
 static char g_conf_path[320] = {0};
 static char g_led_state_path[320] = {0};
 static char g_led_req_path[320] = {0};
+static char g_tts_req_path[320] = {0};
 static char g_yam_env[5][280];
 static int g_yam_env_count = 0;
 
@@ -833,7 +375,11 @@ static const char *get_led_req_path(void) {
     return is_yam_mode ? "./data/requests/led" : "/data/opt/soloist/data/requests/led";
 }
 
-static int str_equal(const char *a, const char *b);
+static const char *get_tts_req_path(void) {
+    if (g_tts_req_path[0]) return g_tts_req_path;
+    return is_yam_mode ? "./data/requests/tts" : "/data/opt/soloist/data/requests/tts";
+}
+
 static uint64_t track_observation_revision;
 
 static int selection_needs_observation(void) {
@@ -981,567 +527,6 @@ static void run_soloist_cmd2(const char *cmd, const char *arg) { run_controller(
 static void run_toggle(void) { run_controller("toggle", 0); }
 static void run_search_and_play(const char *query) { run_controller("search", query); }
 
-/* Text and command classification helpers */
-
-static void to_lower_ru(char *dst, const char *src, unsigned long max) {
-    unsigned long si = 0, di = 0;
-    while (src[si] && di + 4 < max) {
-        uint8_t c1 = (uint8_t)src[si];
-        if (c1 < 0x80) {
-            if (c1 >= 'A' && c1 <= 'Z') dst[di++] = c1 + 32;
-            else dst[di++] = c1;
-            si++;
-        } else if (c1 == 0xd0) {
-            uint8_t c2 = (uint8_t)src[si + 1];
-            if (c2 == 0x81) { // Ё -> ё
-                dst[di++] = 0xd1;
-                dst[di++] = 0x91;
-            } else if (c2 >= 0x90 && c2 <= 0x9f) { // А-П -> а-п
-                dst[di++] = 0xd0;
-                dst[di++] = c2 + 0x20;
-            } else if (c2 >= 0xa0 && c2 <= 0xaf) { // Р-Я -> р-я
-                dst[di++] = 0xd1;
-                dst[di++] = c2 - 0x20;
-            } else {
-                dst[di++] = c1;
-                dst[di++] = c2;
-            }
-            si += 2;
-        } else if (c1 == 0xd1) {
-            dst[di++] = c1;
-            dst[di++] = src[si + 1];
-            si += 2;
-        } else {
-            dst[di++] = c1;
-            si++;
-        }
-    }
-    dst[di] = 0;
-}
-
-static int str_contains(const char *haystack, const char *needle) {
-    if (!haystack || !needle) return 0;
-    unsigned long hlen = str_len(haystack);
-    unsigned long nlen = str_len(needle);
-    if (nlen == 0) return 1;
-    if (hlen < nlen) return 0;
-    for (unsigned long i = 0; i <= hlen - nlen; i++) {
-        unsigned long j = 0;
-        while (j < nlen && haystack[i + j] == needle[j]) j++;
-        if (j == nlen) return 1;
-    }
-    return 0;
-}
-
-static int str_equal(const char *a, const char *b) {
-    unsigned long i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return 0;
-        i++;
-    }
-    return a[i] == b[i];
-}
-
-static int mem_equal(const void *a, const void *b, unsigned long n) {
-    const uint8_t *p1 = (const uint8_t *)a;
-    const uint8_t *p2 = (const uint8_t *)b;
-    for (unsigned long i = 0; i < n; i++) {
-        if (p1[i] != p2[i]) return 0;
-    }
-    return 1;
-}
-
-static void str_copy(char *dst, const char *src, unsigned long max_dst) {
-    if (!dst || max_dst == 0) return;
-    unsigned long i = 0;
-    while (src && src[i] && i + 1 < max_dst) {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = 0;
-}
-
-static int json_find_str_bounded(const char *json, const char *end, const char *key,
-                                 char *out, unsigned long max_out) {
-    if (!json || !key || !out || max_out == 0) return 0;
-    unsigned long klen = str_len(key);
-    for (const char *p = json; *p && (!end || p < end); p++) {
-        if (*p == '"' && (!end || p + 1 + klen < end) &&
-            mem_equal(p + 1, key, klen) && p[1 + klen] == '"') {
-            const char *v = p + 1 + klen + 1;
-            while (*v && (!end || v < end) && (*v == ' ' || *v == ':')) v++;
-            if (*v == '"') {
-                v++;
-                unsigned long o = 0;
-                while (*v && (!end || v < end) && *v != '"') {
-                    if (*v == '\\' && v[1] && (!end || v + 1 < end)) v++;
-                    if (o + 1 < max_out) out[o++] = *v;
-                    v++;
-                }
-                out[o] = 0;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-static int json_find_str(const char *json, const char *key, char *out, unsigned long max_out) {
-    return json_find_str_bounded(json, 0, key, out, max_out);
-}
-
-/* Advances past a JSON string starting at opening '"'; returns pointer after closing '"'. */
-static const char *json_skip_str(const char *p, const char *end) {
-    if (!p || *p != '"') return p;
-    p++;
-    while (*p && (!end || p < end)) {
-        if (*p == '\\' && p[1] && (!end || p + 1 < end)) {
-            p += 2;
-            continue;
-        }
-        if (*p == '"') return p + 1;
-        p++;
-    }
-    return p;
-}
-
-/* Given pointer at '{' or '[', returns pointer just after the matching '}' or ']'. */
-static const char *json_span_end(const char *p, const char *end) {
-    if (!p || (*p != '{' && *p != '[')) return p;
-    int depth = 0;
-    while (*p && (!end || p < end)) {
-        if (*p == '"') {
-            p = json_skip_str(p, end);
-            continue;
-        }
-        if (*p == '{' || *p == '[') depth++;
-        else if (*p == '}' || *p == ']') {
-            depth--;
-            if (depth == 0) return p + 1;
-        }
-        p++;
-    }
-    return p;
-}
-
-/* Finds value pointer for direct child key inside JSON object [obj, end). */
-static const char *json_find_key_in_obj(const char *obj, const char *end, const char *key) {
-    if (!obj || *obj != '{') return 0;
-    unsigned long klen = str_len(key);
-    int depth = 0;
-    const char *p = obj;
-    while (*p && (!end || p < end)) {
-        if (*p == '"') {
-            int match = (depth == 1 && (!end || p + 1 + klen < end) &&
-                         mem_equal(p + 1, key, klen) && p[1 + klen] == '"');
-            p = json_skip_str(p, end);
-            if (match) {
-                while (*p && (!end || p < end) && (*p == ' ' || *p == ':' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-                return p;
-            }
-            continue;
-        }
-        if (*p == '{' || *p == '[') depth++;
-        else if (*p == '}' || *p == ']') {
-            depth--;
-            if (depth <= 0) break;
-        }
-        p++;
-    }
-    return 0;
-}
-
-static int json_find_bool(const char *json, const char *key, int *val) {
-    if (!json || !key || !val) return 0;
-    unsigned long klen = str_len(key);
-    for (unsigned long i = 0; json[i]; i++) {
-        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
-            unsigned long idx = i + 1 + klen + 1;
-            while (json[idx] == ' ' || json[idx] == ':') idx++;
-            if (mem_equal(json + idx, "true", 4)) {
-                *val = 1;
-                return 1;
-            }
-            if (mem_equal(json + idx, "false", 5)) {
-                *val = 0;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-static int json_find_uint64(const char *json, const char *key, uint64_t *val) {
-    if (!json || !key || !val) return 0;
-    unsigned long klen = str_len(key);
-    for (unsigned long i = 0; json[i]; i++) {
-        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
-            unsigned long idx = i + 1 + klen + 1;
-            while (json[idx] == ' ' || json[idx] == ':') idx++;
-            if (json[idx] >= '0' && json[idx] <= '9') {
-                uint64_t v = 0;
-                while (json[idx] >= '0' && json[idx] <= '9') {
-                    v = v * 10 + (uint64_t)(json[idx] - '0');
-                    idx++;
-                }
-                *val = v;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-static int json_find_int(const char *json, const char *key, int *val) {
-    if (!json || !key || !val) return 0;
-    unsigned long klen = str_len(key);
-    for (unsigned long i = 0; json[i]; i++) {
-        if (json[i] == '"' && mem_equal(json + i + 1, key, klen) && json[i + 1 + klen] == '"') {
-            unsigned long idx = i + 1 + klen + 1;
-            while (json[idx] == ' ' || json[idx] == ':') idx++;
-            int sign = 1;
-            if (json[idx] == '-') {
-                sign = -1;
-                idx++;
-            }
-            if (json[idx] >= '0' && json[idx] <= '9') {
-                int v = 0;
-                while (json[idx] >= '0' && json[idx] <= '9') {
-                    v = v * 10 + (int)(json[idx] - '0');
-                    idx++;
-                }
-                *val = sign * v;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-/* Word-boundary helpers. Cyrillic bytes (>= 0x80) count as word characters, so
- * "тв" no longer matches inside "молитва" and "бра" no longer matches "брат". */
-static int is_word_byte(uint8_t c) {
-    return c >= 0x80 || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-}
-
-/* needle occurs at the start of a word (prefix match: "свет" matches "свет", "света", "светильник") */
-static int str_has_word_prefix(const char *haystack, const char *needle) {
-    unsigned long hlen = str_len(haystack);
-    unsigned long nlen = str_len(needle);
-    if (nlen == 0 || hlen < nlen) return 0;
-    for (unsigned long i = 0; i + nlen <= hlen; i++) {
-        if (i > 0 && is_word_byte((uint8_t)haystack[i - 1])) continue;
-        if (mem_equal(haystack + i, needle, nlen)) return 1;
-    }
-    return 0;
-}
-
-/* needle occurs as a whole word */
-static int str_has_word(const char *haystack, const char *needle) {
-    unsigned long hlen = str_len(haystack);
-    unsigned long nlen = str_len(needle);
-    if (nlen == 0 || hlen < nlen) return 0;
-    for (unsigned long i = 0; i + nlen <= hlen; i++) {
-        if (i > 0 && is_word_byte((uint8_t)haystack[i - 1])) continue;
-        if (i + nlen < hlen && is_word_byte((uint8_t)haystack[i + nlen])) continue;
-        if (mem_equal(haystack + i, needle, nlen)) return 1;
-    }
-    return 0;
-}
-
-static const char *after_voice_word(const char *text, const char *word) {
-    unsigned long len = str_len(word);
-    if (str_len(text) < len || !mem_equal(text, word, len)) return 0;
-    text += len;
-    if (*text && *text != ' ' && *text != '\t') return 0;
-    while (*text == ' ' || *text == '\t') text++;
-    return text;
-}
-
-static int is_named_playlist_request(const char *text) {
-    static const char *const fillers[] = {"алиса,", "алиса", "пожалуйста", "давай"};
-    static const char *const verbs[] = {"включи", "поставь", "сыграй", "запусти", "найди", "вруби", "слушать"};
-    while (*text == ' ' || *text == '\t') text++;
-    for (;;) {
-        const char *rest = 0;
-        for (unsigned long i = 0; i < sizeof(fillers) / sizeof(fillers[0]); i++) {
-            rest = after_voice_word(text, fillers[i]);
-            if (rest) break;
-        }
-        if (!rest) break;
-        text = rest;
-    }
-    for (unsigned long i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
-        const char *rest = after_voice_word(text, verbs[i]);
-        if (rest) return after_voice_word(rest, "плейлист") != 0;
-    }
-    return 0;
-}
-
-/* "включи песню Назад в СССР" / "поставь группу Стоп" / "включи Кино" etc.: a play verb
- * means a catalog search, even if the title contains control words such as "назад",
- * "дальше", "стоп" or "пауза". */
-static int is_explicit_search(const char *lower) {
-    if (str_has_word_prefix(lower, "выключи") || str_has_word_prefix(lower, "отключи")) {
-        return 0;
-    }
-    int has_verb = str_has_word_prefix(lower, "включи") || str_has_word_prefix(lower, "поставь") ||
-                   str_has_word_prefix(lower, "сыграй") || str_has_word_prefix(lower, "запусти") ||
-                   str_has_word_prefix(lower, "найди") || str_has_word_prefix(lower, "вруби") ||
-                   str_has_word_prefix(lower, "слушать");
-    if (!has_verb) return 0;
-
-    // Check if it is a simple resume command rather than a specific track/artist query.
-    // Polite fillers are allowed at the start ("алиса, давай") and between the verb and
-    // "музыку" ("включи пожалуйста музыку"). Anything after "музыку" keeps the phrase a search.
-    {
-        const char *p = lower;
-        int ok = 1;
-        unsigned long n;
-
-        for (;;) {
-            unsigned long rest;
-            while (*p == ' ') p++;
-            rest = str_len(p);
-            n = str_len("алиса");
-            if (rest > n && mem_equal(p, "алиса", n) && !is_word_byte((uint8_t)p[n])) {
-                p += n;
-                if (*p == ',') p++;
-                continue;
-            }
-            n = str_len("пожалуйста");
-            if (rest > n && mem_equal(p, "пожалуйста", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
-            n = str_len("давай");
-            if (rest > n && mem_equal(p, "давай", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
-            break;
-        }
-
-        n = str_len("включи");
-        if (str_len(p) >= n && mem_equal(p, "включи", n) && !is_word_byte((uint8_t)p[n])) p += n;
-        else {
-            n = str_len("вруби");
-            if (str_len(p) >= n && mem_equal(p, "вруби", n) && !is_word_byte((uint8_t)p[n])) p += n;
-            else {
-                n = str_len("включить");
-                if (str_len(p) >= n && mem_equal(p, "включить", n) && !is_word_byte((uint8_t)p[n])) p += n;
-                else {
-                    n = str_len("слушать");
-                    if (str_len(p) >= n && mem_equal(p, "слушать", n) && !is_word_byte((uint8_t)p[n])) p += n;
-                    else ok = 0;
-                }
-            }
-        }
-
-        if (ok) {
-            for (;;) {
-                unsigned long rest;
-                while (*p == ' ') p++;
-                rest = str_len(p);
-                n = str_len("пожалуйста");
-                if (rest > n && mem_equal(p, "пожалуйста", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
-                n = str_len("давай");
-                if (rest > n && mem_equal(p, "давай", n) && !is_word_byte((uint8_t)p[n])) { p += n; continue; }
-                break;
-            }
-            while (*p == ' ') p++;
-            n = str_len("музыку");
-            if (str_len(p) == n && mem_equal(p, "музыку", n)) return 0;
-        }
-    }
-    return 1;
-}
-
-static int spotify_is_active = 0;
-static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify Connect device
-static int yandex_music_active = 0;      // 1 = user handed playback to Yandex Music / Radio
-static int repeat_mode = 0; // 0=off, 1=context, 2=track
-static char current_track_uri[128] = {0};
-static char current_track_name[128] = {0};
-static char current_artist_name[128] = {0};
-static int quasar_vol = -1;
-static int quasar_vol_known = 0;
-static int last_quasar_reported_vol = -1;
-static int current_soloist_vol = -1;
-static int ws_initial_vol_synced = 0;
-static int need_soloist_vol_sync = 0;
-static int pending_quasar_vol = -1;
-static int64_t pending_quasar_vol_due_ms = 0;
-static int last_sent_to_quasar_vol = -1;
-static int64_t last_sent_to_quasar_ms = 0;
-static int last_sent_to_soloist_vol = -1;
-static int64_t last_sent_to_soloist_ms = 0;
-static int64_t last_user_ws_vol_ms = 0;
-static int vol_verify_target = -1;
-static int vol_verify_prev_qvol = -1;
-static int64_t vol_verify_sent_ms = 0;
-static int quasar_vol_fallback_amixer = 0;
-
-static int abs_diff_int(int a, int b) {
-    return a >= b ? (a - b) : (b - a);
-}
-
-static int check_quasar_vol_fallback(int64_t now, int *target_out) {
-    if (vol_verify_target < 0 || vol_verify_sent_ms <= 0) return 0;
-    if (now - vol_verify_sent_ms < 900) return 0;
-    int target = vol_verify_target;
-    vol_verify_target = -1;
-    vol_verify_sent_ms = 0;
-    quasar_vol_fallback_amixer = 1;
-    if (target_out) *target_out = target;
-    return 1;
-}
-
-static void on_quasar_volume_state(int qvol, uint64_t src, int64_t now) {
-    if (qvol < 0) qvol = 0;
-    if (qvol > 100) qvol = 100;
-
-    if (!quasar_vol_known) {
-        quasar_vol_known = 1;
-        quasar_vol = qvol;
-        last_quasar_reported_vol = qvol;
-        if (vol_verify_target >= 0 && abs_diff_int(qvol, vol_verify_target) <= 6) {
-            vol_verify_target = -1;
-            vol_verify_sent_ms = 0;
-            quasar_vol_fallback_amixer = 0;
-        }
-        if (last_user_ws_vol_ms == 0 && (current_soloist_vol != qvol || !ws_initial_vol_synced)) {
-            need_soloist_vol_sync = 1;
-        }
-        return;
-    }
-
-    quasar_vol = qvol;
-    if (vol_verify_target >= 0 &&
-        (abs_diff_int(qvol, vol_verify_target) <= 6 ||
-         (vol_verify_prev_qvol >= 0 && qvol != vol_verify_prev_qvol))) {
-        vol_verify_target = -1;
-        vol_verify_sent_ms = 0;
-        quasar_vol_fallback_amixer = 0;
-    }
-    if (qvol == last_quasar_reported_vol) {
-        return;
-    }
-    last_quasar_reported_vol = qvol;
-
-    int is_our_echo = (src == 1000 &&
-                       last_sent_to_quasar_vol >= 0 &&
-                       last_sent_to_quasar_ms > 0 &&
-                       (now - last_sent_to_quasar_ms) < 1200 &&
-                       abs_diff_int(qvol, last_sent_to_quasar_vol) <= 6);
-    if (!is_our_echo) {
-        if (pending_quasar_vol >= 0 && now >= pending_quasar_vol_due_ms - 60) {
-            pending_quasar_vol = -1;
-        }
-        if (qvol != current_soloist_vol) {
-            need_soloist_vol_sync = 1;
-        }
-    }
-}
-static char last_auto_next_uri[128] = {0};
-static int playback_status = 0; // 0=stopped, 1=playing, 2=paused, 3=buffering
-static uint64_t track_duration_ms = 0;
-static uint64_t base_position_ms = 0;
-static int64_t local_recorded_ms = 0;
-static int playback_speed = 0;
-static int64_t stuck_since_ms = 0;
-static int64_t last_auto_next_time = 0;
-static int64_t last_cache_clean_ms = 0;
-
-static void append_artist_name(char *dst, unsigned long max_dst, const char *name) {
-    if (!name || !*name) return;
-    unsigned long len = str_len(dst);
-    unsigned long nlen = str_len(name);
-    if (len > 0) {
-        if (len + 2 + nlen >= max_dst) return;
-        dst[len++] = ',';
-        dst[len++] = ' ';
-    } else if (nlen >= max_dst) {
-        nlen = max_dst - 1;
-    }
-    for (unsigned long i = 0; i < nlen && len + 1 < max_dst; i++) {
-        dst[len++] = name[i];
-    }
-    dst[len] = 0;
-}
-
-static void extract_track_info(const char *json) {
-    if (!json || *json != '{') return;
-
-    const char *root_end = json_span_end(json, 0);
-    const char *item_val = json_find_key_in_obj(json, root_end, "item");
-
-    if (item_val) {
-        if (mem_equal(item_val, "null", 4)) {
-            current_track_name[0] = 0;
-            current_artist_name[0] = 0;
-            return;
-        }
-        if (*item_val == '{') {
-            const char *item_end = json_span_end(item_val, root_end);
-            char buf[128] = {0};
-
-            // Reset metadata only when an item payload carries decorations/name
-            const char *dec = json_find_key_in_obj(item_val, item_end, "decorations");
-            if (dec && *dec == '{') {
-                const char *dec_end = json_span_end(dec, item_end);
-                const char *id = json_find_key_in_obj(dec, dec_end, "identity");
-                if (id && *id == '{') {
-                    const char *id_end = json_span_end(id, dec_end);
-                    if (json_find_str_bounded(id, id_end, "name", buf, sizeof(buf))) {
-                        str_copy(current_track_name, buf, sizeof(current_track_name));
-                    }
-                }
-
-                current_artist_name[0] = 0;
-                const char *creators = json_find_key_in_obj(dec, dec_end, "creators");
-                if (creators && *creators == '[') {
-                    const char *cr_end = json_span_end(creators, dec_end);
-                    const char *p = creators + 1;
-                    int artist_count = 0;
-                    while (p < cr_end && artist_count < 3) {
-                        while (p < cr_end && *p != '{' && *p != ']') p++;
-                        if (p >= cr_end || *p != '{') break;
-                        const char *el_end = json_span_end(p, cr_end);
-                        const char *ent = json_find_key_in_obj(p, el_end, "entity");
-                        const char *ent_end = (ent && *ent == '{') ? json_span_end(ent, el_end) : el_end;
-                        const char *ent_obj = (ent && *ent == '{') ? ent : p;
-                        const char *cdec = json_find_key_in_obj(ent_obj, ent_end, "decorations");
-                        const char *cid_scope = (cdec && *cdec == '{') ? cdec : ent_obj;
-                        const char *cid_end = (cdec && *cdec == '{') ? json_span_end(cdec, ent_end) : ent_end;
-                        const char *cid = json_find_key_in_obj(cid_scope, cid_end, "identity");
-                        if (cid && *cid == '{') {
-                            const char *cid_obj_end = json_span_end(cid, cid_end);
-                            char abuf[128] = {0};
-                            if (json_find_str_bounded(cid, cid_obj_end, "name", abuf, sizeof(abuf))) {
-                                append_artist_name(current_artist_name, sizeof(current_artist_name), abuf);
-                                artist_count++;
-                            }
-                        }
-                        p = el_end;
-                    }
-                }
-            } else if (json_find_str_bounded(item_val, item_end, "name", buf, sizeof(buf))) {
-                str_copy(current_track_name, buf, sizeof(current_track_name));
-                if (json_find_str_bounded(item_val, item_end, "artist", buf, sizeof(buf))) {
-                    str_copy(current_artist_name, buf, sizeof(current_artist_name));
-                }
-            }
-            return;
-        }
-    }
-
-    // Fallback for flat diagnostic payloads without nested "item"
-    char name_buf[128] = {0};
-    char artist_buf[128] = {0};
-    if (json_find_str_bounded(json, root_end, "name", name_buf, sizeof(name_buf)) &&
-        !str_contains(json, "\"device_name\"")) {
-        str_copy(current_track_name, name_buf, sizeof(current_track_name));
-    }
-    if (json_find_str_bounded(json, root_end, "artist", artist_buf, sizeof(artist_buf))) {
-        str_copy(current_artist_name, artist_buf, sizeof(current_artist_name));
-    }
-}
-
 #ifndef LED_FX_NONE
 #define LED_FX_NONE   0
 #define LED_FX_PLAY   1
@@ -1606,7 +591,10 @@ static void handle_soloist_ws_json(const char *json) {
     int active_bool = 0;
     if (json_find_bool(json, "is_active", &active_bool)) {
         spotify_device_is_active = active_bool;
-        if (!active_bool) spotify_is_active = 0;
+        if (!active_bool) {
+            spotify_is_active = 0;
+            yandex_music_handoff_ms = 0;
+        }
     }
 
     char status_str[32];
@@ -1615,7 +603,14 @@ static void handle_soloist_ws_json(const char *json) {
             playback_status = 1;
             playback_speed = 1;
             spotify_is_active = spotify_device_is_active;
-            if (spotify_device_is_active) yandex_music_active = 0;
+            int64_t ws_now = now_ms();
+            int in_handoff_grace = (yandex_music_active && yandex_music_handoff_ms > 0 &&
+                                    ws_now >= yandex_music_handoff_ms &&
+                                    (ws_now - yandex_music_handoff_ms) < 5000);
+            if (spotify_device_is_active && !in_handoff_grace) {
+                yandex_music_active = 0;
+                yandex_music_handoff_ms = 0;
+            }
             if (spotify_device_is_active && led_fx_active_type() == LED_FX_SEARCH) {
                 led_fx_trigger(LED_FX_PLAY);
             }
@@ -1725,7 +720,11 @@ static int is_web_or_culinary_intent(const char *lower) {
         str_contains(lower, "спотифай") ||
         str_contains(lower, "spotify") ||
         str_contains(lower, "исполнител") ||
-        str_contains(lower, "групп")) {
+        str_contains(lower, "групп") ||
+        str_contains(lower, "в очередь") ||
+        str_contains(lower, "в конец очереди") ||
+        str_contains(lower, "следующим") ||
+        str_contains(lower, "следующей")) {
         return 0;
     }
 
@@ -1816,16 +815,18 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         if (str_contains(lower_buf, "в яндекс") || str_contains(lower_buf, "на яндекс") ||
             str_contains(lower_buf, "из яндекс") || str_contains(lower_buf, "в я.музык")) {
             yandex_music_active = 1;
+            yandex_music_handoff_ms = now_ms();
             spotify_is_active = 0;
             led_fx_clear();
-            if (playback_status == 1 || playback_status == 3) {
-                run_soloist_cmd("pause");
+            if (spotify_device_is_active || playback_status == 1 || playback_status == 3) {
+                run_soloist_cmd("deactivate");
             }
             return;
         }
         log_msg("[bridge] Action: PLAYLIST SEARCH\n");
         trigger_alice_suppression(quasar_fd, 5000);
         yandex_music_active = 0;
+        yandex_music_handoff_ms = 0;
         spotify_is_active = 1;
         led_fx_trigger(LED_FX_SEARCH);
         run_search_and_play(lower_buf);
@@ -1840,10 +841,11 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     if (is_yandex_music_preference(lower_buf)) {
         log_msg("[bridge] Yandex Music/Radio preference requested, leaving to native Alice\n");
         yandex_music_active = 1;
+        yandex_music_handoff_ms = now_ms();
         spotify_is_active = 0;
         led_fx_clear();
-        if (playback_status == 1 || playback_status == 3) {
-            run_soloist_cmd("pause");
+        if (spotify_device_is_active || playback_status == 1 || playback_status == 3) {
+            run_soloist_cmd("deactivate");
         }
         return;
     }
@@ -1887,6 +889,34 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             str_copy(phrase, "Сейчас ничего не играет", sizeof(phrase));
         }
         send_alice_tts(quasar_fd, phrase);
+        return;
+    }
+
+    // Queue commands ("поставь следующим ...", "добавь в очередь ...") run before
+    // is_explicit_search() so the leading "поставь"/"включи" does not replace playback.
+    char queue_query[512];
+    if (has_enqueue_query(lower_buf, queue_query, sizeof(queue_query))) {
+        log_msg("[bridge] Action: ENQUEUE TRACK query='");
+        log_msg(queue_query);
+        log_msg("'\n");
+        trigger_alice_suppression(quasar_fd, 4000);
+        yandex_music_active = 0;
+        yandex_music_handoff_ms = 0;
+        spotify_is_active = 1;
+        led_fx_trigger(LED_FX_SEARCH);
+        run_controller("enqueue", queue_query);
+        return;
+    }
+
+    // Track restart commands ("включи сначала", "начни сначала") run before
+    // is_explicit_search() while preserving explicit song title searches.
+    if (!yandex_music_active && (spotify_is_active || spotify_device_is_active) &&
+        is_restart_track_request(lower_buf)) {
+        log_msg("[bridge] Action: RESTART TRACK (seek 0)\n");
+        trigger_alice_suppression(quasar_fd, 2500);
+        spotify_is_active = 1;
+        led_fx_trigger(LED_FX_PREV);
+        run_soloist_cmd2("seek", "0");
         return;
     }
 
@@ -2035,6 +1065,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             log_msg("[bridge] Action: RESUME\n");
             trigger_alice_suppression(quasar_fd, 2500);
             yandex_music_active = 0;
+            yandex_music_handoff_ms = 0;
             spotify_is_active = 1;
             led_fx_trigger(LED_FX_PLAY);
             run_search_and_play("включи музыку");
@@ -2141,6 +1172,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 
         trigger_alice_suppression(quasar_fd, 5000);
         yandex_music_active = 0;
+        yandex_music_handoff_ms = 0;
         spotify_is_active = 1;
         led_fx_trigger(LED_FX_SEARCH);
 
@@ -2153,998 +1185,102 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 }
 
 /* =========================================================================
- * LED Equalizer / Visualizer Subsystem (Nothing Phone style / Multi-zone)
- * Supports:
- *   - Yandex Station Lite 1: 3 RGB zones (micro:red:ring1..3)
- *   - Yandex Station Lite 2: 3 RGB zones (plum:red:ring1..3, restores led_ring_fb)
- *   - Yandex Station Mini 2: 6 RGB zones (mini2:red:ring1..6)
- *   - Yandex Station Midi:  24 RGB zones (cucumber:red:ring0..23)
- * Default Color: Pure White across all LEDs (Nothing Phone aesthetic).
- * Configurable via spotify_api.conf (LED_VISUALIZER=white|rainbow|cyan, LED_BRIGHTNESS=0..255)
+ * LED Equalizer / Visualizer & Feedback FX Subsystem
  * ========================================================================= */
+#include "led-subsystem.h"
 
-static const uint8_t sin64[64] = {
-    128, 140, 152, 164, 176, 187, 198, 208, 217, 226, 233, 240, 245, 249, 252, 254,
-    255, 254, 252, 249, 245, 240, 233, 226, 217, 208, 198, 187, 176, 164, 152, 140,
-    128, 115, 103,  91,  79,  68,  57,  47,  38,  29,  22,  15,  10,   6,   3,   1,
-      1,   1,   3,   6,  10,  15,  22,  29,  38,  47,  57,  68,  79,  91, 103, 115
-};
+static int64_t g_last_error_tts_ms = 0;
 
-struct led_hardware_info {
-    int probed;
-    int detected;
-    int num_zones;
-    int is_zero_indexed; // 1 for cucumber (ring0..ring23), 0 for micro/plum/mini2 (ring1..ringN)
-    char prefix[32];     // e.g. "/sys/class/leds/micro:"
-    int is_plum;         // requires restoring trigger led_ring_fb
-};
-
-static struct led_hardware_info g_led_hw = {0};
-static int g_led_enabled = 1;       // 1=on white (default), 0=off
-static int g_led_color_mode = 0;    // 0=white (Nothing Phone style), 1=rainbow, 2=cyan, 3=red, 4=green, 5=blue, 6=magenta, 7=yellow
-static int g_led_brightness = 180;  // 1-255, default 180
-static uint64_t g_led_frame = 0;
-static int g_led_last_active = 0;
-/* Set when the equalizer has painted the ring and not yet erased it. Unlike
- * g_led_last_active it survives Alice borrowing the LEDs, so the "nothing is
- * playing" branch below still knows a stale frame is sitting in the hardware. */
-static int g_led_ring_dirty = 0;
-static int64_t g_last_led_tick_ms = 0;
-static uint8_t g_led_last_rgb[24][3] = {{0}};
-static int g_led_rgb_cache_valid = 0;
-#ifndef LED_FX_NONE
-#define LED_FX_NONE   0
-#define LED_FX_PLAY   1
-#define LED_FX_NEXT   2
-#define LED_FX_PREV   3
-#define LED_FX_SEARCH 4
-#define LED_FX_ERROR  5
-#endif
-static int g_led_fx_enabled = 1;
-static int g_led_fx_type = LED_FX_NONE;
-static int64_t g_led_fx_queued_ms = 0;
-static int64_t g_led_fx_start_ms = 0;
-static int64_t g_led_fx_last_skip_ms = 0;
-static int64_t g_led_fx_last_play_ms = 0;
-static uint32_t g_bass_level = 0;
-static uint32_t g_treble_level = 0;
-static int32_t *g_audio_shm_ptr = 0;
-static uint32_t g_band_floor[3] = {0};
-static uint32_t g_band_peak[3] = {0};
-static int g_band_init[3] = {0};
-static int g_shm_is_32bit = 0;
-static uint32_t g_prev_zone_val[24] = {0};
-
-static inline uint32_t isqrt(uint64_t n) {
-    uint64_t root = 0;
-    uint64_t bit = (uint64_t)1 << 62;
-    while (bit > n) bit >>= 2;
-    while (bit != 0) {
-        if (n >= root + bit) {
-            n -= (root + bit);
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    return (uint32_t)root;
-}
-
-static void audio_shm_ensure_attached(void) {
-    if (g_audio_shm_ptr) return;
-    int shmid = sys_shmget(0x401, 61440, 0444);
-    if (shmid >= 0) {
-        void *ptr = sys_shmat(shmid, 0, 010000 /* SHM_RDONLY */);
-        if ((long)ptr > 0 && (long)ptr != -1) {
-            g_audio_shm_ptr = (int32_t *)ptr;
-        }
-    }
-}
-
-static void audio_shm_detach(void) {
-    if (g_audio_shm_ptr) {
-        sys_shmdt(g_audio_shm_ptr);
-        g_audio_shm_ptr = 0;
-    }
-}
-
-// Adaptive per-band baseline/peak envelope with noise gate and cubic gamma curve
-static uint32_t compute_band_energy(int band_idx, uint32_t e, uint32_t total_rms) {
-    if (band_idx < 0 || band_idx >= 3) return 0;
-
-    if (!g_band_init[band_idx]) {
-        g_band_floor[band_idx] = (uint32_t)(((uint64_t)e * 92) / 100);
-        g_band_peak[band_idx] = (uint32_t)(((uint64_t)e * 115) / 100);
-        g_band_init[band_idx] = 1;
-    }
-
-    uint32_t fl = g_band_floor[band_idx];
-    uint32_t pk = g_band_peak[band_idx];
-
-    // Floor tracks sustained signal slowly up and faster down
-    if (e < fl) {
-        fl = (uint32_t)(((uint64_t)fl * 86 + (uint64_t)e * 14) / 100);
-    } else {
-        fl = (uint32_t)(((uint64_t)fl * 95 + (uint64_t)e * 5) / 100);
-    }
-
-    // Peak tracks beats instantaneously up and decays smoothly toward floor
-    if (e > pk) {
-        pk = e;
-    } else {
-        uint32_t dec = ((uint64_t)fl * 3 < (uint64_t)pk) ? 95 : 98;
-        pk = (uint32_t)(((uint64_t)pk * dec + (uint64_t)fl * (100 - dec)) / 100);
-    }
-
-    g_band_floor[band_idx] = fl;
-    g_band_peak[band_idx] = pk;
-
-    // Suppress digital silence/very quiet noise (<1.5 LSB) and out-of-band filter bleed (<4% of total RMS)
-    if (e <= 384 || (uint64_t)e * 25 <= (uint64_t)total_rms) return 0;
-
-    uint32_t span = (pk > fl) ? (pk - fl) : 0;
-    uint32_t min_span = (uint32_t)(((uint64_t)pk * 30) / 100);
-    if (span < min_span) span = min_span;
-    if (span < 384) span = 384;
-
-    uint32_t ex = (e > fl) ? (e - fl) : 0;
-    uint32_t norm = (ex >= span) ? 255 : (uint32_t)(((uint64_t)ex * 255) / span);
-
-    // 25% deadzone keeps sustained beds dark while blending quad/cubic gamma smoothly
-    if (norm <= 64) return 0;
-
-    uint32_t scaled = ((norm - 64) * 255) / (255 - 64);
-    uint32_t sq = (scaled * scaled) / 255;
-    uint32_t cb = (sq * scaled) / 255;
-    return (sq + cb * 2) / 3;
-}
-
-// Fixed-point (<<8) 3-band 2-pole crossover across Left channel dmix buffer (7680 frames @ 48kHz)
-static void analyze_shm_bands(const int32_t *shm, int num_frames,
-                              uint32_t *bass_out, uint32_t *mid_out, uint32_t *treble_out) {
-    *bass_out = 0;
-    *mid_out = 0;
-    *treble_out = 0;
-    if (!shm || num_frames <= 0) return;
-
-    for (int pass = 0; pass < 2; pass++) {
-        int64_t total_sum_sq = 0;
-        int64_t bass_sum_sq = 0;
-        int64_t mid_sum_sq = 0;
-        int64_t treble_sum_sq = 0;
-        int64_t lpf1a = 0, lpf1b = 0;
-        int64_t lpf2a = 0, lpf_hp2 = 0;
-        int64_t mid_lp = 0;
-        int mode_switched = 0;
-
-        for (int f = 0; f < num_frames; f++) {
-            int32_t s = shm[f * 2];
-            if (!g_shm_is_32bit && (s > 65535 || s < -65535)) {
-                g_shm_is_32bit = 1;
-                for (int k = 0; k < 3; k++) {
-                    g_band_init[k] = 0;
-                    g_band_floor[k] = 0;
-                    g_band_peak[k] = 0;
-                }
-                mode_switched = 1;
-                break;
-            }
-
-            // Normalize both S16_LE and S32_LE dmix buffers into S16<<8 fixed-point scale
-            int64_t sfp = g_shm_is_32bit ? (((int64_t)s) / 256) : (((int64_t)s) * 256);
-
-            // Bass: 2-pole LPF ~240Hz (1/32, -12dB/oct)
-            lpf1a = (lpf1a * 31 + sfp) / 32;
-            lpf1b = (lpf1b * 31 + lpf1a) / 32;
-            int64_t b = lpf1b;
-
-            // Treble: 2-pole HPF ~955Hz (1/8, -12dB/oct)
-            lpf2a = (lpf2a * 7 + sfp) / 8;
-            int64_t hp2 = sfp - lpf2a;
-            lpf_hp2 = (lpf_hp2 * 7 + hp2) / 8;
-            int64_t t = hp2 - lpf_hp2;
-
-            // Mid: bandpass (~240..955Hz)
-            mid_lp = (mid_lp * 7 + (sfp - lpf1a)) / 8;
-            int64_t m = mid_lp;
-
-            total_sum_sq += sfp * sfp;
-            bass_sum_sq += b * b;
-            mid_sum_sq += m * m;
-            treble_sum_sq += t * t;
-        }
-
-        if (mode_switched) continue;
-
-        uint32_t total_rms = isqrt((uint64_t)(total_sum_sq / num_frames));
-        uint32_t bass_rms = isqrt((uint64_t)(bass_sum_sq / num_frames));
-        uint32_t mid_rms = isqrt((uint64_t)(mid_sum_sq / num_frames));
-        uint32_t treble_rms = isqrt((uint64_t)(treble_sum_sq / num_frames));
-
-        *bass_out = compute_band_energy(0, bass_rms, total_rms);
-        *mid_out = compute_band_energy(1, mid_rms, total_rms);
-        *treble_out = compute_band_energy(2, treble_rms, total_rms);
-        return;
-    }
-}
-
-static void write_sysfs_int(const char *path, int val) {
-    int fd = sys_open(path, 01 /* O_WRONLY */, 0);
+static void check_tts_request(int quasar_fd) {
+    const char *req_path = get_tts_req_path();
+    int fd = sys_open(req_path, 0 /* O_RDONLY */, 0);
     if (fd < 0) return;
-    char buf[16];
-    int len = 0;
-    if (val <= 0) {
-        buf[0] = '0';
-        buf[1] = '\n';
-        len = 2;
-    } else {
-        if (val > 255) val = 255;
-        char tmp[10];
-        int tp = 0;
-        int n = val;
-        while (n > 0) {
-            tmp[tp++] = '0' + (n % 10);
-            n /= 10;
-        }
-        while (tp > 0) {
-            buf[len++] = tmp[--tp];
-        }
-        buf[len++] = '\n';
-    }
-    sys_write(fd, buf, len);
+
+    char buf[128];
+    long n = sys_read(fd, buf, sizeof(buf) - 1);
     sys_close(fd);
-}
+    sys_unlink(req_path);
+    if (n <= 0 || quasar_fd < 0) return;
+    buf[n] = 0;
 
-static void write_sysfs_str(const char *path, const char *str) {
-    int fd = sys_open(path, 01 /* O_WRONLY */, 0);
-    if (fd < 0) return;
-    sys_write(fd, str, str_len(str));
-    sys_close(fd);
-}
-
-static void build_led_path(char *dst, unsigned long max, const char *color, int zone_idx) {
-    unsigned long p = 0;
-    const char *pr = g_led_hw.prefix;
-    while (*pr && p + 1 < max) dst[p++] = *pr++;
-    while (*color && p + 1 < max) dst[p++] = *color++;
-    const char *mid = ":ring";
-    while (*mid && p + 1 < max) dst[p++] = *mid++;
-    if (zone_idx >= 10) {
-        if (p + 1 < max) dst[p++] = '0' + (zone_idx / 10);
-        if (p + 1 < max) dst[p++] = '0' + (zone_idx % 10);
-    } else {
-        if (p + 1 < max) dst[p++] = '0' + zone_idx;
+    int start = 0;
+    while (buf[start] == ' ' || buf[start] == '\t' || buf[start] == '\r' || buf[start] == '\n') start++;
+    int end = (int)str_len(buf);
+    while (end > start && (buf[end - 1] == ' ' || buf[end - 1] == '\t' || buf[end - 1] == '\r' || buf[end - 1] == '\n')) {
+        buf[--end] = 0;
     }
-    const char *suf = "/brightness";
-    while (*suf && p + 1 < max) dst[p++] = *suf++;
-    dst[p] = 0;
-}
+    const char *code = buf + start;
+    if (!code[0]) return;
 
-static void led_probe(void) {
-    if (g_led_hw.probed) return;
-    g_led_hw.probed = 1;
+    const char *phrase = 0;
+    if (str_equal(code, "cfg")) phrase = "Нет настроек Спотифай";
+    else if (str_equal(code, "net")) phrase = "Нет связи со Спотифай";
+    else if (str_equal(code, "limit")) phrase = "Спотифай просит подождать";
+    else if (str_equal(code, "auth")) phrase = "Нужно заново войти в Спотифай";
+    if (!phrase) return;
 
-    // Check Station Lite 1 (micro)
-    int fd = sys_open("/sys/class/leds/micro:red:ring1/brightness", 0, 0);
-    if (fd >= 0) {
-        sys_close(fd);
-        g_led_hw.detected = 1;
-        g_led_hw.num_zones = 3;
-        g_led_hw.is_zero_indexed = 0;
-        g_led_hw.is_plum = 0;
-        str_copy(g_led_hw.prefix, "/sys/class/leds/micro:", sizeof(g_led_hw.prefix));
-        log_msg("[bridge] LEDs detected: Station Lite 1 (3 RGB zones)\n");
+    int64_t tnow = now_ms();
+    if (g_last_error_tts_ms != 0 && tnow >= g_last_error_tts_ms && (tnow - g_last_error_tts_ms) < 15000) {
+        log_msg("[bridge] Error TTS skipped due to 15s cooldown\n");
         return;
     }
-    // Check Station Lite 2 (plum)
-    fd = sys_open("/sys/class/leds/plum:red:ring1/brightness", 0, 0);
-    if (fd >= 0) {
-        sys_close(fd);
-        g_led_hw.detected = 1;
-        g_led_hw.num_zones = 3;
-        g_led_hw.is_zero_indexed = 0;
-        g_led_hw.is_plum = 1;
-        str_copy(g_led_hw.prefix, "/sys/class/leds/plum:", sizeof(g_led_hw.prefix));
-        log_msg("[bridge] LEDs detected: Station Lite 2 (3 RGB zones, Plum)\n");
-        return;
-    }
-    // Check Station Mini 2 (mini2)
-    fd = sys_open("/sys/class/leds/mini2:red:ring1/brightness", 0, 0);
-    if (fd >= 0) {
-        sys_close(fd);
-        g_led_hw.detected = 1;
-        g_led_hw.num_zones = 6;
-        g_led_hw.is_zero_indexed = 0;
-        g_led_hw.is_plum = 0;
-        str_copy(g_led_hw.prefix, "/sys/class/leds/mini2:", sizeof(g_led_hw.prefix));
-        log_msg("[bridge] LEDs detected: Station Mini 2 (6 RGB zones)\n");
-        return;
-    }
-    // Check Station Midi (cucumber)
-    fd = sys_open("/sys/class/leds/cucumber:red:ring0/brightness", 0, 0);
-    if (fd >= 0) {
-        sys_close(fd);
-        g_led_hw.detected = 1;
-        g_led_hw.num_zones = 24;
-        g_led_hw.is_zero_indexed = 1;
-        g_led_hw.is_plum = 0;
-        str_copy(g_led_hw.prefix, "/sys/class/leds/cucumber:", sizeof(g_led_hw.prefix));
-        log_msg("[bridge] LEDs detected: Station Midi (24 RGB zones)\n");
-        return;
-    }
-}
-
-static void led_reset_internal_state(void) {
-    audio_shm_detach();
-    for (int i = 0; i < 24; i++) {
-        g_prev_zone_val[i] = 0;
-        g_led_last_rgb[i][0] = 0;
-        g_led_last_rgb[i][1] = 0;
-        g_led_last_rgb[i][2] = 0;
-    }
-    for (int k = 0; k < 3; k++) {
-        g_band_floor[k] = 0;
-        g_band_peak[k] = 0;
-        g_band_init[k] = 0;
-    }
-    g_shm_is_32bit = 0;
-    g_led_last_active = 0;
-    g_led_rgb_cache_valid = 0;
-    g_last_led_tick_ms = 0;
-    /* g_led_ring_dirty is intentionally NOT cleared here: this runs whenever
-     * Alice takes the LEDs for her own animation, while the last equalizer
-     * frame is still lit in hardware. */
-}
-
-static void led_all_off(void) {
-    led_reset_internal_state();
-    g_led_ring_dirty = 0;
-    if (!g_led_hw.detected) return;
-    int start = g_led_hw.is_zero_indexed ? 0 : 1;
-    int end = start + g_led_hw.num_zones;
-    char path[80];
-    for (int z = start; z < end; z++) {
-        build_led_path(path, sizeof(path), "red", z);
-        write_sysfs_int(path, 0);
-        build_led_path(path, sizeof(path), "green", z);
-        write_sysfs_int(path, 0);
-        build_led_path(path, sizeof(path), "blue", z);
-        write_sysfs_int(path, 0);
-    }
-    if (g_led_hw.is_plum) {
-        for (int z = start; z < end; z++) {
-            char tpath[80];
-            build_led_path(tpath, sizeof(tpath), "red", z);
-            for (int i = 0; tpath[i]; i++) {
-                if (tpath[i] == 'b' && tpath[i+1] == 'r') {
-                    str_copy(tpath + i, "trigger", sizeof(tpath) - i);
-                    break;
-                }
-            }
-            write_sysfs_str(tpath, "led_ring_fb\n");
-        }
-    }
-}
-
-static void join_path(char *dst, unsigned long max, const char *a, const char *b);
-
-static void set_led_visualizer_impl(int enable) {
-    led_probe();
-    g_led_enabled = enable ? 1 : 0;
-    if (!g_led_enabled && g_led_fx_type == LED_FX_NONE) {
-        if (alice_owns_leds(now_ms())) {
-            led_reset_internal_state();
-        } else {
-            led_all_off();
-        }
-    }
-    const char *state_path = get_led_state_path();
-    int fd = sys_open(state_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
-    if (fd >= 0) {
-        if (g_led_enabled) {
-            sys_write(fd, "on\n", 3);
-        } else {
-            sys_write(fd, "off\n", 4);
-        }
-        sys_close(fd);
-    }
-    log_msg(g_led_enabled ? "[bridge] LED visualizer: ON (Nothing Phone Equalizer)\n" : "[bridge] LED visualizer: OFF\n");
-}
-
-static void set_led_fx_enabled_impl(int enable) {
-    led_probe();
-    g_led_fx_enabled = enable ? 1 : 0;
-    if (!g_led_fx_enabled) {
-        g_led_fx_type = LED_FX_NONE;
-        g_led_fx_start_ms = 0;
-        g_led_fx_queued_ms = 0;
-        if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
-            if (alice_owns_leds(now_ms())) {
-                led_reset_internal_state();
-            } else {
-                led_all_off();
-            }
-        }
-    }
-    const char *req_dir = get_requests_dir();
-    sys_mkdir(req_dir, 0700);
-    char fx_state_path[360];
-    join_path(fx_state_path, sizeof(fx_state_path), req_dir, "led_fx_state");
-    int fd = sys_open(fx_state_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
-    if (fd >= 0) {
-        if (g_led_fx_enabled) {
-            sys_write(fd, "on\n", 3);
-        } else {
-            sys_write(fd, "off\n", 4);
-        }
-        sys_close(fd);
-    }
-    log_msg(g_led_fx_enabled ? "[bridge] LED animations: ON\n" : "[bridge] LED animations: OFF\n");
-}
-
-static void parse_led_conf_buf(const char *buf) {
-    unsigned long i = 0;
-    while (buf[i]) {
-        while (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' || buf[i] == '\n') i++;
-        if (!buf[i]) break;
-        if (buf[i] == '#') {
-            while (buf[i] && buf[i] != '\n') i++;
-            continue;
-        }
-        if (mem_equal(buf + i, "LED_VISUALIZER=", 15)) {
-            i += 15;
-            if (buf[i] == '"' || buf[i] == '\'') i++;
-            if (mem_equal(buf + i, "off", 3) || buf[i] == '0') {
-                g_led_enabled = 0;
-            } else if (mem_equal(buf + i, "rainbow", 7)) {
-                g_led_enabled = 1;
-                g_led_color_mode = 1;
-            } else if (mem_equal(buf + i, "cyan", 4)) {
-                g_led_enabled = 1;
-                g_led_color_mode = 2;
-            } else if (mem_equal(buf + i, "green", 5)) {
-                g_led_enabled = 1;
-                g_led_color_mode = 4;
-            } else if (mem_equal(buf + i, "white", 5) ||
-                       mem_equal(buf + i, "on", 2) ||
-                       buf[i] == '1') {
-                g_led_enabled = 1;
-                g_led_color_mode = 0;
-            }
-        } else if (mem_equal(buf + i, "LED_ANIMATIONS=", 15) ||
-                   mem_equal(buf + i, "LED_FX=", 7)) {
-            i += mem_equal(buf + i, "LED_ANIMATIONS=", 15) ? 15 : 7;
-            if (buf[i] == '"' || buf[i] == '\'') i++;
-            if (mem_equal(buf + i, "off", 3) || buf[i] == '0') {
-                g_led_fx_enabled = 0;
-            } else if (mem_equal(buf + i, "on", 2) || buf[i] == '1') {
-                g_led_fx_enabled = 1;
-            }
-        }
-        while (buf[i] && buf[i] != '\n') i++;
-    }
-}
-
-static void read_led_config(void) {
-    const char *req_dir = get_requests_dir();
-    const char *state_path = get_led_state_path();
-    char fx_state_path[360];
-    join_path(fx_state_path, sizeof(fx_state_path), req_dir, "led_fx_state");
-    sys_mkdir(req_dir, 0700);
-
-    char marker_path[360];
-    join_path(marker_path, sizeof(marker_path), req_dir, ".led_v1312_default");
-    int mfd = sys_open(marker_path, 0, 0);
-    if (mfd < 0) {
-        int cfd = sys_open(marker_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
-        if (cfd >= 0) {
-            sys_write(cfd, "1\n", 2);
-            sys_close(cfd);
-        }
-        sys_unlink(state_path);
-        sys_unlink(fx_state_path);
-        g_led_enabled = 1;
-        g_led_color_mode = 0;
-        g_led_fx_enabled = 1;
-        return;
-    }
-    sys_close(mfd);
-
-    g_led_enabled = 1;
-    g_led_color_mode = 0;
-    g_led_fx_enabled = 1;
-
-    const char *conf_path = get_conf_path();
-    int fd = sys_open(conf_path, 0, 0);
-    if (fd >= 0) {
-        char buf[1024];
-        long n = sys_read(fd, buf, sizeof(buf) - 1);
-        sys_close(fd);
-        if (n > 0) {
-            buf[n] = 0;
-            parse_led_conf_buf(buf);
-        }
-    }
-
-    int sfd = sys_open(state_path, 0, 0);
-    if (sfd >= 0) {
-        char sbuf[32];
-        long sn = sys_read(sfd, sbuf, sizeof(sbuf) - 1);
-        sys_close(sfd);
-        if (sn > 0) {
-            sbuf[sn] = 0;
-            if (str_contains(sbuf, "on")) g_led_enabled = 1;
-            else if (str_contains(sbuf, "off")) g_led_enabled = 0;
-        }
-    }
-
-    int fsfd = sys_open(fx_state_path, 0, 0);
-    if (fsfd >= 0) {
-        char fsbuf[32];
-        long fsn = sys_read(fsfd, fsbuf, sizeof(fsbuf) - 1);
-        sys_close(fsfd);
-        if (fsn > 0) {
-            fsbuf[fsn] = 0;
-            if (str_contains(fsbuf, "on")) g_led_fx_enabled = 1;
-            else if (str_contains(fsbuf, "off")) g_led_fx_enabled = 0;
-        }
-    }
-}
-
-static void check_led_request(void) {
-    const char *path = get_led_req_path();
-    int fd = sys_open(path, 0, 0);
-    if (fd >= 0) {
-        char cmd[16];
-        long n = sys_read(fd, cmd, sizeof(cmd) - 1);
-        sys_close(fd);
-        sys_unlink(path);
-
-        if (n > 0) {
-            if (cmd[0] == 'f' && n >= 2) {
-                if (cmd[1] == '0' || (n >= 3 && cmd[1] == 'o' && cmd[2] == 'f')) {
-                    set_led_fx_enabled_impl(0);
-                } else if (cmd[1] == '1' || (n >= 3 && cmd[1] == 'o' && cmd[2] == 'n')) {
-                    set_led_fx_enabled_impl(1);
-                }
-            } else if (cmd[0] == '1' || (cmd[0] == 'o' && cmd[1] == 'n')) {
-                set_led_visualizer(1);
-            } else if (cmd[0] == '0' || (cmd[0] == 'o' && cmd[1] == 'f')) {
-                set_led_visualizer(0);
-            } else if (cmd[0] == 'w') {
-                g_led_color_mode = 0;
-                set_led_visualizer(1);
-            } else if (cmd[0] == 'r') {
-                g_led_color_mode = 1;
-                set_led_visualizer(1);
-            } else if (cmd[0] == 'c') {
-                g_led_color_mode = 2;
-                set_led_visualizer(1);
-            } else if (cmd[0] == 'g') {
-                g_led_color_mode = 4;
-                set_led_visualizer(1);
-            }
-        }
-    }
-
-    char fx_path[360];
-    join_path(fx_path, sizeof(fx_path), get_requests_dir(), "led_fx");
-    int ffd = sys_open(fx_path, 0, 0);
-    if (ffd >= 0) {
-        char fx_cmd[16];
-        long fn = sys_read(ffd, fx_cmd, sizeof(fx_cmd) - 1);
-        sys_close(ffd);
-        sys_unlink(fx_path);
-
-        if (fn > 0) {
-            if (fx_cmd[0] == 'e') {
-                led_fx_trigger(LED_FX_ERROR);
-            } else if (fx_cmd[0] == 'p') {
-                int64_t fnow = now_ms();
-                int cur_fx = led_fx_active_type();
-                if (cur_fx != LED_FX_NEXT && cur_fx != LED_FX_PREV &&
-                    !led_fx_is_skip_recent(fnow) && !led_fx_is_play_recent(fnow)) {
-                    led_fx_trigger(LED_FX_PLAY);
-                }
-            } else if (fx_cmd[0] == 's') {
-                led_fx_trigger(LED_FX_SEARCH);
-            } else if (fx_cmd[0] == 'n') {
-                led_fx_trigger(LED_FX_NEXT);
-            } else if (fx_cmd[0] == 'b') {
-                led_fx_trigger(LED_FX_PREV);
-            } else if (fx_cmd[0] == 'c') {
-                led_fx_clear();
-            }
-        }
-    }
-}
-
-static void write_zone_rgb_if_changed(int i, int z, int r, int g, int b) {
-    char path[80];
-    if (!g_led_rgb_cache_valid || g_led_last_rgb[i][0] != (uint8_t)r) {
-        build_led_path(path, sizeof(path), "red", z);
-        write_sysfs_int(path, r);
-        g_led_last_rgb[i][0] = (uint8_t)r;
-    }
-    if (!g_led_rgb_cache_valid || g_led_last_rgb[i][1] != (uint8_t)g) {
-        build_led_path(path, sizeof(path), "green", z);
-        write_sysfs_int(path, g);
-        g_led_last_rgb[i][1] = (uint8_t)g;
-    }
-    if (!g_led_rgb_cache_valid || g_led_last_rgb[i][2] != (uint8_t)b) {
-        build_led_path(path, sizeof(path), "blue", z);
-        write_sysfs_int(path, b);
-        g_led_last_rgb[i][2] = (uint8_t)b;
-    }
-}
-
-static void led_fx_trigger_impl(int fx_type) {
-    if (!g_led_fx_enabled) return;
-    int64_t fnow = now_ms();
-    g_led_fx_type = fx_type;
-    g_led_fx_queued_ms = fnow;
-    g_led_fx_start_ms = 0;
-    if (fx_type == LED_FX_NEXT || fx_type == LED_FX_PREV) {
-        g_led_fx_last_skip_ms = fnow;
-    } else if (fx_type == LED_FX_PLAY) {
-        g_led_fx_last_play_ms = fnow;
-    }
-}
-
-static void led_fx_clear_impl(void) {
-    g_led_fx_type = LED_FX_NONE;
-    g_led_fx_start_ms = 0;
-    g_led_fx_queued_ms = 0;
-}
-
-static int led_fx_is_skip_recent_impl(int64_t now) {
-    return g_led_fx_last_skip_ms > 0 && now >= g_led_fx_last_skip_ms &&
-           (now - g_led_fx_last_skip_ms) < 2500;
-}
-
-static int led_fx_is_play_recent_impl(int64_t now) {
-    return g_led_fx_last_play_ms > 0 && now >= g_led_fx_last_play_ms &&
-           (now - g_led_fx_last_play_ms) < 900;
-}
-
-static int led_fx_active_type_impl(void) {
-    return g_led_fx_type;
-}
-
-static void led_fx_spotify_rgb(uint32_t v, int *r, int *g, int *b) {
-    *r = 0;
-    *g = (int)v;
-    *b = (int)((v * 28) / 255);
-}
-
-static void led_fx_error_rgb(uint32_t v, int *r, int *g, int *b) {
-    *r = (int)v;
-    *g = 0;
-    *b = 0;
-}
-
-static uint32_t led_sin256(uint32_t a) {
-    uint32_t idx = (a >> 2) & 63;
-    uint32_t frac = a & 3;
-    uint32_t s0 = sin64[idx];
-    uint32_t s1 = sin64[(idx + 1) & 63];
-    return (s0 * (4 - frac) + s1 * frac) / 4;
-}
-
-static uint32_t led_gamma(uint32_t x) {
-    uint32_t sq = (x * x) / 255;
-    uint32_t cb = (sq * x) / 255;
-    return (sq + cb * 2) / 3;
-}
-
-static uint32_t led_comet_level(uint32_t dist_behind, uint32_t hw_trail, uint32_t hw_lead) {
-    if (dist_behind <= hw_trail) {
-        uint32_t u = (dist_behind * 128) / hw_trail;
-        uint32_t s = led_sin256(64 + u);
-        return led_gamma((s > 1) ? (s - 1) : 0);
-    }
-    uint32_t d_ahead = 256 - dist_behind;
-    if (d_ahead <= hw_lead) {
-        uint32_t u = (d_ahead * 128) / hw_lead;
-        uint32_t s = led_sin256(64 + u);
-        return led_gamma((s > 1) ? (s - 1) : 0);
-    }
-    return 0;
-}
-
-static int led_fx_render(int64_t now) {
-    int n_zones = g_led_hw.num_zones;
-    if (n_zones <= 0 || n_zones > 24) return 0;
-    int start = g_led_hw.is_zero_indexed ? 0 : 1;
-
-    uint32_t peak = (g_led_brightness <= 0) ? 0 : ((uint32_t)g_led_brightness + 75);
-    if (peak > 255) peak = 255;
-
-    uint32_t hw_trail = (n_zones <= 3) ? 94 : 76;
-    uint32_t hw_lead = (n_zones <= 3) ? 70 : 52;
-
-    int64_t elapsed = now - g_led_fx_start_ms;
-    if (elapsed < 0) elapsed = 0;
-
-    if (g_led_fx_type == LED_FX_PLAY) {
-        if (elapsed >= 720) return 0;
-        for (int i = 0; i < n_zones; i++) {
-            int z = start + i;
-            int64_t ze = elapsed - (((int64_t)((n_zones - i) % n_zones) * 45) / n_zones);
-            uint32_t lvl = 0;
-            if (ze <= 0) {
-                lvl = 0;
-            } else if (ze < 140) {
-                uint32_t s = led_sin256((192 + (uint32_t)((ze * 128) / 140)) & 255);
-                lvl = led_gamma((s > 1) ? (s - 1) : 0);
-            } else if (ze < 280) {
-                lvl = 255 - (uint32_t)(((ze - 140) * 15) / 140);
-            } else if (ze < 675) {
-                uint32_t lin = ((uint32_t)(675 - ze) * 255) / 395;
-                lvl = (240 * led_gamma(lin)) / 255;
-            }
-            uint32_t v = (peak * lvl) / 255;
-            int r = 0, g = 0, b = 0;
-            led_fx_spotify_rgb(v, &r, &g, &b);
-            write_zone_rgb_if_changed(i, z, r, g, b);
-        }
-        return 1;
-    }
-
-    if (g_led_fx_type == LED_FX_NEXT || g_led_fx_type == LED_FX_PREV) {
-        if (elapsed >= 720) return 0;
-        uint32_t step = (uint32_t)((elapsed * 256) / 720);
-        uint32_t head = (g_led_fx_type == LED_FX_NEXT) ? ((256 - (step & 255)) & 255) : (step & 255);
-        uint32_t env = 255;
-        if (elapsed == 0) {
-            env = 32;
-        } else if (elapsed < 90) {
-            env = 32 + (uint32_t)((elapsed * 223) / 90);
-        } else if (elapsed >= 540) {
-            env = led_gamma((uint32_t)(((720 - elapsed) * 255) / 180));
-        }
-        for (int i = 0; i < n_zones; i++) {
-            int z = start + i;
-            uint32_t zpos = ((uint32_t)i * 256) / (uint32_t)n_zones;
-            uint32_t dist_behind = (g_led_fx_type == LED_FX_NEXT)
-                                   ? ((zpos - head + 256) & 255)
-                                   : ((head - zpos + 256) & 255);
-            uint32_t shape = led_comet_level(dist_behind, hw_trail, hw_lead);
-            uint32_t lvl = (shape * env) / 255;
-            uint32_t v = (peak * lvl) / 255;
-            int r = 0, g = 0, b = 0;
-            led_fx_spotify_rgb(v, &r, &g, &b);
-            write_zone_rgb_if_changed(i, z, r, g, b);
-        }
-        return 1;
-    }
-
-    if (g_led_fx_type == LED_FX_SEARCH) {
-        if (elapsed >= 10000) return 0;
-        int64_t period = 960;
-        uint32_t step = (uint32_t)(((elapsed % period) * 256) / period) & 255;
-        uint32_t head = (256 - step) & 255;
-        uint32_t env = 255;
-        if (elapsed == 0) {
-            env = 32;
-        } else if (elapsed < 120) {
-            env = 32 + (uint32_t)((elapsed * 223) / 120);
-        } else if (elapsed >= 9700) {
-            env = led_gamma((uint32_t)(((10000 - elapsed) * 255) / 300));
-        }
-        for (int i = 0; i < n_zones; i++) {
-            int z = start + i;
-            uint32_t zpos = ((uint32_t)i * 256) / (uint32_t)n_zones;
-            uint32_t dist_behind = (zpos - head + 256) & 255;
-            uint32_t shape = led_comet_level(dist_behind, hw_trail, hw_lead);
-            uint32_t lvl = (shape * env) / 255;
-            uint32_t v = (peak * lvl) / 255;
-            int r = 0, g = 0, b = 0;
-            led_fx_spotify_rgb(v, &r, &g, &b);
-            write_zone_rgb_if_changed(i, z, r, g, b);
-        }
-        return 1;
-    }
-
-    if (g_led_fx_type == LED_FX_ERROR) {
-        if (elapsed >= 780) return 0;
-        uint32_t lvl = 0;
-        if (elapsed < 320) {
-            if (elapsed == 0) {
-                lvl = 40;
-            } else {
-                uint32_t u = (uint32_t)((elapsed * 256) / 320);
-                uint32_t s = led_sin256((u + 192) & 255);
-                lvl = led_gamma((s > 1) ? (s - 1) : 0);
-            }
-        } else if (elapsed < 440) {
-            lvl = 0;
-        } else {
-            uint32_t u = (uint32_t)(((elapsed - 440) * 256) / 340);
-            uint32_t s = led_sin256((u + 192) & 255);
-            lvl = led_gamma((s > 1) ? (s - 1) : 0);
-        }
-        uint32_t v = (peak * lvl) / 255;
-        int r = 0, g = 0, b = 0;
-        led_fx_error_rgb(v, &r, &g, &b);
-        for (int i = 0; i < n_zones; i++) {
-            write_zone_rgb_if_changed(i, start + i, r, g, b);
-        }
-        return 1;
-    }
-
-    return 0;
-}
-
-static void led_visualizer_tick(int64_t now) {
-    if (!g_led_hw.detected) return;
-
-    // Protect Alice listening/thinking/speaking LED animations from overwrite or zero-clearing
-    if (alice_owns_leds(now)) {
-        if (g_led_fx_type != LED_FX_NONE && g_led_fx_type != LED_FX_SEARCH && g_led_fx_start_ms != 0) {
-            g_led_fx_type = LED_FX_NONE;
-            g_led_fx_start_ms = 0;
-            g_led_fx_queued_ms = 0;
-        }
-        if (g_led_last_active || g_audio_shm_ptr) {
-            led_reset_internal_state();
-        }
-        return;
-    }
-
-    if (!g_led_fx_enabled) {
-        g_led_fx_type = LED_FX_NONE;
-        g_led_fx_start_ms = 0;
-        g_led_fx_queued_ms = 0;
-    } else if (g_led_fx_type != LED_FX_NONE) {
-        if (g_led_fx_start_ms == 0) {
-            int64_t wait_limit = (g_led_fx_type == LED_FX_SEARCH) ? 10000 : 2500;
-            if (g_led_fx_queued_ms > 0 && now >= g_led_fx_queued_ms && (now - g_led_fx_queued_ms) > wait_limit) {
-                g_led_fx_type = LED_FX_NONE;
-                g_led_fx_queued_ms = 0;
-            } else {
-                g_led_fx_start_ms = now;
-                g_last_led_tick_ms = 0;
-            }
-        }
-        if (g_led_fx_type != LED_FX_NONE) {
-            if (g_last_led_tick_ms != 0 && (now - g_last_led_tick_ms) < 16) {
-                return;
-            }
-            g_last_led_tick_ms = now;
-            if (led_fx_render(now)) {
-                g_led_last_active = 1;
-                g_led_ring_dirty = 1;
-                g_led_rgb_cache_valid = 1;
-                return;
-            }
-            g_led_fx_type = LED_FX_NONE;
-            g_led_fx_start_ms = 0;
-            g_led_fx_queued_ms = 0;
-            for (int i = 0; i < 24; i++) g_prev_zone_val[i] = 0;
-            g_last_led_tick_ms = 0;
-        }
-    }
-
-    if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
-        if (g_led_last_active || g_led_ring_dirty) {
-            led_all_off();
-        }
-        return;
-    }
-
-    // Pace DSP analysis & sysfs LED updates cleanly (~30 FPS) regardless of socket wakeup bursts
-    if (g_last_led_tick_ms != 0 && (now - g_last_led_tick_ms) < 30) {
-        return;
-    }
-    g_last_led_tick_ms = now;
-
-    g_led_last_active = 1;
-    g_led_ring_dirty = 1;
-    g_led_frame++;
-
-    audio_shm_ensure_attached();
-
-    uint32_t bass_energy = 0;
-    uint32_t mid_energy = 0;
-    uint32_t treble_energy = 0;
-
-    if (g_audio_shm_ptr) {
-        analyze_shm_bands(g_audio_shm_ptr, 7680, &bass_energy, &mid_energy, &treble_energy);
-    } else {
-        // Fallback simulation if SHM is unavailable
-        uint32_t bar_pos = g_led_frame % 40;
-        if (bar_pos == 0 || bar_pos == 10 || bar_pos == 20 || bar_pos == 30 || bar_pos == 26) {
-            g_bass_level = 255;
-        } else {
-            g_bass_level = (g_bass_level * 78) / 100;
-        }
-        if ((bar_pos % 4) == 0) {
-            g_treble_level = 220;
-        } else {
-            g_treble_level = (g_treble_level * 55) / 100;
-        }
-        uint32_t s1 = sin64[(g_led_frame * 2) % 64];
-        uint32_t s2 = sin64[(g_led_frame * 3 + 16) % 64];
-        uint32_t sim_mid = (s1 * 7 + s2 * 3) / 10;
-
-        bass_energy = g_bass_level;
-        mid_energy = sim_mid;
-        treble_energy = g_treble_level;
-    }
-
-    int n_zones = g_led_hw.num_zones;
-    int start = g_led_hw.is_zero_indexed ? 0 : 1;
-
-    for (int i = 0; i < n_zones; i++) {
-        int z = start + i;
-        uint32_t target_energy = 0;
-
-        if (n_zones == 3) {
-            if (i == 0) target_energy = bass_energy;
-            else if (i == 1) target_energy = mid_energy;
-            else target_energy = treble_energy;
-        } else if (n_zones == 6) {
-            if (i == 0) target_energy = bass_energy;
-            else if (i == 1) target_energy = (bass_energy + mid_energy) / 2;
-            else if (i == 2) target_energy = mid_energy;
-            else if (i == 3) target_energy = (mid_energy + treble_energy) / 2;
-            else if (i == 4) target_energy = treble_energy;
-            else target_energy = (treble_energy + bass_energy) / 2;
-        } else {
-            uint32_t fraction = ((uint32_t)i * 3) / (uint32_t)n_zones;
-            if (fraction == 0) target_energy = bass_energy;
-            else if (fraction == 1) target_energy = mid_energy;
-            else target_energy = treble_energy;
-        }
-
-        if (target_energy > 255) target_energy = 255;
-
-        // Smooth rise and crisp 30%-faster exponential release prevent strobing without blurring fast tracks
-        uint32_t prev = g_prev_zone_val[i];
-        if (target_energy > prev) {
-            g_prev_zone_val[i] = (prev * 50 + target_energy * 50) / 100;
-        } else {
-            g_prev_zone_val[i] = (prev * 79 + target_energy * 21) / 100;
-        }
-
-        uint32_t val = (g_prev_zone_val[i] * (uint32_t)g_led_brightness) / 255;
-
-        int r = 0, g = 0, b = 0;
-        if (g_led_color_mode == 0) {
-            r = val; g = val; b = val;
-        } else if (g_led_color_mode == 1) {
-            uint32_t hue = (g_led_frame * 2 + (uint32_t)i * (64 / (uint32_t)n_zones)) % 64;
-            r = (sin64[hue] * val) / 255;
-            g = (sin64[(hue + 21) % 64] * val) / 255;
-            b = (sin64[(hue + 42) % 64] * val) / 255;
-        } else if (g_led_color_mode == 2) {
-            r = 0; g = val; b = val;
-        } else if (g_led_color_mode == 3) {
-            r = val; g = 0; b = 0;
-        } else if (g_led_color_mode == 4) {
-            led_fx_spotify_rgb(val, &r, &g, &b);
-        } else if (g_led_color_mode == 5) {
-            r = 0; g = 0; b = val;
-        } else if (g_led_color_mode == 6) {
-            r = val; g = 0; b = val;
-        } else if (g_led_color_mode == 7) {
-            r = val; g = val; b = 0;
-        }
-
-        write_zone_rgb_if_changed(i, z, r, g, b);
-    }
-    g_led_rgb_cache_valid = 1;
+    g_last_error_tts_ms = tnow;
+    send_alice_tts(quasar_fd, phrase);
 }
 
 static uint8_t quasar_buf[65536];
 static unsigned long quasar_buf_pos = 0;
+static uint8_t quasar_io_buf[16384];
+static unsigned long quasar_io_buf_pos = 0;
 static uint8_t quasar_vol_buf[16384];
 static unsigned long quasar_vol_buf_pos = 0;
 static uint8_t ws_buf[8192];
 static unsigned long ws_buf_pos = 0;
 static struct voice_request_state voice_requests;
+
+static void handle_quasar_io_stream(int *fd_ptr, int revents, int64_t now) {
+    if (!fd_ptr || *fd_ptr < 0) return;
+    if (revents & 0x0001) {
+        long n = sys_read(*fd_ptr, quasar_io_buf + quasar_io_buf_pos, sizeof(quasar_io_buf) - quasar_io_buf_pos);
+        if (n <= 0) {
+            sys_close(*fd_ptr);
+            *fd_ptr = -1;
+            quasar_io_buf_pos = 0;
+            return;
+        }
+        quasar_io_buf_pos += (unsigned long)n;
+        while (quasar_io_buf_pos >= 4) {
+            uint32_t fl = (uint32_t)quasar_io_buf[0] |
+                          ((uint32_t)quasar_io_buf[1] << 8) |
+                          ((uint32_t)quasar_io_buf[2] << 16) |
+                          ((uint32_t)quasar_io_buf[3] << 24);
+            if (fl > sizeof(quasar_io_buf) - 4) {
+                quasar_io_buf_pos = 0;
+                break;
+            }
+            if (quasar_io_buf_pos < 4 + fl) break;
+            int media_state = 0;
+            if (parse_quasar_io_media_state(quasar_io_buf + 4, fl, &media_state) &&
+                media_state == 2 && !yandex_music_active) {
+                log_msg("[bridge] Native Quasar media playback detected, yielding Spotify\n");
+                yandex_music_active = 1;
+                yandex_music_handoff_ms = now;
+                spotify_is_active = 0;
+                led_fx_clear();
+                if (spotify_device_is_active || playback_status == 1 || playback_status == 3) {
+                    run_soloist_cmd("deactivate");
+                }
+            }
+            unsigned long rem = quasar_io_buf_pos - (4 + fl);
+            for (unsigned long i = 0; i < rem; i++) quasar_io_buf[i] = quasar_io_buf[4 + fl + i];
+            quasar_io_buf_pos = rem;
+        }
+    } else if (revents & (0x0008 | 0x0010 | 0x0020)) {
+        sys_close(*fd_ptr);
+        *fd_ptr = -1;
+        quasar_io_buf_pos = 0;
+    }
+}
 
 static int connect_local_tcp(uint16_t port_be) {
     int fd = sys_socket(2 /* AF_INET */, 1 /* SOCK_STREAM */, 0);
@@ -3304,6 +1440,7 @@ static void init_runtime_paths(void) {
         join_path(g_gen_path, sizeof(g_gen_path), g_req_dir, "generation");
         join_path(g_led_state_path, sizeof(g_led_state_path), g_req_dir, "led_state");
         join_path(g_led_req_path, sizeof(g_led_req_path), g_req_dir, "led");
+        join_path(g_tts_req_path, sizeof(g_tts_req_path), g_req_dir, "tts");
         join_path(g_conf_path, sizeof(g_conf_path), conf_base, "spotify_api.conf");
 
         sys_mkdir(yam_var, 0755);
@@ -3520,6 +1657,7 @@ void _start(void) {
                             break;
                         }
 
+                        static int logged_quasar_schema = 0;
                         const uint8_t *frame_body = quasar_buf + 4;
                         uint64_t f253_type = 0;
                         if (find_field(frame_body, frame_len, 3, 2, 0, 0, 0) ||
@@ -3528,6 +1666,12 @@ void _start(void) {
                         } else if (find_field(frame_body, frame_len, 253, 0, 0, 0, &f253_type) &&
                                    (f253_type == 3 || f253_type == 210)) {
                             quasar_uses_f252 = 1;
+                        }
+                        if (!logged_quasar_schema && quasar_uses_f252 >= 0) {
+                            logged_quasar_schema = 1;
+                            log_msg(quasar_uses_f252 == 1
+                                ? "[bridge] Quasar protobuf schema: SharedMessage wrapper (field 252/253)\n"
+                                : "[bridge] Quasar protobuf schema: direct field 3/210\n");
                         }
                         const uint8_t *state_payload = 0;
                         unsigned long state_len = 0;
@@ -3604,6 +1748,11 @@ void _start(void) {
                             unsigned long cap_len = 0;
                             if (find_field(remoting_body, remoting_len, 7, 2, &cap_name, &cap_len, 0)) {
                                 if (cap_len == 24 && mem_equal(cap_name, "CommandSpotterCapability", 24)) {
+                                    static int logged_cmd_cap = 0;
+                                    if (!logged_cmd_cap) {
+                                        logged_cmd_cap = 1;
+                                        log_msg("[bridge] Quasar capability active: CommandSpotterCapability\n");
+                                    }
                                     const uint8_t *method_body = 0;
                                     unsigned long method_len = 0;
                                     if (find_field(remoting_body, remoting_len, 15, 2, &method_body, &method_len, 0)) {
@@ -3620,6 +1769,11 @@ void _start(void) {
                                         }
                                     }
                                 } else if (cap_len == 25 && mem_equal(cap_name, "PlaybackControlCapability", 25)) {
+                                    static int logged_pb_cap = 0;
+                                    if (!logged_pb_cap) {
+                                        logged_pb_cap = 1;
+                                        log_msg("[bridge] Quasar capability active: PlaybackControlCapability\n");
+                                    }
                                     const uint8_t *method_body = 0;
                                     unsigned long method_len = 0;
                                     if (find_field(remoting_body, remoting_len, 13, 2, &method_body, &method_len, 0)) {
@@ -3669,14 +1823,9 @@ void _start(void) {
                 set_ducking(0, now);
             }
 
-            // Drain incoming IOEvents from Quasar IOHub (9910)
-            if (quasar_io_idx >= 0 && (pfd[quasar_io_idx].revents & (0x0001 | 0x0008 | 0x0010 | 0x0020))) {
-                uint8_t drain[4096];
-                long n = (pfd[quasar_io_idx].revents & 0x0001) ? sys_read(quasar_io_fd, drain, sizeof(drain)) : -1;
-                if (n <= 0) {
-                    sys_close(quasar_io_fd);
-                    quasar_io_fd = -1;
-                }
+            // Process incoming IOEvents from Quasar IOHub (9910)
+            if (quasar_io_idx >= 0) {
+                handle_quasar_io_stream(&quasar_io_fd, pfd[quasar_io_idx].revents, now);
             }
 
             // Read Quasar Volume state stream (9921 stereo_pair)
@@ -3917,6 +2066,7 @@ void _start(void) {
                 if (send_quasar_volume(quasar_io_fd, target) < 0) {
                     sys_close(quasar_io_fd);
                     quasar_io_fd = -1;
+                    quasar_io_buf_pos = 0;
                 } else {
                     sent_quasar = 1;
                     if (!quasar_vol_known || abs_diff_int(target, quasar_vol) >= 10) {
@@ -4015,7 +2165,8 @@ void _start(void) {
             run_controller("clean-cache", 0);
         }
 
-        // 6. LED Visualizer / Equalizer update & request processing
+        // 6. Error TTS + LED Visualizer / Equalizer update & request processing
+        check_tts_request(quasar_fd);
         check_led_request();
         led_visualizer_tick(now_ms());
     }

@@ -25,8 +25,11 @@ else
 fi
 
 case "$1" in
-    search) request_begin || exit 1;;
-    play|pause|next|prev|toggle) request_begin hold || exit 1;;
+    search|enqueue) request_begin || exit 1;;
+    play|pause|next|prev|toggle|deactivate) request_begin hold || exit 1;;
+    seek)
+        case "${2:-}" in ''|*[!0-9]*) exit 2;; esac
+        request_begin hold || exit 1;;
     shuffle|repeat) request_lock 8 50 || exit 1; GENERATION=;;
     auto-next|auto-repeat)
         GENERATION=$3
@@ -77,14 +80,19 @@ elif [ "$1" = what-is-playing ]; then
     (request_exec_soloist ctl -w 127.0.0.1:9090 now 2>/dev/null) || echo "Nothing is playing"
     exit 0
 fi
-if [ "$1" = search ]; then
+if [ "$1" = search ] || [ "$1" = enqueue ]; then
     exec 8>&-
     if [ -f "$BASE_DIR/scripts/search_and_play.sh" ]; then
-        exec sh "$BASE_DIR/scripts/search_and_play.sh" "$2" "$GENERATION"
+        _sap="$BASE_DIR/scripts/search_and_play.sh"
     elif [ -f "$BASE_DIR/bin/search_and_play.sh" ]; then
-        exec sh "$BASE_DIR/bin/search_and_play.sh" "$2" "$GENERATION"
+        _sap="$BASE_DIR/bin/search_and_play.sh"
     else
-        exec sh /data/opt/soloist/scripts/search_and_play.sh "$2" "$GENERATION"
+        _sap="/data/opt/soloist/scripts/search_and_play.sh"
+    fi
+    if [ "$1" = enqueue ]; then
+        exec sh "$_sap" --queue "$2" "$GENERATION"
+    else
+        exec sh "$_sap" "$2" "$GENERATION"
     fi
 else
     # Keep the admission lock until dispatch so rapid local actions stay ordered.

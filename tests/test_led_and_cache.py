@@ -8,6 +8,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "src/soloist-bridge.c").read_text(encoding="utf-8")
+text_json_src = (ROOT / "src/text-json.h").read_text(encoding="utf-8")
+led_hdr_src = (ROOT / "src/led-subsystem.h").read_text(encoding="utf-8")
 
 failures = 0
 def check(ok, name):
@@ -36,10 +38,13 @@ static int g_searches = 0;
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0;
 static int yandex_music_active = 0;
+static int64_t yandex_music_handoff_ms = 0;
+static int64_t now_ms(void) { return 10000; }
 static void trigger_alice_suppression(int fd, int64_t ms) { (void)fd; (void)ms; g_suppressed++; }
 #define set_led_visualizer(enable) do { g_led_state = (enable); } while(0)
 static void log_msg(const char *s) { (void)s; }
 static int is_explicit_search(const char *s) { (void)s; return 0; }
+static void run_controller(const char *a, const char *b) { (void)a; (void)b; }
 static void run_soloist_cmd(const char *s) { (void)s; }
 static void run_soloist_cmd2(const char *s, const char *a) { (void)s; (void)a; }
 static void run_search_and_play(const char *s) { (void)s; g_searches++; }
@@ -58,7 +63,11 @@ static unsigned long str_len(const char *s) { return s ? strlen(s) : 0; }
 '''
 
 # Extract helpers and handle_voice_recognition
-helpers = source[source.index("static void to_lower_ru"):source.index("static int is_explicit_search")]
+helpers = (
+    text_json_src[text_json_src.index("static void to_lower_ru"):text_json_src.index("static int is_explicit_search")]
+    + "\n"
+    + text_json_src[text_json_src.index("static void trim_trailing_voice_punct"):text_json_src.index("static void append_artist_name")]
+)
 voice_func = source[source.index("static void handle_voice_recognition"):source.index("/* =========================================================================")]
 
 test_c = prefix + helpers + voice_func + '''
@@ -304,7 +313,7 @@ with tempfile.TemporaryDirectory() as td:
     conf_p.write_text('LED_VISUALIZER="off"\n', encoding="utf-8")
     state_p.write_text("off\n", encoding="utf-8")
 
-    read_led_cfg_fn = slice_between(source, "static void parse_led_conf_buf(", "static void check_led_request(")
+    read_led_cfg_fn = slice_between(led_hdr_src, "static void parse_led_conf_buf(", "static void check_led_request(")
     join_fn = slice_between(source, "static void join_path(char *dst, unsigned long max, const char *a, const char *b) {", "static void lookup_proc_env(")
     led_test_c = td_p / "led_cfg_test.c"
     led_test_bin = td_p / "led_cfg_test"

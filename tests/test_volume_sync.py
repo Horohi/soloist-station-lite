@@ -8,20 +8,22 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 bridge_src = (ROOT / "src/soloist-bridge.c").read_text(encoding="utf-8")
+vol_hdr = (ROOT / "src/quasar-volume.h").read_text(encoding="utf-8")
+text_hdr = (ROOT / "src/text-json.h").read_text(encoding="utf-8")
 voice_hdr = (ROOT / "src/voice-request.h").read_text(encoding="utf-8")
 
-helpers_start = bridge_src.index("static unsigned long format_uint_ascii")
-helpers_end = bridge_src.index("static int is_yam_mode = 0;")
-helpers_code = bridge_src[helpers_start:helpers_end]
+helpers_start = vol_hdr.index("static unsigned long format_uint_ascii")
+helpers_end = vol_hdr.index("static int quasar_vol = -1;")
+helpers_code = vol_hdr[helpers_start:helpers_end]
 
-state_start = bridge_src.index("static int quasar_vol = -1;")
-state_end = bridge_src.index("static char last_auto_next_uri")
-state_code = bridge_src[state_start:state_end]
+state_start = vol_hdr.index("static int quasar_vol = -1;")
+state_end = vol_hdr.index("#endif")
+state_code = vol_hdr[state_start:state_end]
 
 ws_handler_start = bridge_src.index("static void handle_soloist_ws_json")
 ws_handler_end = bridge_src.index("    char status_str[32];")
 # Close handle_soloist_ws_json early for focused volume state-machine testing
-ws_bool_code = bridge_src[bridge_src.index("static int json_find_bool"):bridge_src.index("static int json_find_uint64")]
+ws_bool_code = text_hdr[text_hdr.index("static int json_find_bool"):text_hdr.index("static int json_find_uint64")]
 ws_handler_code = (
     bridge_src[ws_handler_start:ws_handler_end]
     .replace("extract_track_info(json);\n", "")
@@ -39,6 +41,7 @@ prefix = r"""
 
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0;
+static int64_t yandex_music_handoff_ms = 0;
 static int quasar_uses_f252 = -1;
 static int mem_equal(const void *a, const void *b, unsigned long n) { return memcmp(a, b, n) == 0; }
 static int64_t mock_now = 10000;

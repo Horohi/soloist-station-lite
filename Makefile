@@ -17,7 +17,7 @@ TARGET_DUCK_SHIM = lib64/libsoloist_duck.so
 
 all: $(TARGET_BIN) $(TARGET_ALSA_SHIM) $(TARGET_DUCK_SHIM)
 
-$(TARGET_BIN): $(SRC_DIR)/soloist-bridge.c $(SRC_DIR)/voice-request.h $(SRC_DIR)/duck_shm.h
+$(TARGET_BIN): $(SRC_DIR)/soloist-bridge.c $(SRC_DIR)/voice-request.h $(SRC_DIR)/duck_shm.h $(SRC_DIR)/text-json.h $(SRC_DIR)/quasar-ipc.h $(SRC_DIR)/quasar-volume.h $(SRC_DIR)/led-subsystem.h
 	mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $<
 	$(STRIP) -s $@

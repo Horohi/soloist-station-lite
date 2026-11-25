@@ -8,6 +8,8 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BRIDGE_SRC = (ROOT / "src" / "soloist-bridge.c").read_text(encoding="utf-8")
+TEXT_SRC = (ROOT / "src" / "text-json.h").read_text(encoding="utf-8")
+QIPC_SRC = (ROOT / "src" / "quasar-ipc.h").read_text(encoding="utf-8")
 DUCK_SRC = ROOT / "src" / "soloist_duck.c"
 
 
@@ -21,14 +23,14 @@ def slice_between(src: str, start_marker: str, end_marker: str) -> str:
 
 def run_bridge_tts_and_parser_tests() -> None:
     text_and_json_helpers = slice_between(
-        BRIDGE_SRC,
+        TEXT_SRC,
         "static void to_lower_ru(",
-        "static int spotify_is_active = 0;",
+        "static void append_artist_name(",
     )
     track_parser = slice_between(
-        BRIDGE_SRC,
+        TEXT_SRC,
         "static void append_artist_name(",
-        "static void handle_soloist_ws_json(",
+        "#endif",
     )
     intent_and_voice = slice_between(
         BRIDGE_SRC,
@@ -36,9 +38,14 @@ def run_bridge_tts_and_parser_tests() -> None:
         "/* =========================================================================",
     )
     tts_func = slice_between(
-        BRIDGE_SRC,
+        QIPC_SRC,
         "static int send_alice_tts(",
         "static void trigger_alice_suppression(",
+    )
+    check_tts_fn = slice_between(
+        BRIDGE_SRC,
+        "static int64_t g_last_error_tts_ms = 0;",
+        "static uint8_t quasar_buf[65536];",
     )
 
     test_c = f'''
@@ -47,6 +54,8 @@ def run_bridge_tts_and_parser_tests() -> None:
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "duck_shm.h"
 
 static void log_msg(const char *s) {{ (void)s; }}
@@ -64,9 +73,12 @@ static long sys_write(int fd, const void *buf, unsigned long count) {{
     }}
     return (long)count;
 }}
-static int sys_open(const char *p, int f, int m) {{ (void)p;(void)f;(void)m; return -1; }}
-static void sys_close(int fd) {{ (void)fd; }}
-static int sys_unlink(const char *p) {{ (void)p; return 0; }}
+static char g_mock_tts_path[256] = {{0}};
+static const char *get_tts_req_path(void) {{ return g_mock_tts_path; }}
+static int sys_open(const char *p, int f, int m) {{ return (p && p[0]) ? open(p, f, m) : -1; }}
+static long sys_read(int fd, void *b, unsigned long c) {{ return read(fd, b, c); }}
+static void sys_close(int fd) {{ if (fd >= 0) close(fd); }}
+static int sys_unlink(const char *p) {{ return (p && p[0]) ? unlink(p) : 0; }}
 static int mock_shm_result = -2;
 static int sys_shmget(int key, unsigned long size, int shmflg) {{ (void)key; (void)size; (void)shmflg; return mock_shm_result; }}
 
@@ -81,6 +93,7 @@ static int64_t cancel_alice_until_ms = 0;
 static int spotify_is_active = 0;
 static int spotify_device_is_active = 0;
 static int yandex_music_active = 0;
+static int64_t yandex_music_handoff_ms = 0;
 static int playback_status = 0;
 static char current_track_name[128] = {{0}};
 static char current_artist_name[128] = {{0}};
@@ -104,6 +117,7 @@ static inline void led_fx_clear(void) {{}}
 static inline int led_fx_is_skip_recent(int64_t now) {{ (void)now; return 0; }}
 static inline int led_fx_is_play_recent(int64_t now) {{ (void)now; return 0; }}
 static inline int led_fx_active_type(void) {{ return LED_FX_NONE; }}
+static void run_controller(const char *a, const char *b) {{ (void)a; (void)b; }}
 static void run_soloist_cmd(const char *a) {{ (void)a; }}
 static void run_soloist_cmd2(const char *a, const char *b) {{ (void)a; (void)b; }}
 static void run_toggle(void) {{}}
@@ -114,6 +128,7 @@ static const char *get_censor_path(void) {{ return "/tmp/none"; }}
 {track_parser}
 {tts_func}
 {intent_and_voice}
+{check_tts_fn}
 
 #define CHECK(cond, msg) do {{ if (!(cond)) {{ fprintf(stderr, "FAIL: %s\\n", msg); return 1; }} }} while (0)
 
@@ -213,6 +228,49 @@ int main(void) {{
     const char *q3 = "включи песню что сейчас играет";
     handle_voice_recognition(1, q3, strlen(q3));
     CHECK(written_len == 0 && suppressed_calls == 1, "explicit search is not hijacked by TTS info handler");
+
+    // 9. Hard-error TTS allowlist, unlink, and 15s cooldown
+    snprintf(g_mock_tts_path, sizeof(g_mock_tts_path), "/tmp/soloist_test_tts_%d", (int)getpid());
+    mock_now = 100000;
+    g_last_error_tts_ms = 0;
+    FILE *tf = fopen(g_mock_tts_path, "w"); CHECK(tf != NULL, "create tts req net");
+    fputs("net\\n", tf); fclose(tf);
+    written_len = 0;
+    check_tts_request(1);
+    const char *exp_net = "Нет связи со Спотифай";
+    CHECK(memmem(written_frames, written_len, exp_net, strlen(exp_net)) != NULL,
+          "check_tts_request speaks allowlisted net phrase");
+    CHECK(access(g_mock_tts_path, F_OK) != 0, "check_tts_request unlinks processed file");
+
+    // Within 15s cooldown -> skipped, still unlinked
+    tf = fopen(g_mock_tts_path, "w"); CHECK(tf != NULL, "create tts req cooldown");
+    fputs("limit\\n", tf); fclose(tf);
+    written_len = 0;
+    mock_now += 5000;
+    check_tts_request(1);
+    CHECK(written_len == 0 && access(g_mock_tts_path, F_OK) != 0,
+          "check_tts_request skips within 15s cooldown and unlinks file");
+
+    // After 15s cooldown -> speaks again; invalid code ignored cleanly
+    mock_now += 15000;
+    tf = fopen(g_mock_tts_path, "w"); CHECK(tf != NULL, "create tts req bogus");
+    fputs("bogus\\n", tf); fclose(tf);
+    written_len = 0;
+    check_tts_request(1);
+    CHECK(written_len == 0 && access(g_mock_tts_path, F_OK) != 0,
+          "unknown tts error code is unlinked without speaking");
+
+    const char *codes[] = {{"cfg", "limit", "auth"}};
+    const char *phrases[] = {{"Нет настроек Спотифай", "Спотифай просит подождать", "Нужно заново войти в Спотифай"}};
+    for (int ci = 0; ci < 3; ci++) {{
+        mock_now += 20000;
+        tf = fopen(g_mock_tts_path, "w"); CHECK(tf != NULL, "create tts req code");
+        fprintf(tf, "%s\\n", codes[ci]); fclose(tf);
+        written_len = 0;
+        check_tts_request(1);
+        CHECK(memmem(written_frames, written_len, phrases[ci], strlen(phrases[ci])) != NULL,
+              "allowlisted hard error code emits Russian Alice TTS");
+    }}
 
     printf("PASS: track parser & TTS voice checks all passed\\n");
     return 0;

@@ -262,25 +262,34 @@ read_network_proxy() {
 doctor_events() {
     # Emit known events instead of the voice requests and other data in raw logs.
     _soloist_log="${SOLOIST_LOG_FILE:-/tmp/soloist.log}"
+    _bridge_log="${SOLOIST_BRIDGE_LOG_FILE:-/tmp/soloist-bridge.log}"
     {
-        tail -n 120 /tmp/soloist-bridge.log 2>/dev/null || true
+        tail -n 120 "$_bridge_log" 2>/dev/null || true
         tail -n 120 /tmp/soloist-search.log 2>/dev/null || true
         tail -n 120 "$_soloist_log" 2>/dev/null || true
         tail -n 120 "$DATA_ROOT/requests/control.log" 2>/dev/null || true
     } | LC_ALL=C awk '
         /^\[bridge\] Connected to Quasar on 127\.0\.0\.1:9875$/ {print "quasar_connected"}
         /^\[bridge\] Connected to Quasar Volume state on 127\.0\.0\.1:9921$/ {print "quasar_volume_connected"}
+        /^\[bridge\] Quasar protobuf schema: direct field 3\/210$/ {print "quasar_schema_direct"}
+        /^\[bridge\] Quasar protobuf schema: SharedMessage wrapper \(field 252\/253\)$/ {print "quasar_schema_f252"}
+        /^\[bridge\] Quasar capability active: (CommandSpotterCapability|PlaybackControlCapability)$/ {
+            print "quasar_cap_" $5
+        }
+        /^\[bridge\] Native Quasar media playback detected, yielding Spotify$/ {print "native_media_handoff"}
         /^\[bridge\] Quasar (socket error|connection closed), reconnecting\.\.\.$/ {print "quasar_reconnecting"}
         /^\[bridge\] Quasar 9910 volume_set unconfirmed on 9921; falling back to ALSA amixer volume$/ {print "quasar_volume_fallback_amixer"}
         /^\[bridge\] Alice TTS cancelled: ALSA SHM still present or inaccessible$/ {print "tts_waiting_for_alsa"}
         /^\[bridge\] Action: PLAYLIST SEARCH$/ {print "playlist_request"}
+        /^\[bridge\] Action: ENQUEUE TRACK / {print "voice_enqueue"}
+        /^\[bridge\] Action: RESTART TRACK \(seek 0\)$/ {print "voice_restart"}
         /^\[bridge\] (Voice command triggered:|Action: SEARCH & PLAY query=)/ {print "voice_activity"}
         /^\[search\] (Playlist name not found or ambiguous|No usable match); playback unchanged$/ {print "catalog_no_match"}
         /^\[search\] Cannot filter explicit tracks in a (playlist context|album or artist context); playback unchanged$/ {print "catalog_censorship"}
         /^\[search\] HTTP transport failed; playback unchanged$/ {print "spotify_transport_failed"}
         /^\[search\] HTTP [1-5][0-9][0-9]; playback unchanged$/ {print "spotify_http_" substr($3, 1, 3)}
         /^\[search\] Spotify cooldown active; request discarded$/ {print "spotify_rate_limited"}
-        /^\[control\] action=(play|pause|next|prev|toggle|seek|volume|repeat|shuffle|auto-next|auto-repeat|radio) stage=(admission|now|activate|selection|dispatch) status=[0-9][0-9]?[0-9]?$/ {
+        /^\[control\] action=(play|pause|next|prev|toggle|seek|volume|repeat|shuffle|auto-next|auto-repeat|radio|enqueue|add-to-queue|deactivate) stage=(admission|now|activate|selection|dispatch) status=[0-9][0-9]?[0-9]?$/ {
             print "control_failure", $2, $3, $4
         }
         {
@@ -302,12 +311,33 @@ doctor_events() {
     ' | tail -n 16
 }
 
+doctor_quasar_ipc() {
+    _bridge_log="${SOLOIST_BRIDGE_LOG_FILE:-/tmp/soloist-bridge.log}"
+    [ -r "$_bridge_log" ] || { printf 'not observed\n'; return 0; }
+    LC_ALL=C awk '
+        /^\[bridge\] Quasar protobuf schema: / {
+            sub(/^\[bridge\] Quasar protobuf schema: /, "", $0)
+            schema = $0
+        }
+        /^\[bridge\] Quasar capability active: / {
+            cap = $5
+            if (cap != "" && !seen[cap]++) {
+                caps = (caps == "" ? cap : caps "," cap)
+            }
+        }
+        END {
+            if (schema == "" && caps == "") print "not observed"
+            else printf "schema=%s caps=%s\n", (schema == "" ? "unknown" : schema), (caps == "" ? "none" : caps)
+        }
+    ' "$_bridge_log" 2>/dev/null || printf 'not observed\n'
+}
+
 cmd_doctor() {
     case "${1:-}" in
         ""|--offline) ;;
         *) printf 'Использование: soloist doctor [--offline]\n' >&2; return 2 ;;
     esac
-    local model firmware version mode player bridge cards master shm hook api_config soloist_config http events net_mode net_proxy session_out
+    local model firmware version mode player bridge cards master shm hook api_config soloist_config http events net_mode net_proxy session_out mem_mb hw_tier rate_shim led_vis led_fx input_cnt quasar_ipc
     model=$(detect_station_model)
     firmware=$(LC_ALL=C awk 'NR == 1 && $1 ~ /^[0-9]+(\.[0-9]+)+$/ {print $1}' \
         /system/vendor/quasar/version_full 2>/dev/null || true)
@@ -322,6 +352,20 @@ cmd_doctor() {
     printf 'Soloist %s (%s)\n' "${version:-unknown}" "$mode"
     printf 'Device: %s\nFirmware: %s\nKernel: %s %s\n' \
         "$model" "${firmware:-unknown}" "$(uname -r)" "$(uname -m)"
+    mem_mb=$(LC_ALL=C awk '/^MemTotal:/{printf "%d", int($2 / 1024); exit}' /proc/meminfo 2>/dev/null || true)
+    if [ -n "$mem_mb" ]; then
+        if [ "$mem_mb" -lt 350 ]; then
+            hw_tier="low-memory ($mem_mb MB RAM)"
+        else
+            hw_tier="standard ($mem_mb MB RAM)"
+        fi
+    else
+        case "$model" in
+            *'Lite'*|*'Mini'*) hw_tier="low-memory" ;;
+            *) hw_tier="standard" ;;
+        esac
+    fi
+    printf 'Hardware tier: %s\n' "$hw_tier"
 
     player=$(find_live_pid soloist || true)
     bridge=$(find_live_pid soloist-bridge || true)
@@ -388,7 +432,34 @@ cmd_doctor() {
     hook='not observed'
     if [ -n "$player" ] && grep -q '/libsoloist_duck\.so$' "/proc/$player/maps" 2>/dev/null; then hook=loaded; fi
     printf 'ALSA ducking hook: %s\n' "$hook"
+    rate_shim='missing'
+    if [ -f "$INSTALL_DIR/lib64/alsa-lib/libasound_module_rate_speexrate_medium.so" ]; then rate_shim='present'; fi
+    printf 'Audio rate shim: %s\n' "$rate_shim"
     if [ -e /tmp/soloist.yield ]; then printf 'ALSA yield marker: present\n'; else printf 'ALSA yield marker: absent\n'; fi
+
+    led_vis=""
+    if [ -f "$DATA_ROOT/requests/led_state" ]; then
+        led_vis=$(LC_ALL=C tr -cd 'a-z0-9_' < "$DATA_ROOT/requests/led_state" 2>/dev/null || true)
+    fi
+    if [ -z "$led_vis" ] && [ -r "$api_config" ]; then
+        led_vis=$(LC_ALL=C awk -F= '/^[ \t]*LED_VISUALIZER=/{
+            v=$2; sub(/[ \t]*#.*/, "", v); gsub(/["'\'' \t\r]/, "", v); val=tolower(v)
+        } END { if (val ~ /^[a-z0-9_]+$/) print val }' "$api_config" 2>/dev/null || true)
+    fi
+    led_fx=$(read_led_fx_state)
+    printf 'LED config: visualizer=%s fx=%s\n' "${led_vis:-white}" "${led_fx:-on}"
+
+    input_cnt=0
+    for _ev in /dev/input/event*; do
+        if [ -e "$_ev" ]; then input_cnt=$((input_cnt + 1)); fi
+    done
+    if [ "$input_cnt" -gt 0 ]; then
+        printf 'Input devices: %s event device(s)\n' "$input_cnt"
+    else
+        printf 'Input devices: unavailable\n'
+    fi
+    quasar_ipc=$(doctor_quasar_ipc)
+    printf 'Quasar IPC: %s\n' "$quasar_ipc"
 
     events=$(doctor_events)
     printf 'Recent diagnostic events:\n%s\n' "${events:-none}"

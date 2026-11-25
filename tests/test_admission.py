@@ -6,9 +6,13 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "src/soloist-bridge.c").read_text()
-production = source[source.index("static int is_yam_mode = 0;"):source.index("/* Text and command classification helpers */")]
-production += source[source.index("static int mem_equal"):source.index("/* Word-boundary helpers.")]
-production += source[source.index("static int spotify_is_active"):source.index("static void handle_voice_recognition")]
+text_hdr = (ROOT / "src/text-json.h").read_text()
+vol_hdr = (ROOT / "src/quasar-volume.h").read_text()
+production = source[source.index("static int quasar_uses_f252 = -1;"):source.index('#include "text-json.h"')]
+production += text_hdr[text_hdr.index("static int mem_equal"):text_hdr.index("/* Word-boundary helpers.")]
+production += text_hdr[text_hdr.index("static void append_artist_name"):text_hdr.index("#endif")]
+production += vol_hdr[vol_hdr.index("static int quasar_vol = -1;"):vol_hdr.index("#endif")]
+production += source[source.index("static int is_yam_mode = 0;"):source.index("static void handle_voice_recognition")]
 loop_start = source.index("    while (1) {", source.index("void _start")) + len("    while (1) {")
 loop_prologue = source[loop_start:source.index("        int64_t now = now_ms();", loop_start)]
 if "service_controllers" not in production:
