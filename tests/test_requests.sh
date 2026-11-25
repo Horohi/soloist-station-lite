@@ -16,10 +16,26 @@ EOF
 cat > "$TEST/app/bin/soloist" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$TEST/controls"
-case "$*" in *' now'|*' now --json')
-    [ ! -f "$TEST/now-failed" ] || exit 19
-    [ ! -f "$TEST/now-delay" ] || { touch "$TEST/started"; while [ ! -f "$TEST/release" ]; do sleep 0.05; done; }
-    cat "$TEST/now_state";; esac
+case "$*" in
+    *' now'|*' now --json')
+        [ ! -f "$TEST/now-failed" ] || exit 19
+        [ ! -f "$TEST/now-delay" ] || { touch "$TEST/started"; while [ ! -f "$TEST/release" ]; do sleep 0.05; done; }
+        cat "$TEST/now_state";;
+    *' prev')
+        if [ -f "$TEST/prev-mode" ]; then
+            _pm=$(cat "$TEST/prev-mode")
+            if [ "$_pm" = restart-then-prev ]; then
+                _ns=$(cat "$TEST/now_state")
+                _uri=$(printf '%s' "$_ns" | sed -n 's/.*"item":{"uri":"\([^"]*\)".*/\1/p')
+                _ts=$(printf '%s' "$_ns" | sed -n 's/.*"timestamp_ms":\([0-9]*\).*/\1/p')
+                _nts=$((${_ts:-0} + 5000))
+                printf '{"type":"playback_state","status":"playing","item":{"uri":"%s"},"position":{"position_ms":0,"timestamp_ms":%s,"speed":1},"is_active":true}\n' "$_uri" "$_nts" > "$TEST/now_state"
+                echo ready-prev > "$TEST/prev-mode"
+            else
+                printf '{"type":"playback_state","status":"playing","item":{"uri":"spotify:track:PREVIOUS"},"position":{"position_ms":0,"timestamp_ms":1000000,"speed":1},"is_active":true}\n' > "$TEST/now_state"
+            fi
+        fi;;
+esac
 EOF
 cat > "$TEST/app/bin/curl" <<'EOF'
 #!/bin/sh
@@ -76,7 +92,7 @@ chmod +x "$TEST/app/bin/"*
 SEARCH="$TEST/app/scripts/search_and_play.sh"
 failures=0
 check() { if "$@"; then printf 'PASS %s\n' "$label"; else printf 'FAIL %s\n' "$label"; failures=$((failures+1)); fi; }
-reset() { rm -f "$TEST/controls" "$TEST/calls" "$TEST/delay" "$TEST/auth-delay" "$TEST/started" "$TEST/release" "$TEST/app/data/censorship" "$TEST/app/data/favorites.uri" "$TEST/now-failed" "$TEST/now-delay"; rm -rf "$TEST/app/data/requests"; rm -f "$TEST/tmp/spotify_token"*; echo ok > "$TEST/mode"; echo paused > "$TEST/now_state"; }
+reset() { rm -f "$TEST/controls" "$TEST/calls" "$TEST/delay" "$TEST/auth-delay" "$TEST/started" "$TEST/release" "$TEST/app/data/censorship" "$TEST/app/data/favorites.uri" "$TEST/now-failed" "$TEST/now-delay" "$TEST/prev-mode"; rm -rf "$TEST/app/data/requests"; rm -f "$TEST/tmp/spotify_token"*; echo ok > "$TEST/mode"; echo paused > "$TEST/now_state"; }
 wait_started() { tries=0; while [ ! -f "$TEST/started" ] && [ "$tries" -lt 100 ]; do sleep 0.05; tries=$((tries+1)); done; }
 control() {
     [ -f "$TEST/app/scripts/control.sh" ] || return 0
@@ -596,5 +612,35 @@ echo empty > "$TEST/mode"
 sh "$SEARCH" 'включи несуществующий трек 999' || true
 label='ordinary catalog no-match never triggers requests/tts'
 check sh -c '[ ! -e "$TEST/app/data/requests/tts" ]'
+
+# Always-previous-track behavior for control.sh prev
+reset
+echo restart-then-prev > "$TEST/prev-mode"
+printf '{"type":"playback_state","status":"paused","item":{"uri":"spotify:track:CURRENT"},"context":{"uri":"spotify:playlist:CTX"},"position":{"position_ms":15000,"timestamp_ms":1000,"speed":0},"is_active":true}\n' > "$TEST/now_state"
+control prev
+label='paused mid-track prev restarts then sends second prev to reach previous track'
+check sh -c '[ "$(grep -c " prev\$" "$TEST/controls")" -eq 2 ]'
+
+reset
+echo restart-then-prev > "$TEST/prev-mode"
+_past_ts=$((($(date +%s) - 30) * 1000))
+printf '{"type":"playback_state","status":"playing","item":{"uri":"spotify:track:CURRENT"},"position":{"position_ms":0,"timestamp_ms":%s,"speed":1},"is_active":true}\n' "$_past_ts" > "$TEST/now_state"
+control prev
+label='playing mid-track prev with position_ms=0 uses elapsed timestamp_ms and sends prev twice'
+check sh -c '[ "$(grep -c " prev\$" "$TEST/controls")" -eq 2 ]'
+
+reset
+echo immediate-prev > "$TEST/prev-mode"
+printf '{"type":"playback_state","status":"paused","item":{"uri":"spotify:track:CURRENT"},"position":{"position_ms":500,"timestamp_ms":1000,"speed":0},"is_active":true}\n' > "$TEST/now_state"
+control prev
+label='prev near start (<1.5s) dispatches prev only once'
+check sh -c '[ "$(grep -c " prev\$" "$TEST/controls")" -eq 1 ]'
+
+reset
+echo immediate-prev > "$TEST/prev-mode"
+printf '{"type":"playback_state","status":"paused","item":{"uri":"spotify:track:CURRENT"},"position":{"position_ms":2000,"timestamp_ms":1000,"speed":0},"is_active":true}\n' > "$TEST/now_state"
+control prev
+label='prev when first skip already switches URI never double-skips'
+check sh -c '[ "$(grep -c " prev\$" "$TEST/controls")" -eq 1 ]'
 
 exit "$failures"

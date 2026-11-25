@@ -119,6 +119,46 @@ request_begin() {
     [ "${1:-}" = hold ] || flock -u 8
 }
 
+# Extract item.uri, position_ms, timestamp_ms, speed from `soloist ctl now --json`.
+request_now_playback() {
+    printf '%s\n' "$1" | LC_ALL=C awk '
+        BEGIN { uri = ""; pos = ""; ts = ""; spd = "" }
+        {
+            s = $0
+            if (match(s, /"item"[ \t]*:[ \t]*\{[^{}]*"uri"[ \t]*:[ \t]*"spotify:[A-Za-z0-9:]+"/)) {
+                u = substr(s, RSTART, RLENGTH)
+                sub(/^.*"uri"[ \t]*:[ \t]*"/, "", u)
+                sub(/"$/, "", u)
+                uri = u
+            }
+            if (match(s, /"position"[ \t]*:[ \t]*\{[^}]*"position_ms"[ \t]*:[ \t]*[0-9]+/)) {
+                p = substr(s, RSTART, RLENGTH)
+                sub(/^.*"position_ms"[ \t]*:[ \t]*/, "", p)
+                pos = p
+            } else if (match(s, /"position_ms"[ \t]*:[ \t]*[0-9]+/)) {
+                p = substr(s, RSTART, RLENGTH)
+                sub(/^.*:[ \t]*/, "", p)
+                pos = p
+            }
+            if (match(s, /"timestamp_ms"[ \t]*:[ \t]*[0-9]+/)) {
+                t = substr(s, RSTART, RLENGTH)
+                sub(/^.*:[ \t]*/, "", t)
+                ts = t
+            }
+            if (match(s, /"position"[ \t]*:[ \t]*\{[^}]*"speed"[ \t]*:[ \t]*[0-9]+/)) {
+                sp = substr(s, RSTART, RLENGTH)
+                sub(/^.*"speed"[ \t]*:[ \t]*/, "", sp)
+                spd = sp
+            }
+        }
+        END {
+            if (uri != "") {
+                printf "%s %s %s %s\n", uri, (pos != "" ? pos : "0"), (ts != "" ? ts : "0"), (spd != "" ? spd : "0")
+            }
+        }
+    '
+}
+
 request_dispatch() {
     request_traps
     action=$1
@@ -165,6 +205,60 @@ request_dispatch() {
         request_cli pause >/dev/null 2>&1 || true
         request_cli deactivate >/dev/null
         result=$?
+        [ "$result" = 0 ] || request_report "$action" dispatch "$result"
+        flock -u 8
+        return "$result"
+    fi
+    if [ "$1" = prev ]; then
+        _b_uri= _b_pos=0 _b_ts=0 _b_spd=0 _eff_pos=0
+        _before=$(request_cli now --json 2>/dev/null || true)
+        _parsed_b=$(request_now_playback "$_before")
+        if [ -n "$_parsed_b" ]; then
+            read -r _b_uri _b_pos _b_ts _b_spd <<EOF
+$_parsed_b
+EOF
+        fi
+        case "$_b_pos" in ''|*[!0-9]*) _b_pos=0;; esac
+        case "$_b_ts" in ''|*[!0-9]*) _b_ts=0;; esac
+        case "$_b_spd" in ''|*[!0-9]*) _b_spd=0;; esac
+        _eff_pos=$_b_pos
+        if [ "$_b_spd" -gt 0 ] && [ "$_b_ts" -gt 0 ]; then
+            _now_s=$(date +%s 2>/dev/null || echo 0)
+            case "$_now_s" in ''|*[!0-9]*) _now_s=0;; esac
+            _now_ms=$((_now_s * 1000))
+            if [ "$_now_ms" -gt "$_b_ts" ]; then
+                _eff_pos=$((_eff_pos + _now_ms - _b_ts))
+            fi
+        fi
+        request_cli prev >/dev/null
+        result=$?
+        if [ "$result" = 0 ] && [ -n "$_b_uri" ] && [ "$_eff_pos" -ge 1500 ]; then
+            _polls=0
+            while [ "$_polls" -lt 6 ]; do
+                sleep 0.1
+                request_current || break
+                _after=$(request_cli now --json 2>/dev/null || true)
+                _parsed_a=$(request_now_playback "$_after")
+                _a_uri= _a_pos=0 _a_ts=0 _a_spd=0
+                if [ -n "$_parsed_a" ]; then
+                    read -r _a_uri _a_pos _a_ts _a_spd <<EOF
+$_parsed_a
+EOF
+                fi
+                case "$_a_pos" in ''|*[!0-9]*) _a_pos=0;; esac
+                case "$_a_ts" in ''|*[!0-9]*) _a_ts=0;; esac
+                if [ -n "$_a_uri" ]; then
+                    if [ "$_a_uri" != "$_b_uri" ]; then
+                        break
+                    fi
+                    if [ "$_a_pos" -lt 2500 ] && { [ "$_a_ts" != "$_b_ts" ] || [ "$_a_pos" -lt "$_b_pos" ]; }; then
+                        request_cli prev >/dev/null 2>&1 || true
+                        break
+                    fi
+                fi
+                _polls=$((_polls + 1))
+            done
+        fi
         [ "$result" = 0 ] || request_report "$action" dispatch "$result"
         flock -u 8
         return "$result"
