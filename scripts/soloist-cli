@@ -87,7 +87,7 @@ cmd_help() {
     printf "  ${CYAN}status${NC}       Статус плеера, моста, памяти, подсветки и текущего трека\n"
     printf "  ${CYAN}network${NC} [status|auto|off|check]  Управление SNI-прокси Spotify\n"
     printf "  ${CYAN}doctor${NC} [--offline]  Диагностика для отчёта об ошибке\n"
-    printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|green|status]  Управление эквалайзером подсветки\n"
+    printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|green|fx on|fx off|status]  Управление подсветкой и анимациями\n"
     printf "  ${CYAN}restart${NC}      Перезапустить службу Spotify и мост управления\n"
     printf "  ${CYAN}start${NC}        Запустить службу\n"
     printf "  ${CYAN}stop${NC}         Остановить службу\n"
@@ -180,7 +180,7 @@ cmd_status() {
         printf "  Soloist Bridge: ${RED}STOPPED${NC}\n"
     fi
 
-    # LED visualizer state
+    # LED visualizer & animations state
     if [ -f "$DATA_ROOT/requests/led_state" ]; then
         LED_ST=$(cat "$DATA_ROOT/requests/led_state" 2>/dev/null || echo "off")
         if [ "$LED_ST" = "on" ]; then
@@ -188,6 +188,11 @@ cmd_status() {
         else
             printf "  Светомузыка:    ${YELLOW}ВЫКЛЮЧЕНА${NC}\n"
         fi
+    fi
+    if [ "$(read_led_fx_state)" = "on" ]; then
+        printf "  Анимации LED:   ${GREEN}ВКЛЮЧЕНЫ${NC}\n"
+    else
+        printf "  Анимации LED:   ${YELLOW}ВЫКЛЮЧЕНЫ${NC}\n"
     fi
 
     # Soloist API status
@@ -389,8 +394,30 @@ cmd_doctor() {
     printf 'Recent diagnostic events:\n%s\n' "${events:-none}"
 }
 
+read_led_fx_state() {
+    _fx_state_f="$DATA_ROOT/requests/led_fx_state"
+    if [ -f "$_fx_state_f" ]; then
+        case "$(cat "$_fx_state_f" 2>/dev/null || true)" in
+            *off*) printf 'off\n'; return 0 ;;
+            *on*)  printf 'on\n'; return 0 ;;
+        esac
+    fi
+    _fx_conf="$CONF_DIR/spotify_api.conf"
+    if [ -f "$_fx_conf" ]; then
+        _fx_val=$(awk -F= '/^[ \t]*(LED_ANIMATIONS|LED_FX)=/{
+            v=$2; sub(/[ \t]*#.*/, "", v); gsub(/["'\'' \t\r]/, "", v); val=v
+        } END { print val }' "$_fx_conf" 2>/dev/null || true)
+        case "$_fx_val" in
+            [oO][fF][fF]|0) printf 'off\n'; return 0 ;;
+            [oO][nN]|1)  printf 'on\n'; return 0 ;;
+        esac
+    fi
+    printf 'on\n'
+}
+
 cmd_led() {
     ACTION="${1:-status}"
+    SUB="${2:-status}"
     REQ_FILE="$DATA_ROOT/requests/led"
     STATE_FILE="$DATA_ROOT/requests/led_state"
     mkdir -p "$DATA_ROOT/requests"
@@ -420,6 +447,37 @@ cmd_led() {
             printf "g\n" > "$REQ_FILE"
             printf "${BOLD}${GREEN}Цвет эквалайзера: Зелёный (Spotify)${NC}\n"
             ;;
+        fx|anim|animations)
+            case "$SUB" in
+                on|1)
+                    printf "f1\n" > "$REQ_FILE"
+                    printf "${GREEN}Анимации LED-кольца включены.${NC}\n"
+                    ;;
+                off|0)
+                    printf "f0\n" > "$REQ_FILE"
+                    printf "${YELLOW}Анимации LED-кольца выключены.${NC}\n"
+                    ;;
+                status|state)
+                    if [ "$(read_led_fx_state)" = "on" ]; then
+                        printf "Статус анимаций LED: ${BOLD}${GREEN}ВКЛЮЧЕНЫ${NC}\n"
+                    else
+                        printf "Статус анимаций LED: ${BOLD}${YELLOW}ВЫКЛЮЧЕНЫ${NC}\n"
+                    fi
+                    ;;
+                *)
+                    printf "Использование: soloist led fx [on|off|status]\n"
+                    return 2
+                    ;;
+            esac
+            ;;
+        fx-on|anim-on)
+            printf "f1\n" > "$REQ_FILE"
+            printf "${GREEN}Анимации LED-кольца включены.${NC}\n"
+            ;;
+        fx-off|anim-off)
+            printf "f0\n" > "$REQ_FILE"
+            printf "${YELLOW}Анимации LED-кольца выключены.${NC}\n"
+            ;;
         status|state)
             if [ -f "$STATE_FILE" ]; then
                 ST=$(cat "$STATE_FILE" 2>/dev/null || echo "off")
@@ -431,9 +489,14 @@ cmd_led() {
             else
                 printf "Статус светомузыки: ${BOLD}${GREEN}ВКЛЮЧЕНА (по умолчанию: Белый)${NC}\n"
             fi
+            if [ "$(read_led_fx_state)" = "on" ]; then
+                printf "Анимации событий:   ${BOLD}${GREEN}ВКЛЮЧЕНЫ${NC}\n"
+            else
+                printf "Анимации событий:   ${BOLD}${YELLOW}ВЫКЛЮЧЕНЫ${NC}\n"
+            fi
             ;;
         *)
-            printf "Использование: soloist led [on|off|white|rainbow|cyan|green|status]\n"
+            printf "Использование: soloist led [on|off|white|rainbow|cyan|green|fx on|fx off|status]\n"
             ;;
     esac
 }
@@ -789,11 +852,16 @@ cmd_setup() {
     CURR_CID=""
     CURR_CSECRET=""
     CURR_MARKET=""
+    CURR_LED_VIS=""
+    CURR_LED_ANIM=""
     if [ -f "$CONF_DIR/spotify_api.conf" ]; then
         . "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
         CURR_CID="${SPOTIFY_CLIENT_ID:-}"
         CURR_CSECRET="${SPOTIFY_CLIENT_SECRET:-}"
         case "${SPOTIFY_MARKET:-}" in [A-Za-z][A-Za-z]) CURR_MARKET=$SPOTIFY_MARKET ;; esac
+        case "${LED_VISUALIZER:-}" in ''|*[!A-Za-z0-9_-]*) ;; *) CURR_LED_VIS=$LED_VISUALIZER ;; esac
+        _raw_anim="${LED_ANIMATIONS:-${LED_FX:-}}"
+        case "$_raw_anim" in ''|*[!A-Za-z0-9_-]*) ;; *) CURR_LED_ANIM=$_raw_anim ;; esac
     fi
 
     CURR_FAV=""
@@ -1010,6 +1078,12 @@ SPOTIFY_CLIENT_SECRET='$NEW_CSECRET'
 EOF
             if [ -n "$CURR_MARKET" ]; then
                 printf "SPOTIFY_MARKET='%s'\n" "$CURR_MARKET" >> "$CONF_DIR/spotify_api.conf"
+            fi
+            if [ -n "$CURR_LED_VIS" ]; then
+                printf "LED_VISUALIZER='%s'\n" "$CURR_LED_VIS" >> "$CONF_DIR/spotify_api.conf"
+            fi
+            if [ -n "$CURR_LED_ANIM" ]; then
+                printf "LED_ANIMATIONS='%s'\n" "$CURR_LED_ANIM" >> "$CONF_DIR/spotify_api.conf"
             fi
             chmod 600 "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
         )

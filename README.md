@@ -75,7 +75,7 @@ adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 Основную конфигурацию выполняет мастер `soloist setup`:
 
 - **Ключ Soloist и имя устройства:** сохраняются в `/data/yam/etc/horohi.soloist/config.env` (YAM v2) или `/data/opt/soloist/start.sh` (Standalone).
-- **Spotify Web API (`spotify_api.conf`):** `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` и при необходимости рынок аккаунта `SPOTIFY_MARKET="DE"` (пример — `spotify_api.conf.example`).
+- **Spotify Web API (`spotify_api.conf`):** `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, опционально рынок `SPOTIFY_MARKET="DE"`, цвет эквалайзера `LED_VISUALIZER` и переключатель анимаций `LED_ANIMATIONS="on"|"off"` (пример — `spotify_api.conf.example`).
 - **Избранное (`favorites.uri`):** Spotify не даёт внешней ссылки для запуска системного раздела «Любимые треки» с нуля. Внутренний URI коллекции умеет только возобновлять уже загруженную очередь, поэтому для команды *«включи любимые треки»* создайте отдельный обычный плейлист и укажите его ссылку в `soloist setup`.
 - **Параметры звука (`config.env`):** для Лайт 2 (`plum`) по умолчанию выставляется `APULSE_PLAYBACK_DEVICE=sysdefault:CARD=<CARD>` и `APULSE_EXTERNAL_VOLUME=0`; переопределения в `config.env` сохраняются при запуске службы.
 
@@ -127,7 +127,7 @@ adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 | `soloist status` | Статус плеера, моста, сессии Spotify, памяти и текущего трека |
 | `soloist network [status\|auto\|off\|check]` | Статус и управление встроенным SNI-прокси для Spotify |
 | `soloist doctor [--offline]` | Сводка для баг-репорта без утечки ключей, токенов и запросов |
-| `soloist led [on\|off\|white\|rainbow\|cyan\|status]` | Управление LED-эквалайзером и его цветом |
+| `soloist led [on\|off\|white\|rainbow\|cyan\|green\|fx on\|fx off\|status]` | Управление LED-эквалайзером, его цветом и анимациями событий |
 | `soloist start` / `stop` / `restart` | Управление фоновыми службами плеера и моста |
 | `soloist logs [bridge\|search]` | Просмотр логов (`soloist`, `bridge` или `search`) |
 | `soloist clean` | Очистка временных файлов, старых логов и аудиокэша |

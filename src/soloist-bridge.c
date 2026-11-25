@@ -2200,6 +2200,7 @@ static int g_led_rgb_cache_valid = 0;
 #define LED_FX_SEARCH 4
 #define LED_FX_ERROR  5
 #endif
+static int g_led_fx_enabled = 1;
 static int g_led_fx_type = LED_FX_NONE;
 static int64_t g_led_fx_queued_ms = 0;
 static int64_t g_led_fx_start_ms = 0;
@@ -2526,13 +2527,12 @@ static void led_all_off(void) {
     }
 }
 
+static void join_path(char *dst, unsigned long max, const char *a, const char *b);
+
 static void set_led_visualizer_impl(int enable) {
     led_probe();
     g_led_enabled = enable ? 1 : 0;
-    if (!g_led_enabled) {
-        g_led_fx_type = LED_FX_NONE;
-        g_led_fx_start_ms = 0;
-        g_led_fx_queued_ms = 0;
+    if (!g_led_enabled && g_led_fx_type == LED_FX_NONE) {
         if (alice_owns_leds(now_ms())) {
             led_reset_internal_state();
         } else {
@@ -2552,7 +2552,36 @@ static void set_led_visualizer_impl(int enable) {
     log_msg(g_led_enabled ? "[bridge] LED visualizer: ON (Nothing Phone Equalizer)\n" : "[bridge] LED visualizer: OFF\n");
 }
 
-static void join_path(char *dst, unsigned long max, const char *a, const char *b);
+static void set_led_fx_enabled_impl(int enable) {
+    led_probe();
+    g_led_fx_enabled = enable ? 1 : 0;
+    if (!g_led_fx_enabled) {
+        g_led_fx_type = LED_FX_NONE;
+        g_led_fx_start_ms = 0;
+        g_led_fx_queued_ms = 0;
+        if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
+            if (alice_owns_leds(now_ms())) {
+                led_reset_internal_state();
+            } else {
+                led_all_off();
+            }
+        }
+    }
+    const char *req_dir = get_requests_dir();
+    sys_mkdir(req_dir, 0700);
+    char fx_state_path[360];
+    join_path(fx_state_path, sizeof(fx_state_path), req_dir, "led_fx_state");
+    int fd = sys_open(fx_state_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
+    if (fd >= 0) {
+        if (g_led_fx_enabled) {
+            sys_write(fd, "on\n", 3);
+        } else {
+            sys_write(fd, "off\n", 4);
+        }
+        sys_close(fd);
+    }
+    log_msg(g_led_fx_enabled ? "[bridge] LED animations: ON\n" : "[bridge] LED animations: OFF\n");
+}
 
 static void parse_led_conf_buf(const char *buf) {
     unsigned long i = 0;
@@ -2583,6 +2612,15 @@ static void parse_led_conf_buf(const char *buf) {
                 g_led_enabled = 1;
                 g_led_color_mode = 0;
             }
+        } else if (mem_equal(buf + i, "LED_ANIMATIONS=", 15) ||
+                   mem_equal(buf + i, "LED_FX=", 7)) {
+            i += mem_equal(buf + i, "LED_ANIMATIONS=", 15) ? 15 : 7;
+            if (buf[i] == '"' || buf[i] == '\'') i++;
+            if (mem_equal(buf + i, "off", 3) || buf[i] == '0') {
+                g_led_fx_enabled = 0;
+            } else if (mem_equal(buf + i, "on", 2) || buf[i] == '1') {
+                g_led_fx_enabled = 1;
+            }
         }
         while (buf[i] && buf[i] != '\n') i++;
     }
@@ -2591,6 +2629,8 @@ static void parse_led_conf_buf(const char *buf) {
 static void read_led_config(void) {
     const char *req_dir = get_requests_dir();
     const char *state_path = get_led_state_path();
+    char fx_state_path[360];
+    join_path(fx_state_path, sizeof(fx_state_path), req_dir, "led_fx_state");
     sys_mkdir(req_dir, 0700);
 
     char marker_path[360];
@@ -2603,14 +2643,17 @@ static void read_led_config(void) {
             sys_close(cfd);
         }
         sys_unlink(state_path);
+        sys_unlink(fx_state_path);
         g_led_enabled = 1;
         g_led_color_mode = 0;
+        g_led_fx_enabled = 1;
         return;
     }
     sys_close(mfd);
 
     g_led_enabled = 1;
     g_led_color_mode = 0;
+    g_led_fx_enabled = 1;
 
     const char *conf_path = get_conf_path();
     int fd = sys_open(conf_path, 0, 0);
@@ -2635,6 +2678,18 @@ static void read_led_config(void) {
             else if (str_contains(sbuf, "off")) g_led_enabled = 0;
         }
     }
+
+    int fsfd = sys_open(fx_state_path, 0, 0);
+    if (fsfd >= 0) {
+        char fsbuf[32];
+        long fsn = sys_read(fsfd, fsbuf, sizeof(fsbuf) - 1);
+        sys_close(fsfd);
+        if (fsn > 0) {
+            fsbuf[fsn] = 0;
+            if (str_contains(fsbuf, "on")) g_led_fx_enabled = 1;
+            else if (str_contains(fsbuf, "off")) g_led_fx_enabled = 0;
+        }
+    }
 }
 
 static void check_led_request(void) {
@@ -2647,7 +2702,13 @@ static void check_led_request(void) {
         sys_unlink(path);
 
         if (n > 0) {
-            if (cmd[0] == '1' || (cmd[0] == 'o' && cmd[1] == 'n')) {
+            if (cmd[0] == 'f' && n >= 2) {
+                if (cmd[1] == '0' || (n >= 3 && cmd[1] == 'o' && cmd[2] == 'f')) {
+                    set_led_fx_enabled_impl(0);
+                } else if (cmd[1] == '1' || (n >= 3 && cmd[1] == 'o' && cmd[2] == 'n')) {
+                    set_led_fx_enabled_impl(1);
+                }
+            } else if (cmd[0] == '1' || (cmd[0] == 'o' && cmd[1] == 'n')) {
                 set_led_visualizer(1);
             } else if (cmd[0] == '0' || (cmd[0] == 'o' && cmd[1] == 'f')) {
                 set_led_visualizer(0);
@@ -2719,6 +2780,7 @@ static void write_zone_rgb_if_changed(int i, int z, int r, int g, int b) {
 }
 
 static void led_fx_trigger_impl(int fx_type) {
+    if (!g_led_fx_enabled) return;
     int64_t fnow = now_ms();
     g_led_fx_type = fx_type;
     g_led_fx_queued_ms = fnow;
@@ -2931,17 +2993,11 @@ static void led_visualizer_tick(int64_t now) {
         return;
     }
 
-    if (!g_led_enabled) {
+    if (!g_led_fx_enabled) {
         g_led_fx_type = LED_FX_NONE;
         g_led_fx_start_ms = 0;
         g_led_fx_queued_ms = 0;
-        if (g_led_last_active || g_led_ring_dirty) {
-            led_all_off();
-        }
-        return;
-    }
-
-    if (g_led_fx_type != LED_FX_NONE) {
+    } else if (g_led_fx_type != LED_FX_NONE) {
         if (g_led_fx_start_ms == 0) {
             int64_t wait_limit = (g_led_fx_type == LED_FX_SEARCH) ? 10000 : 2500;
             if (g_led_fx_queued_ms > 0 && now >= g_led_fx_queued_ms && (now - g_led_fx_queued_ms) > wait_limit) {
@@ -2971,7 +3027,7 @@ static void led_visualizer_tick(int64_t now) {
         }
     }
 
-    if (playback_status != 1 || !spotify_device_is_active) {
+    if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
         if (g_led_last_active || g_led_ring_dirty) {
             led_all_off();
         }
@@ -3416,10 +3472,10 @@ void _start(void) {
 
         struct timespec tmo;
         tmo.tv_sec = 0;
-        if (g_led_enabled && g_led_hw.detected && !alice_owns_leds(now)) {
-            if (g_led_fx_type != LED_FX_NONE) {
+        if (g_led_hw.detected && !alice_owns_leds(now)) {
+            if (g_led_fx_enabled && g_led_fx_type != LED_FX_NONE) {
                 tmo.tv_nsec = 16000000;
-            } else if (playback_status == 1 && spotify_device_is_active) {
+            } else if (g_led_enabled && playback_status == 1 && spotify_device_is_active) {
                 tmo.tv_nsec = 33000000;
             } else {
                 tmo.tv_nsec = 50000000;

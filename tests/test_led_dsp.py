@@ -533,13 +533,36 @@ int main(void) {{
                 g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
         return 43;
     }}
+    // 12b. g_led_enabled=0 with g_led_fx_enabled=1 keeps animations active while equalizer stays off
     g_led_enabled = 0;
+    g_led_fx_enabled = 1;
+    playback_status = 1;
+    spotify_device_is_active = 1;
     g_mock_now = 26000;
     led_fx_trigger_impl(LED_FX_PLAY);
     led_visualizer_tick(26000);
-    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][1] != 0 || g_zone_rgb[1][1] != 0) {{
-        fprintf(stderr, "FAIL g_led_enabled=0 did not suppress FX cleanly\\n");
+    led_visualizer_tick(26200);
+    if (g_zone_rgb[0][1] < 200 || g_zone_rgb[0][0] != 0) {{
+        fprintf(stderr, "FAIL g_led_enabled=0 unexpectedly suppressed independent FX: r=%d g=%d\\n",
+                g_zone_rgb[0][0], g_zone_rgb[0][1]);
         return 44;
+    }}
+    led_visualizer_tick(26750);
+    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][1] != 0 || g_led_ring_dirty != 0) {{
+        fprintf(stderr, "FAIL finished FX with equalizer off did not return ring to 0\\n");
+        return 45;
+    }}
+
+    // 13. g_led_fx_enabled=0 ignores triggers, cancels active FX, and keeps ring dark when stopped
+    g_led_enabled = 1;
+    g_led_fx_enabled = 0;
+    playback_status = 2;
+    g_mock_now = 27000;
+    led_fx_trigger_impl(LED_FX_PLAY);
+    led_visualizer_tick(27000);
+    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][1] != 0 || g_zone_rgb[1][1] != 0) {{
+        fprintf(stderr, "FAIL g_led_fx_enabled=0 did not suppress FX cleanly\\n");
+        return 46;
     }}
     return 0;
 }}

@@ -20,6 +20,9 @@ SPOTIFY_CLIENT_SECRET=""
 # Пустое значение сохраняет поиск без явного рынка.
 # SPOTIFY_MARKET="DE"
 
-# LED-эквалайзер (по умолчанию включён: white — белый в стиле Nothing Phone)
-# Доступные значения: white | rainbow | cyan | off
+# LED-эквалайзер (по умолчанию включён: white — белый)
+# Доступные значения: white | rainbow | cyan | green | off
 # LED_VISUALIZER="white"
+
+# Анимации LED-кольца при поиске, запуске, переключении треков и ошибке (on | off)
+# LED_ANIMATIONS="on"

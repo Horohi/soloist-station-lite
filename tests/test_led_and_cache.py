@@ -255,6 +255,32 @@ with tempfile.TemporaryDirectory() as td:
     check(proc_led_green.returncode == 0, "soloist-cli led green executes successfully")
     check(req_f.exists() and req_f.read_text().strip() == "g", "soloist-cli led green writes IPC request")
 
+    proc_fx_off = subprocess.run(["sh", str(cli_sh), "led", "fx", "off"], env=env, capture_output=True, text=True)
+    check(proc_fx_off.returncode == 0, "soloist-cli led fx off executes successfully")
+    check(req_f.exists() and req_f.read_text().strip() == "f0", "soloist-cli led fx off writes f0 IPC request")
+
+    proc_fx_on = subprocess.run(["sh", str(cli_sh), "led", "fx", "on"], env=env, capture_output=True, text=True)
+    check(proc_fx_on.returncode == 0, "soloist-cli led fx on executes successfully")
+    check(req_f.exists() and req_f.read_text().strip() == "f1", "soloist-cli led fx on writes f1 IPC request")
+
+    proc_fx_status_def = subprocess.run(["sh", str(cli_sh), "led", "fx", "status"], env=env, capture_output=True, text=True)
+    check(proc_fx_status_def.returncode == 0 and "ВКЛЮЧЕНЫ" in proc_fx_status_def.stdout,
+          "soloist-cli led fx status defaults to ON")
+
+    conf_cli = pathlib.Path(td) / "spotify_api.conf"
+    conf_cli.write_text('LED_ANIMATIONS="off"\n', encoding="utf-8")
+    proc_fx_status_conf = subprocess.run(["sh", str(cli_sh), "led", "fx", "status"], env=env, capture_output=True, text=True)
+    check(proc_fx_status_conf.returncode == 0 and "ВЫКЛЮЧЕНЫ" in proc_fx_status_conf.stdout,
+          "soloist-cli led fx status reads LED_ANIMATIONS=off from conf")
+
+    fx_state_cli = pathlib.Path(td) / "data/requests/led_fx_state"
+    fx_state_cli.write_text("on\n", encoding="utf-8")
+    proc_fx_status_state = subprocess.run(["sh", str(cli_sh), "led", "fx", "status"], env=env, capture_output=True, text=True)
+    check(proc_fx_status_state.returncode == 0 and "ВКЛЮЧЕНЫ" in proc_fx_status_state.stdout,
+          "soloist-cli led fx status prefers led_fx_state over conf")
+    fx_state_cli.unlink()
+    conf_cli.unlink()
+
     proc_status_def = subprocess.run(["sh", str(cli_sh), "led", "status"], env=env, capture_output=True, text=True)
     check(proc_status_def.returncode == 0 and "ВКЛЮЧЕНА" in proc_status_def.stdout, "soloist-cli led status defaults to ON white")
 
@@ -291,6 +317,7 @@ with tempfile.TemporaryDirectory() as td:
 
 static int g_led_enabled = 1;
 static int g_led_color_mode = 0;
+static int g_led_fx_enabled = 1;
 static const char *g_test_req_dir = "{req_dir}";
 static const char *g_test_conf = "{conf_p}";
 static const char *g_test_state = "{state_p}";
@@ -311,9 +338,9 @@ static int str_contains(const char *h, const char *n) {{ return strstr(h, n) != 
 
 int main(void) {{
     // 1. First launch (no marker): forces white ON despite old off state/conf
-    g_led_enabled = 0; g_led_color_mode = 2;
+    g_led_enabled = 0; g_led_color_mode = 2; g_led_fx_enabled = 0;
     read_led_config();
-    if (g_led_enabled != 1 || g_led_color_mode != 0) return 1;
+    if (g_led_enabled != 1 || g_led_color_mode != 0 || g_led_fx_enabled != 1) return 1;
     if (access("{state_p}", F_OK) == 0) return 2;
 
     // 2. Subsequent launch: honors config (quoted/unquoted) and ignores comments
@@ -334,17 +361,36 @@ int main(void) {{
     if (g_led_enabled != 1 || g_led_color_mode != 2) return 5;
 
     f = fopen(g_test_conf, "w");
-    fprintf(f, "LED_VISUALIZER=green\\n");
+    fprintf(f, "LED_VISUALIZER=green\\nLED_ANIMATIONS=\\"off\\"\\n");
     fclose(f);
     read_led_config();
-    if (g_led_enabled != 1 || g_led_color_mode != 4) return 7;
+    if (g_led_enabled != 1 || g_led_color_mode != 4 || g_led_fx_enabled != 0) return 7;
 
-    // 3. Explicit runtime led_state=off overrides conf on restart
+    f = fopen(g_test_conf, "w");
+    fprintf(f, "LED_ANIMATIONS=on\\n");
+    fclose(f);
+    read_led_config();
+    if (g_led_fx_enabled != 1) return 8;
+
+    f = fopen(g_test_conf, "w");
+    fprintf(f, "LED_FX=off\\n");
+    fclose(f);
+    read_led_config();
+    if (g_led_fx_enabled != 0) return 9;
+
+    // 3. Explicit runtime state files override conf on restart
     f = fopen(g_test_state, "w");
     fprintf(f, "off\\n");
     fclose(f);
+    {{
+        char fxs[512];
+        snprintf(fxs, sizeof(fxs), "%s/led_fx_state", g_test_req_dir);
+        f = fopen(fxs, "w");
+        fprintf(f, "on\\n");
+        fclose(f);
+    }}
     read_led_config();
-    if (g_led_enabled != 0) return 6;
+    if (g_led_enabled != 0 || g_led_fx_enabled != 1) return 6;
     return 0;
 }}
 ''', encoding="utf-8")
