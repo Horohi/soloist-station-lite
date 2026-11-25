@@ -21,6 +21,16 @@ prefix = '''#include <stdint.h>
 #include <string.h>
 
 static int g_led_state = -1; // -1=none, 0=off, 1=on
+static int g_last_fx = 0;
+static int g_fx_cleared = 0;
+#define LED_FX_NONE   0
+#define LED_FX_PLAY   1
+#define LED_FX_NEXT   2
+#define LED_FX_PREV   3
+#define LED_FX_SEARCH 4
+#define LED_FX_ERROR  5
+static void led_fx_trigger(int fx_type) { g_last_fx = fx_type; }
+static void led_fx_clear(void) { g_fx_cleared++; g_last_fx = 0; }
 static int g_suppressed = 0;
 static int g_searches = 0;
 static int spotify_is_active = 0;
@@ -149,6 +159,27 @@ int main(void) {
         if (g_searches != expected_searches) return 30 + (int)i;
     }
 
+    // Spotify LED FX triggers on search, play/resume, next, prev, and pause clear
+    g_last_fx = 0;
+    handle_voice_recognition(0, "включи песню Кукушка", strlen("включи песню Кукушка"));
+    if (g_last_fx != LED_FX_SEARCH) return 40;
+
+    g_last_fx = 0; spotify_is_active = 1; spotify_device_is_active = 1; yandex_music_active = 0;
+    handle_voice_recognition(0, "дальше", strlen("дальше"));
+    if (g_last_fx != LED_FX_NEXT) return 41;
+
+    g_last_fx = 0;
+    handle_voice_recognition(0, "назад", strlen("назад"));
+    if (g_last_fx != LED_FX_PREV) return 42;
+
+    g_fx_cleared = 0; playback_status = 1;
+    handle_voice_recognition(0, "пауза", strlen("пауза"));
+    if (g_fx_cleared == 0) return 43;
+
+    g_last_fx = 0;
+    handle_voice_recognition(0, "играй", strlen("играй"));
+    if (g_last_fx != LED_FX_PLAY) return 44;
+
     return 0;
 }
 '''
@@ -219,6 +250,10 @@ with tempfile.TemporaryDirectory() as td:
     proc_led_off = subprocess.run(["sh", str(cli_sh), "led", "off"], env=env, capture_output=True, text=True)
     check(proc_led_off.returncode == 0, "soloist-cli led off executes successfully")
     check(req_f.exists() and req_f.read_text().strip() == "0", "soloist-cli led off writes IPC request")
+
+    proc_led_green = subprocess.run(["sh", str(cli_sh), "led", "green"], env=env, capture_output=True, text=True)
+    check(proc_led_green.returncode == 0, "soloist-cli led green executes successfully")
+    check(req_f.exists() and req_f.read_text().strip() == "g", "soloist-cli led green writes IPC request")
 
     proc_status_def = subprocess.run(["sh", str(cli_sh), "led", "status"], env=env, capture_output=True, text=True)
     check(proc_status_def.returncode == 0 and "ВКЛЮЧЕНА" in proc_status_def.stdout, "soloist-cli led status defaults to ON white")
@@ -297,6 +332,12 @@ int main(void) {{
     fclose(f);
     read_led_config();
     if (g_led_enabled != 1 || g_led_color_mode != 2) return 5;
+
+    f = fopen(g_test_conf, "w");
+    fprintf(f, "LED_VISUALIZER=green\\n");
+    fclose(f);
+    read_led_config();
+    if (g_led_enabled != 1 || g_led_color_mode != 4) return 7;
 
     // 3. Explicit runtime led_state=off overrides conf on restart
     f = fopen(g_test_state, "w");

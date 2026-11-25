@@ -534,4 +534,25 @@ run_catalog_case \
     '{"artists":{"items":[{"name":"Sub Zero Project","uri":"spotify:artist:SUBZEROAAAAAAAAAAAAAAA"}]},"tracks":{"items":[{"name":"Sun to Me","artists":[{"name":"mgk","uri":"spotify:artist:MGKAAAAAAAAAAAAAAAAAAA"}],"uri":"spotify:track:SUNTOAAAAAAAAAAAAAAAAA"}]}}' \
     ''
 
+# LED FX signaling: error on no-match, play on match, silent on superseded search
+reset
+echo empty > "$TEST/mode"
+sh "$SEARCH" 'включи несуществующий трек 999' || true
+label='catalog no-match signals err to led_fx'; check sh -c '[ "$(cat "$TEST/app/data/requests/led_fx" 2>/dev/null || true)" = "err" ]'
+
+reset
+sh "$SEARCH" 'включи песню Test' || true
+label='catalog match signals play to led_fx'; check sh -c '[ "$(cat "$TEST/app/data/requests/led_fx" 2>/dev/null || true)" = "play" ]'
+
+reset
+echo empty > "$TEST/mode"
+touch "$TEST/delay"
+sh "$SEARCH" 'включи несуществующий трек 999' & older=$!
+wait_started
+control pause
+rm -f "$TEST/app/data/requests/led_fx"
+touch "$TEST/release"
+wait "$older" || true
+label='superseded failing search does not flash led_fx err'; check sh -c '[ ! -e "$TEST/app/data/requests/led_fx" ]'
+
 exit "$failures"

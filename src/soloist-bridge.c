@@ -593,8 +593,8 @@ static void trigger_alice_suppression(int quasar_fd, int duration_ms) {
     g_tts_hold_until_ms = 0;
     set_ducking(0, tnow);
     set_alsa_yield(0, tnow);
-    if (is_alice_visual_state(g_alice_state) && g_led_alice_yield_until_ms < tnow + 450) {
-        g_led_alice_yield_until_ms = tnow + 450;
+    if (is_alice_visual_state(g_alice_state)) {
+        g_led_alice_yield_until_ms = tnow + 150;
     }
     send_cancel_alice(quasar_fd);
 }
@@ -1542,6 +1542,34 @@ static void extract_track_info(const char *json) {
     }
 }
 
+#ifndef LED_FX_NONE
+#define LED_FX_NONE   0
+#define LED_FX_PLAY   1
+#define LED_FX_NEXT   2
+#define LED_FX_PREV   3
+#define LED_FX_SEARCH 4
+#define LED_FX_ERROR  5
+
+#if defined(__aarch64__)
+static void led_fx_trigger_impl(int fx_type);
+static void led_fx_clear_impl(void);
+static int led_fx_is_skip_recent_impl(int64_t now);
+static int led_fx_is_play_recent_impl(int64_t now);
+static int led_fx_active_type_impl(void);
+static inline void led_fx_trigger(int fx_type) { led_fx_trigger_impl(fx_type); }
+static inline void led_fx_clear(void) { led_fx_clear_impl(); }
+static inline int led_fx_is_skip_recent(int64_t now) { return led_fx_is_skip_recent_impl(now); }
+static inline int led_fx_is_play_recent(int64_t now) { return led_fx_is_play_recent_impl(now); }
+static inline int led_fx_active_type(void) { return led_fx_active_type_impl(); }
+#else
+static inline void led_fx_trigger(int fx_type) { (void)fx_type; }
+static inline void led_fx_clear(void) {}
+static inline int led_fx_is_skip_recent(int64_t now) { (void)now; return 0; }
+static inline int led_fx_is_play_recent(int64_t now) { (void)now; return 0; }
+static inline int led_fx_active_type(void) { return LED_FX_NONE; }
+#endif
+#endif
+
 static void handle_soloist_ws_json(const char *json) {
     extract_track_info(json);
 
@@ -1582,16 +1610,26 @@ static void handle_soloist_ws_json(const char *json) {
     }
 
     char status_str[32];
+    int prev_status = playback_status;
     if (json_find_str(json, "status", status_str, sizeof(status_str))) {
         if (str_equal(status_str, "playing")) {
             playback_status = 1;
             playback_speed = 1;
             spotify_is_active = spotify_device_is_active;
             if (spotify_device_is_active) yandex_music_active = 0;
+            if (spotify_device_is_active && prev_status != 1) {
+                int cur_fx = led_fx_active_type();
+                int64_t fnow = now_ms();
+                if (cur_fx != LED_FX_NEXT && cur_fx != LED_FX_PREV &&
+                    !led_fx_is_skip_recent(fnow) && !led_fx_is_play_recent(fnow)) {
+                    led_fx_trigger(LED_FX_PLAY);
+                }
+            }
         } else if (str_equal(status_str, "paused")) {
             playback_status = 2;
             playback_speed = 0;
             spotify_is_active = 0;
+            if (led_fx_active_type() == LED_FX_PLAY) led_fx_clear();
         } else if (str_equal(status_str, "buffering")) {
             playback_status = 3;
             playback_speed = 0;
@@ -1599,6 +1637,7 @@ static void handle_soloist_ws_json(const char *json) {
             playback_status = 0;
             playback_speed = 0;
             spotify_is_active = 0;
+            if (led_fx_active_type() == LED_FX_PLAY) led_fx_clear();
             last_cache_clean_ms = now_ms();
             run_controller("clean-cache-full", 0);
         }
@@ -1648,6 +1687,7 @@ static void handle_soloist_ws_json(const char *json) {
             int is_track_uri = (str_len(uri_buf) >= 14 && mem_equal(uri_buf, "spotify:track:", 14));
             if (is_track_uri && !str_equal(current_track_uri, uri_buf)) {
                 int64_t cnow = now_ms();
+                int had_prev_track = (current_track_uri[0] != 0);
                 if (current_track_uri[0] != 0 && (cnow - last_cache_clean_ms >= 20000)) {
                     last_cache_clean_ms = cnow;
                     run_controller("clean-cache", 0);
@@ -1658,6 +1698,13 @@ static void handle_soloist_ws_json(const char *json) {
                 log_msg("[bridge] Current track: ");
                 log_msg(current_track_uri);
                 log_msg("\n");
+                if (had_prev_track && spotify_device_is_active && playback_status != 0 && playback_status != 2) {
+                    int cur_fx = led_fx_active_type();
+                    if (cur_fx != LED_FX_NEXT && cur_fx != LED_FX_PREV &&
+                        !led_fx_is_skip_recent(cnow) && !led_fx_is_play_recent(cnow)) {
+                        led_fx_trigger(LED_FX_PLAY);
+                    }
+                }
             } else if (!is_track_uri && current_track_uri[0] == 0) {
                 str_copy(current_track_uri, uri_buf, sizeof(current_track_uri));
                 publish_track(current_track_uri);
@@ -1784,6 +1831,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             str_contains(lower_buf, "из яндекс") || str_contains(lower_buf, "в я.музык")) {
             yandex_music_active = 1;
             spotify_is_active = 0;
+            led_fx_clear();
             if (playback_status == 1 || playback_status == 3) {
                 run_soloist_cmd("pause");
             }
@@ -1793,6 +1841,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         trigger_alice_suppression(quasar_fd, 5000);
         yandex_music_active = 0;
         spotify_is_active = 1;
+        led_fx_trigger(LED_FX_SEARCH);
         run_search_and_play(lower_buf);
         return;
     }
@@ -1806,6 +1855,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         log_msg("[bridge] Yandex Music/Radio preference requested, leaving to native Alice\n");
         yandex_music_active = 1;
         spotify_is_active = 0;
+        led_fx_clear();
         if (playback_status == 1 || playback_status == 3) {
             run_soloist_cmd("pause");
         }
@@ -1909,6 +1959,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
                 log_msg("[bridge] Action: PAUSE\n");
                 trigger_alice_suppression(quasar_fd, 3000);
                 spotify_is_active = 0;
+                led_fx_clear();
                 run_soloist_cmd("pause");
                 return;
             }
@@ -1921,6 +1972,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
                 log_msg("[bridge] Action: NEXT TRACK\n");
                 trigger_alice_suppression(quasar_fd, 3000);
                 spotify_is_active = 1;
+                led_fx_trigger(LED_FX_NEXT);
                 run_soloist_cmd("next");
                 return;
             }
@@ -1932,6 +1984,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
                 log_msg("[bridge] Action: PREVIOUS TRACK\n");
                 trigger_alice_suppression(quasar_fd, 3000);
                 spotify_is_active = 1;
+                led_fx_trigger(LED_FX_PREV);
                 run_soloist_cmd("prev");
                 return;
             }
@@ -1997,6 +2050,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             trigger_alice_suppression(quasar_fd, 2500);
             yandex_music_active = 0;
             spotify_is_active = 1;
+            led_fx_trigger(LED_FX_PLAY);
             run_search_and_play("включи музыку");
             return;
         }
@@ -2102,6 +2156,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         trigger_alice_suppression(quasar_fd, 5000);
         yandex_music_active = 0;
         spotify_is_active = 1;
+        led_fx_trigger(LED_FX_SEARCH);
 
         log_msg("[bridge] Action: SEARCH & PLAY query='");
         log_msg(lower_buf);
@@ -2151,6 +2206,19 @@ static int g_led_ring_dirty = 0;
 static int64_t g_last_led_tick_ms = 0;
 static uint8_t g_led_last_rgb[24][3] = {{0}};
 static int g_led_rgb_cache_valid = 0;
+#ifndef LED_FX_NONE
+#define LED_FX_NONE   0
+#define LED_FX_PLAY   1
+#define LED_FX_NEXT   2
+#define LED_FX_PREV   3
+#define LED_FX_SEARCH 4
+#define LED_FX_ERROR  5
+#endif
+static int g_led_fx_type = LED_FX_NONE;
+static int64_t g_led_fx_queued_ms = 0;
+static int64_t g_led_fx_start_ms = 0;
+static int64_t g_led_fx_last_skip_ms = 0;
+static int64_t g_led_fx_last_play_ms = 0;
 static uint32_t g_bass_level = 0;
 static uint32_t g_treble_level = 0;
 static int32_t *g_audio_shm_ptr = 0;
@@ -2476,6 +2544,9 @@ static void set_led_visualizer_impl(int enable) {
     led_probe();
     g_led_enabled = enable ? 1 : 0;
     if (!g_led_enabled) {
+        g_led_fx_type = LED_FX_NONE;
+        g_led_fx_start_ms = 0;
+        g_led_fx_queued_ms = 0;
         if (alice_owns_leds(now_ms())) {
             led_reset_internal_state();
         } else {
@@ -2517,6 +2588,9 @@ static void parse_led_conf_buf(const char *buf) {
             } else if (mem_equal(buf + i, "cyan", 4)) {
                 g_led_enabled = 1;
                 g_led_color_mode = 2;
+            } else if (mem_equal(buf + i, "green", 5)) {
+                g_led_enabled = 1;
+                g_led_color_mode = 4;
             } else if (mem_equal(buf + i, "white", 5) ||
                        mem_equal(buf + i, "on", 2) ||
                        buf[i] == '1') {
@@ -2580,26 +2654,61 @@ static void read_led_config(void) {
 static void check_led_request(void) {
     const char *path = get_led_req_path();
     int fd = sys_open(path, 0, 0);
-    if (fd < 0) return;
-    char cmd[16];
-    long n = sys_read(fd, cmd, sizeof(cmd) - 1);
-    sys_close(fd);
-    sys_unlink(path);
+    if (fd >= 0) {
+        char cmd[16];
+        long n = sys_read(fd, cmd, sizeof(cmd) - 1);
+        sys_close(fd);
+        sys_unlink(path);
 
-    if (n > 0) {
-        if (cmd[0] == '1' || (cmd[0] == 'o' && cmd[1] == 'n')) {
-            set_led_visualizer(1);
-        } else if (cmd[0] == '0' || (cmd[0] == 'o' && cmd[1] == 'f')) {
-            set_led_visualizer(0);
-        } else if (cmd[0] == 'w') {
-            g_led_color_mode = 0;
-            set_led_visualizer(1);
-        } else if (cmd[0] == 'r') {
-            g_led_color_mode = 1;
-            set_led_visualizer(1);
-        } else if (cmd[0] == 'c') {
-            g_led_color_mode = 2;
-            set_led_visualizer(1);
+        if (n > 0) {
+            if (cmd[0] == '1' || (cmd[0] == 'o' && cmd[1] == 'n')) {
+                set_led_visualizer(1);
+            } else if (cmd[0] == '0' || (cmd[0] == 'o' && cmd[1] == 'f')) {
+                set_led_visualizer(0);
+            } else if (cmd[0] == 'w') {
+                g_led_color_mode = 0;
+                set_led_visualizer(1);
+            } else if (cmd[0] == 'r') {
+                g_led_color_mode = 1;
+                set_led_visualizer(1);
+            } else if (cmd[0] == 'c') {
+                g_led_color_mode = 2;
+                set_led_visualizer(1);
+            } else if (cmd[0] == 'g') {
+                g_led_color_mode = 4;
+                set_led_visualizer(1);
+            }
+        }
+    }
+
+    char fx_path[360];
+    join_path(fx_path, sizeof(fx_path), get_requests_dir(), "led_fx");
+    int ffd = sys_open(fx_path, 0, 0);
+    if (ffd >= 0) {
+        char fx_cmd[16];
+        long fn = sys_read(ffd, fx_cmd, sizeof(fx_cmd) - 1);
+        sys_close(ffd);
+        sys_unlink(fx_path);
+
+        if (fn > 0) {
+            if (fx_cmd[0] == 'e') {
+                led_fx_trigger(LED_FX_ERROR);
+            } else if (fx_cmd[0] == 'p') {
+                int64_t fnow = now_ms();
+                int cur_fx = led_fx_active_type();
+                if (cur_fx != LED_FX_NEXT && cur_fx != LED_FX_PREV &&
+                    !led_fx_is_skip_recent(fnow) && !led_fx_is_play_recent(fnow)) {
+                    led_fx_trigger(LED_FX_PLAY);
+                }
+            } else if (fx_cmd[0] == 's') {
+                led_fx_trigger(LED_FX_SEARCH);
+            } else if (fx_cmd[0] == 'n') {
+                led_fx_trigger(LED_FX_NEXT);
+            } else if (fx_cmd[0] == 'b') {
+                led_fx_trigger(LED_FX_PREV);
+            } else if (fx_cmd[0] == 'c') {
+                led_fx_clear();
+            }
         }
     }
 }
@@ -2623,18 +2732,226 @@ static void write_zone_rgb_if_changed(int i, int z, int r, int g, int b) {
     }
 }
 
+static void led_fx_trigger_impl(int fx_type) {
+    int64_t fnow = now_ms();
+    g_led_fx_type = fx_type;
+    g_led_fx_queued_ms = fnow;
+    g_led_fx_start_ms = 0;
+    if (fx_type == LED_FX_NEXT || fx_type == LED_FX_PREV) {
+        g_led_fx_last_skip_ms = fnow;
+    } else if (fx_type == LED_FX_PLAY) {
+        g_led_fx_last_play_ms = fnow;
+    }
+}
+
+static void led_fx_clear_impl(void) {
+    g_led_fx_type = LED_FX_NONE;
+    g_led_fx_start_ms = 0;
+    g_led_fx_queued_ms = 0;
+}
+
+static int led_fx_is_skip_recent_impl(int64_t now) {
+    return g_led_fx_last_skip_ms > 0 && now >= g_led_fx_last_skip_ms &&
+           (now - g_led_fx_last_skip_ms) < 2500;
+}
+
+static int led_fx_is_play_recent_impl(int64_t now) {
+    return g_led_fx_last_play_ms > 0 && now >= g_led_fx_last_play_ms &&
+           (now - g_led_fx_last_play_ms) < 900;
+}
+
+static int led_fx_active_type_impl(void) {
+    return g_led_fx_type;
+}
+
+static void led_fx_spotify_rgb(uint32_t v, int *r, int *g, int *b) {
+    *r = (int)((v * 10) / 255);
+    *g = (int)v;
+    *b = (int)((v * 38) / 255);
+}
+
+static void led_fx_error_rgb(uint32_t v, int *r, int *g, int *b) {
+    *r = (int)v;
+    *g = (int)((v * 20) / 255);
+    *b = 0;
+}
+
+static int led_fx_render(int64_t now) {
+    int n_zones = g_led_hw.num_zones;
+    if (n_zones <= 0 || n_zones > 24) return 0;
+    int start = g_led_hw.is_zero_indexed ? 0 : 1;
+
+    uint32_t peak = (g_led_brightness <= 0) ? 0 : ((uint32_t)g_led_brightness + 40);
+    if (peak > 245) peak = 245;
+
+    int64_t elapsed = now - g_led_fx_start_ms;
+    if (elapsed < 0) elapsed = 0;
+
+    if (g_led_fx_type == LED_FX_PLAY) {
+        if (elapsed >= 700) return 0;
+        for (int i = 0; i < n_zones; i++) {
+            int z = start + i;
+            int64_t ze = elapsed - (((int64_t)i * 50) / n_zones);
+            uint32_t lvl = 0;
+            if (ze < 0) {
+                lvl = 24;
+            } else if (ze < 170) {
+                uint32_t u = (uint32_t)((ze * 32) / 170);
+                uint32_t s = (uint32_t)sin64[(u + 48) & 63] - 1;
+                lvl = 36 + (s * 219) / 254;
+            } else if (ze < 300) {
+                lvl = 255 - (uint32_t)(((ze - 170) * 25) / 130);
+            } else if (ze < 650) {
+                uint32_t u = (uint32_t)(350 - (ze - 300));
+                lvl = (230 * u * u) / (350 * 350);
+            }
+            uint32_t v = (peak * lvl) / 255;
+            int r = 0, g = 0, b = 0;
+            led_fx_spotify_rgb(v, &r, &g, &b);
+            write_zone_rgb_if_changed(i, z, r, g, b);
+        }
+        return 1;
+    }
+
+    if (g_led_fx_type == LED_FX_NEXT || g_led_fx_type == LED_FX_PREV) {
+        if (elapsed >= 560) return 0;
+        uint32_t step = (uint32_t)((elapsed * 64) / 560);
+        uint32_t head = (g_led_fx_type == LED_FX_NEXT) ? (step & 63) : ((64 - (step & 63)) & 63);
+        uint32_t env = 255;
+        if (elapsed < 70) {
+            env = 64 + (uint32_t)((elapsed * 191) / 70);
+        } else if (elapsed >= 410) {
+            env = (uint32_t)(((560 - elapsed) * 255) / 150);
+        }
+        for (int i = 0; i < n_zones; i++) {
+            int z = start + i;
+            uint32_t zpos = ((uint32_t)i * 64) / (uint32_t)n_zones;
+            uint32_t delta = (g_led_fx_type == LED_FX_NEXT)
+                             ? ((head - zpos + 64) & 63)
+                             : ((zpos - head + 64) & 63);
+            uint32_t w = sin64[(delta + 16) & 63];
+            uint32_t sq = (w * w) / 255;
+            uint32_t cb = (sq * w) / 255;
+            uint32_t shape = 18 + (cb * 237) / 255;
+            uint32_t lvl = (shape * env) / 255;
+            uint32_t v = (peak * lvl) / 255;
+            int r = 0, g = 0, b = 0;
+            led_fx_spotify_rgb(v, &r, &g, &b);
+            write_zone_rgb_if_changed(i, z, r, g, b);
+        }
+        return 1;
+    }
+
+    if (g_led_fx_type == LED_FX_SEARCH) {
+        if (elapsed >= 10000) return 0;
+        int64_t period = 900;
+        uint32_t head = (uint32_t)(((elapsed % period) * 64) / period) & 63;
+        uint32_t env = 255;
+        if (elapsed < 150) {
+            env = 64 + (uint32_t)((elapsed * 191) / 150);
+        } else if (elapsed >= 9700) {
+            env = (uint32_t)(((10000 - elapsed) * 255) / 300);
+        }
+        for (int i = 0; i < n_zones; i++) {
+            int z = start + i;
+            uint32_t zpos = ((uint32_t)i * 64) / (uint32_t)n_zones;
+            uint32_t delta = (head - zpos + 64) & 63;
+            uint32_t w = sin64[(delta + 16) & 63];
+            uint32_t shape = 26 + (229 * ((w * w) / 255)) / 255;
+            uint32_t lvl = (shape * env) / 255;
+            uint32_t v = (peak * lvl) / 255;
+            int r = 0, g = 0, b = 0;
+            led_fx_spotify_rgb(v, &r, &g, &b);
+            write_zone_rgb_if_changed(i, z, r, g, b);
+        }
+        return 1;
+    }
+
+    if (g_led_fx_type == LED_FX_ERROR) {
+        if (elapsed >= 760) return 0;
+        uint32_t lvl = 0;
+        if (elapsed < 300) {
+            if (elapsed == 0) {
+                lvl = 48;
+            } else {
+                uint32_t u = (uint32_t)((elapsed * 64) / 300);
+                lvl = (uint32_t)sin64[(u + 48) & 63] - 1;
+            }
+        } else if (elapsed < 400) {
+            lvl = 0;
+        } else {
+            uint32_t u = (uint32_t)(((elapsed - 400) * 64) / 360);
+            lvl = (uint32_t)sin64[(u + 48) & 63] - 1;
+        }
+        uint32_t v = (peak * lvl) / 255;
+        int r = 0, g = 0, b = 0;
+        led_fx_error_rgb(v, &r, &g, &b);
+        for (int i = 0; i < n_zones; i++) {
+            write_zone_rgb_if_changed(i, start + i, r, g, b);
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
 static void led_visualizer_tick(int64_t now) {
     if (!g_led_hw.detected) return;
 
     // Protect Alice listening/thinking/speaking LED animations from overwrite or zero-clearing
     if (alice_owns_leds(now)) {
+        if (g_led_fx_type != LED_FX_NONE && g_led_fx_type != LED_FX_SEARCH && g_led_fx_start_ms != 0) {
+            g_led_fx_type = LED_FX_NONE;
+            g_led_fx_start_ms = 0;
+            g_led_fx_queued_ms = 0;
+        }
         if (g_led_last_active || g_audio_shm_ptr) {
             led_reset_internal_state();
         }
         return;
     }
 
-    if (!g_led_enabled || playback_status != 1 || !spotify_device_is_active) {
+    if (!g_led_enabled) {
+        g_led_fx_type = LED_FX_NONE;
+        g_led_fx_start_ms = 0;
+        g_led_fx_queued_ms = 0;
+        if (g_led_last_active || g_led_ring_dirty) {
+            led_all_off();
+        }
+        return;
+    }
+
+    if (g_led_fx_type != LED_FX_NONE) {
+        if (g_led_fx_start_ms == 0) {
+            int64_t wait_limit = (g_led_fx_type == LED_FX_SEARCH) ? 10000 : 2500;
+            if (g_led_fx_queued_ms > 0 && now >= g_led_fx_queued_ms && (now - g_led_fx_queued_ms) > wait_limit) {
+                g_led_fx_type = LED_FX_NONE;
+                g_led_fx_queued_ms = 0;
+            } else {
+                g_led_fx_start_ms = now;
+                g_last_led_tick_ms = 0;
+            }
+        }
+        if (g_led_fx_type != LED_FX_NONE) {
+            if (g_last_led_tick_ms != 0 && (now - g_last_led_tick_ms) < 30) {
+                return;
+            }
+            g_last_led_tick_ms = now;
+            if (led_fx_render(now)) {
+                g_led_last_active = 1;
+                g_led_ring_dirty = 1;
+                g_led_rgb_cache_valid = 1;
+                return;
+            }
+            g_led_fx_type = LED_FX_NONE;
+            g_led_fx_start_ms = 0;
+            g_led_fx_queued_ms = 0;
+            for (int i = 0; i < 24; i++) g_prev_zone_val[i] = 0;
+            g_last_led_tick_ms = 0;
+        }
+    }
+
+    if (playback_status != 1 || !spotify_device_is_active) {
         if (g_led_last_active || g_led_ring_dirty) {
             led_all_off();
         }
@@ -2731,7 +3048,7 @@ static void led_visualizer_tick(int64_t now) {
         } else if (g_led_color_mode == 3) {
             r = val; g = 0; b = 0;
         } else if (g_led_color_mode == 4) {
-            r = 0; g = val; b = 0;
+            led_fx_spotify_rgb(val, &r, &g, &b);
         } else if (g_led_color_mode == 5) {
             r = 0; g = 0; b = val;
         } else if (g_led_color_mode == 6) {
@@ -3079,7 +3396,8 @@ void _start(void) {
 
         struct timespec tmo;
         tmo.tv_sec = 0;
-        int led_running = (g_led_enabled && g_led_hw.detected && playback_status == 1 && spotify_device_is_active && !alice_owns_leds(now));
+        int led_running = (g_led_enabled && g_led_hw.detected && !alice_owns_leds(now) &&
+                           ((playback_status == 1 && spotify_device_is_active) || g_led_fx_type != LED_FX_NONE));
         tmo.tv_nsec = led_running ? 33000000 : 50000000;
 
         int ret = sys_ppoll(pfd, nfds, &tmo, 0, 0);
@@ -3140,8 +3458,9 @@ void _start(void) {
                                     }
                                     led_reset_internal_state();
                                 } else {
-                                    if (is_alice_visual_state(g_alice_state) && g_led_alice_yield_until_ms < st_now + 450) {
-                                        g_led_alice_yield_until_ms = st_now + 450;
+                                    int64_t settle_ms = (st_now < cancel_alice_until_ms) ? 150 : 450;
+                                    if (is_alice_visual_state(g_alice_state) && g_led_alice_yield_until_ms < st_now + settle_ms) {
+                                        g_led_alice_yield_until_ms = st_now + settle_ms;
                                     }
                                     g_alice_state = alice_state;
                                 }
@@ -3347,12 +3666,14 @@ void _start(void) {
                                 if (is_next_key && ev.value == 1) {
                                     log_msg("[bridge] Hardware key NEXT pressed\n");
                                     trigger_alice_suppression(quasar_fd, 3000);
+                                    led_fx_trigger(LED_FX_NEXT);
                                     run_soloist_cmd("next");
                                     continue;
                                 }
                                 if (is_prev_key && ev.value == 1) {
                                     log_msg("[bridge] Hardware key PREV pressed\n");
                                     trigger_alice_suppression(quasar_fd, 3000);
+                                    led_fx_trigger(LED_FX_PREV);
                                     run_soloist_cmd("prev");
                                     continue;
                                 }
@@ -3373,6 +3694,7 @@ void _start(void) {
                                                     log_msg("[bridge] Double-tap detected -> NEXT TRACK\n");
                                                     last_touch_release_time = 0;
                                                     trigger_alice_suppression(quasar_fd, 3000);
+                                                    led_fx_trigger(LED_FX_NEXT);
                                                     run_soloist_cmd("next");
                                                 } else {
                                                     last_touch_release_time = now_tap;
@@ -3381,9 +3703,11 @@ void _start(void) {
                                                     if (playback_status == 1) {
                                                         log_msg("[bridge] Instant action: PAUSE\n");
                                                         spotify_is_active = 0;
+                                                        led_fx_clear();
                                                         run_soloist_cmd("pause");
                                                     } else if (playback_status == 2) {
                                                         log_msg("[bridge] Instant action: PLAY\n");
+                                                        led_fx_trigger(LED_FX_PLAY);
                                                         run_soloist_cmd("play");
                                                     } else {
                                                         run_toggle();

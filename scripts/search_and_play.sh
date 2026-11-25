@@ -46,6 +46,25 @@ GENERATION="$2"
 [ -n "$GENERATION" ] || request_begin || exit 1
 request_current || exit 0
 
+signal_led_fx() {
+    request_current || return 0
+    _fx_tmp="$STATE_DIR/led_fx.$$"
+    if printf '%s\n' "$1" > "$_fx_tmp" 2>/dev/null; then
+        mv -f "$_fx_tmp" "$STATE_DIR/led_fx" 2>/dev/null || rm -f "$_fx_tmp"
+    fi
+}
+
+dispatch_play_fx() {
+    _rc=0
+    request_dispatch play "$@" || _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        signal_led_fx play
+    else
+        signal_led_fx err
+    fi
+    return "$_rc"
+}
+
 # Normalize whitespace (replaces `xargs`, which chokes on quotes: "Don't Stop Me Now")
 squeeze() {
     sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/ /g'
@@ -61,6 +80,7 @@ TERM=$(printf '%s\n' "$CLEAN" | sed -E 's/^(включи|поставь|сыгр
 
 personal_error() {
     printf '[search] %s; playback unchanged\n' "$1" >> "$LOG"
+    signal_led_fx err
     exit 1
 }
 
@@ -91,18 +111,18 @@ case "$TERM" in
                     LC_ALL=C awk -v collection="$URI" -f "$BASE_DIR/scripts/spotify-search.awk"; then
                     personal_error 'Start Liked Songs on this device in the Spotify app first'
                 fi
-                request_dispatch play
+                dispatch_play_fx
                 exit $?;;
             *) personal_error 'Invalid Liked Songs URI';;
         esac
-        request_dispatch play "$URI"
+        dispatch_play_fx "$URI"
         exit $?;;
     'волну'|'радио'|'волну по этому треку'|'волну по текущему треку'|'радио по этому треку'|'радио по текущему треку')
-        NOW_STATE=$(request_cli now --json) || { request_report radio now "$?"; exit 1; }
+        NOW_STATE=$(request_cli now --json) || { request_report radio now "$?"; signal_led_fx err; exit 1; }
         # shortcut: Soloist emits item.uri first; recheck this shape when upgrading its CLI.
         URI=$(printf '%s\n' "$NOW_STATE" | sed -n 's/.*"item"[[:space:]]*:[[:space:]]*{[[:space:]]*"uri"[[:space:]]*:[[:space:]]*"\(spotify:track:[A-Za-z0-9]*\)".*/\1/p')
         valid_id "${URI#spotify:track:}" || personal_error 'No current track for radio'
-        request_dispatch play "spotify:station:track:${URI#spotify:track:}"
+        dispatch_play_fx "spotify:station:track:${URI#spotify:track:}"
         exit $?;;
     'волну по'|'радио по') personal_error 'Missing radio seed track';;
     'волну по '*|'радио по '*)
@@ -149,12 +169,12 @@ echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 if [ "$RADIO" = 0 ] && [ "$EXPLICIT_TYPE" = 0 ] &&
    { [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; }; then
     echo "[search] Generic play request, resuming..." >> "$LOG"
-    request_dispatch play || exit 1
+    request_dispatch play || { signal_led_fx err; exit 1; }
     _resume_tries=0
     while [ "$_resume_tries" -lt 8 ]; do
         sleep 0.3
         request_current || exit 0
-        NOW_STATE=$(request_cli now) || { request_report play now "$?"; exit 1; }
+        NOW_STATE=$(request_cli now) || { request_report play now "$?"; signal_led_fx err; exit 1; }
         if printf '%s\n' "$NOW_STATE" | grep -qiE 'playing|buffering' && ! printf '%s\n' "$NOW_STATE" | grep -qi 'nothing'; then
             exit 0
         fi
@@ -186,12 +206,14 @@ fi
 # Spotify API Configuration
 if [ ! -f "$API_CONF" ]; then
     echo "[search] Missing API configuration; playback unchanged" >> "$LOG"
+    signal_led_fx err
     exit 1
 fi
 
 . "$API_CONF"
 if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
     echo "[search] Spotify API keys not set in $API_CONF" >> "$LOG"
+    signal_led_fx err
     exit 1
 fi
 
@@ -257,10 +279,10 @@ if [ -z "$TOKEN" ]; then
         -H "Content-Type: application/x-www-form-urlencoded" \
         --data-urlencode "grant_type=client_credentials" \
         --data-urlencode "client_id=$SPOTIFY_CLIENT_ID" \
-        --data-urlencode "client_secret=$SPOTIFY_CLIENT_SECRET") || exit 1
+        --data-urlencode "client_secret=$SPOTIFY_CLIENT_SECRET") || { signal_led_fx err; exit 1; }
     TOKEN=$(printf '%s' "$AUTH_RESP" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     case "$TOKEN" in ''|*[!A-Za-z0-9._~+/=-]*)
-        echo "[search] Invalid token response; playback unchanged" >> "$LOG"; exit 1;;
+        echo "[search] Invalid token response; playback unchanged" >> "$LOG"; signal_led_fx err; exit 1;;
     esac
     EXPIRES=$(printf '%s' "$AUTH_RESP" | grep -oE '"expires_in"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' |
         awk '{value=$0+0} END {if(value>0 && value<=86400) printf "%.0f",value; else print 3600}')
@@ -310,9 +332,9 @@ if [ -n "$ARTIST" ]; then
         *) SEARCH_QUERY="track:\"$TERM\" artist:\"$ARTIST\"" ;;
     esac
 fi
-URI=$(search_catalog "$SEARCH_QUERY" "$TYPES" "$CONTEXTS") || exit 1
+URI=$(search_catalog "$SEARCH_QUERY" "$TYPES" "$CONTEXTS") || { signal_led_fx err; exit 1; }
 if [ -z "$URI" ] && [ -n "$ARTIST" ] && [ "$SEARCH_QUERY" != "$TERM $ARTIST" ]; then
-    URI=$(search_catalog "$TERM $ARTIST" "$TYPES" "$CONTEXTS") || exit 1
+    URI=$(search_catalog "$TERM $ARTIST" "$TYPES" "$CONTEXTS") || { signal_led_fx err; exit 1; }
 fi
 if [ -z "$URI" ]; then
     COMPACT_NUM_QUERY=$(printf '%s\n' "$SEARCH_QUERY" | LC_ALL=C awk '{
@@ -326,7 +348,7 @@ if [ -z "$URI" ]; then
         print out
     }')
     if [ -n "$COMPACT_NUM_QUERY" ] && [ "$COMPACT_NUM_QUERY" != "$SEARCH_QUERY" ]; then
-        URI=$(search_catalog "$COMPACT_NUM_QUERY" "$TYPES" "$CONTEXTS") || exit 1
+        URI=$(search_catalog "$COMPACT_NUM_QUERY" "$TYPES" "$CONTEXTS") || { signal_led_fx err; exit 1; }
     fi
 fi
 
@@ -339,9 +361,11 @@ if [ "$RADIO" = 1 ]; then
 fi
 if [ -n "$URI" ]; then
     echo "[search] Found a catalog URI; checking current request before playback" >> "$LOG"
-    request_dispatch play "$URI"
+    dispatch_play_fx "$URI"
+    exit $?
 else
     [ "$TYPE" != playlist ] || personal_error 'Playlist name not found or ambiguous'
     echo "[search] No usable match; playback unchanged" >> "$LOG"
+    signal_led_fx err
     exit 1
 fi

@@ -93,6 +93,17 @@ static void trigger_alice_suppression(int fd, int ms) {{
     (void)fd; suppressed_calls++; g_tts_hold_until_ms = 0; cancel_alice_until_ms = mock_now + ms; set_ducking(0, mock_now); set_alsa_yield(0, mock_now);
 }}
 static void set_led_visualizer(int enable) {{ (void)enable; }}
+#define LED_FX_NONE   0
+#define LED_FX_PLAY   1
+#define LED_FX_NEXT   2
+#define LED_FX_PREV   3
+#define LED_FX_SEARCH 4
+#define LED_FX_ERROR  5
+static inline void led_fx_trigger(int fx_type) {{ (void)fx_type; }}
+static inline void led_fx_clear(void) {{}}
+static inline int led_fx_is_skip_recent(int64_t now) {{ (void)now; return 0; }}
+static inline int led_fx_is_play_recent(int64_t now) {{ (void)now; return 0; }}
+static inline int led_fx_active_type(void) {{ return LED_FX_NONE; }}
 static void run_soloist_cmd(const char *a) {{ (void)a; }}
 static void run_soloist_cmd2(const char *a, const char *b) {{ (void)a; (void)b; }}
 static void run_toggle(void) {{}}

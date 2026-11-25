@@ -188,6 +188,7 @@ static int32_t g_mock_shm[7680 * 2];
 static int g_led_writes = 0;
 static int g_zero_writes = 0;
 static int g_last_r1 = -1;
+static int g_zone_rgb[3][3] = {{{{0}}}};
 
 static int64_t now_ms(void) {{ return g_mock_now; }}
 static int sys_shmget(int k, int sz, int flg) {{ (void)k; (void)sz; (void)flg; return g_mock_shmid; }}
@@ -202,6 +203,15 @@ static void write_sysfs_int(const char *path, int val) {{
     g_led_writes++;
     if (val == 0) g_zero_writes++;
     if (strstr(path, "red:ring1")) g_last_r1 = val;
+    for (int zi = 1; zi <= 3; zi++) {{
+        char rpat[16], gpat[16], bpat[16];
+        snprintf(rpat, sizeof(rpat), "red:ring%d", zi);
+        snprintf(gpat, sizeof(gpat), "green:ring%d", zi);
+        snprintf(bpat, sizeof(bpat), "blue:ring%d", zi);
+        if (strstr(path, rpat)) g_zone_rgb[zi - 1][0] = val;
+        else if (strstr(path, gpat)) g_zone_rgb[zi - 1][1] = val;
+        else if (strstr(path, bpat)) g_zone_rgb[zi - 1][2] = val;
+    }}
 }}
 static void write_sysfs_str(const char *path, const char *str) {{ (void)path; (void)str; g_led_writes++; }}
 static int playback_status = 1;
@@ -367,6 +377,168 @@ int main(void) {{
     if (g_led_writes != w_after_clear) {{
         fprintf(stderr, "FAIL repeated clear attempts after dirty bit cleared: %d -> %d\\n", w_after_clear, g_led_writes);
         return 23;
+    }}
+
+    // 8. LED_FX_PLAY: Spotify emerald bloom while paused + clean off when finished
+    playback_status = 2;
+    spotify_device_is_active = 0;
+    g_alice_state = 0;
+    g_led_alice_yield_until_ms = 0;
+    g_mock_now = 6000;
+    led_fx_trigger_impl(LED_FX_PLAY);
+    led_visualizer_tick(6000);
+    led_visualizer_tick(6180);
+    if (g_zone_rgb[0][1] <= 150 || !(g_zone_rgb[0][1] > g_zone_rgb[0][2] && g_zone_rgb[0][2] > g_zone_rgb[0][0])) {{
+        fprintf(stderr, "FAIL PLAY FX not Spotify emerald: r=%d g=%d b=%d\\n",
+                g_zone_rgb[0][0], g_zone_rgb[0][1], g_zone_rgb[0][2]);
+        return 24;
+    }}
+    led_visualizer_tick(6710);
+    if (g_led_fx_type != LED_FX_NONE || g_led_ring_dirty != 0 ||
+        g_zone_rgb[0][1] != 0 || g_zone_rgb[1][1] != 0 || g_zone_rgb[2][1] != 0) {{
+        fprintf(stderr, "FAIL PLAY FX did not clean up when paused (fx=%d dirty=%d g=%d,%d,%d)\\n",
+                g_led_fx_type, g_led_ring_dirty, g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 25;
+    }}
+
+    // 9. LED_FX_NEXT (clockwise: ring2 then ring3) vs LED_FX_PREV (counter-clockwise: ring3 then ring2)
+    g_mock_now = 7000;
+    led_fx_trigger_impl(LED_FX_NEXT);
+    led_visualizer_tick(7000);
+    led_visualizer_tick(7190);
+    if (g_zone_rgb[1][1] <= g_zone_rgb[2][1] || g_zone_rgb[1][1] < 140) {{
+        fprintf(stderr, "FAIL NEXT FX early sweep expected ring2 peak: g=%d,%d,%d\\n",
+                g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 26;
+    }}
+    led_visualizer_tick(7370);
+    if (g_zone_rgb[2][1] <= g_zone_rgb[1][1] || g_zone_rgb[2][1] < 140) {{
+        fprintf(stderr, "FAIL NEXT FX late sweep expected ring3 peak: g=%d,%d,%d\\n",
+                g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 27;
+    }}
+    led_visualizer_tick(7580);
+    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][1] != 0 || g_zone_rgb[2][1] != 0) {{
+        fprintf(stderr, "FAIL NEXT FX did not finish cleanly\\n");
+        return 28;
+    }}
+
+    g_mock_now = 8000;
+    led_fx_trigger_impl(LED_FX_PREV);
+    led_visualizer_tick(8000);
+    led_visualizer_tick(8190);
+    if (g_zone_rgb[2][1] <= g_zone_rgb[1][1] || g_zone_rgb[2][1] < 140) {{
+        fprintf(stderr, "FAIL PREV FX early sweep expected ring3 peak: g=%d,%d,%d\\n",
+                g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 29;
+    }}
+    led_visualizer_tick(8370);
+    if (g_zone_rgb[1][1] <= g_zone_rgb[2][1] || g_zone_rgb[1][1] < 140) {{
+        fprintf(stderr, "FAIL PREV FX late sweep expected ring2 peak: g=%d,%d,%d\\n",
+                g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 30;
+    }}
+    led_visualizer_tick(8580);
+    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][1] != 0 || g_zone_rgb[1][1] != 0) {{
+        fprintf(stderr, "FAIL PREV FX did not finish cleanly\\n");
+        return 31;
+    }}
+
+    // 10. LED_FX_SEARCH orbiting radar + 10s timeout
+    g_mock_now = 10000;
+    led_fx_trigger_impl(LED_FX_SEARCH);
+    led_visualizer_tick(10000);
+    led_visualizer_tick(10300);
+    if (g_zone_rgb[1][1] <= g_zone_rgb[2][1] || g_zone_rgb[1][1] < 150) {{
+        fprintf(stderr, "FAIL SEARCH FX rotation 1 expected ring2 peak: g=%d,%d,%d\\n",
+                g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 32;
+    }}
+    led_visualizer_tick(10600);
+    if (g_zone_rgb[2][1] <= g_zone_rgb[1][1] || g_zone_rgb[2][1] < 150) {{
+        fprintf(stderr, "FAIL SEARCH FX rotation 2 expected ring3 peak: g=%d,%d,%d\\n",
+                g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 33;
+    }}
+    led_visualizer_tick(11500);
+    if (g_led_fx_type != LED_FX_SEARCH) {{
+        fprintf(stderr, "FAIL SEARCH FX stopped before timeout\\n");
+        return 34;
+    }}
+    led_visualizer_tick(20010);
+    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][1] != 0 || g_zone_rgb[1][1] != 0) {{
+        fprintf(stderr, "FAIL SEARCH FX did not clean up on 10s timeout\\n");
+        return 35;
+    }}
+
+    // 11. LED_FX_SEARCH interrupted by LED_FX_ERROR: coral-red double pulse + dark gap
+    g_mock_now = 21000;
+    led_fx_trigger_impl(LED_FX_SEARCH);
+    led_visualizer_tick(21000);
+    led_visualizer_tick(21150);
+    g_mock_now = 21200;
+    led_fx_trigger_impl(LED_FX_ERROR);
+    led_visualizer_tick(21200);
+    led_visualizer_tick(21350); // Pulse 1 peak
+    if (g_zone_rgb[0][0] <= 150 || g_zone_rgb[0][1] >= 40 || g_zone_rgb[0][2] != 0) {{
+        fprintf(stderr, "FAIL ERROR FX pulse 1 expected coral-red: r=%d g=%d b=%d\\n",
+                g_zone_rgb[0][0], g_zone_rgb[0][1], g_zone_rgb[0][2]);
+        return 36;
+    }}
+    led_visualizer_tick(21550); // Dark gap
+    if (g_zone_rgb[0][0] != 0 || g_zone_rgb[0][1] != 0 || g_zone_rgb[0][2] != 0) {{
+        fprintf(stderr, "FAIL ERROR FX expected dark gap at 350ms: r=%d g=%d b=%d\\n",
+                g_zone_rgb[0][0], g_zone_rgb[0][1], g_zone_rgb[0][2]);
+        return 37;
+    }}
+    led_visualizer_tick(21780); // Pulse 2 peak
+    if (g_zone_rgb[0][0] <= 150 || g_zone_rgb[0][1] >= 40 || g_zone_rgb[0][2] != 0) {{
+        fprintf(stderr, "FAIL ERROR FX pulse 2 expected coral-red: r=%d g=%d b=%d\\n",
+                g_zone_rgb[0][0], g_zone_rgb[0][1], g_zone_rgb[0][2]);
+        return 38;
+    }}
+    led_visualizer_tick(21980); // Finished
+    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][0] != 0 || g_led_ring_dirty != 0) {{
+        fprintf(stderr, "FAIL ERROR FX did not turn off cleanly\\n");
+        return 39;
+    }}
+
+    // 12. Deferred latch after Alice finishes + g_led_enabled == 0 suppression
+    g_alice_state = 1;
+    g_mock_now = 25000;
+    led_fx_trigger_impl(LED_FX_NEXT);
+    g_led_writes = 0;
+    led_visualizer_tick(25040);
+    led_visualizer_tick(25080);
+    if (g_led_writes != 0 || g_led_fx_start_ms != 0) {{
+        fprintf(stderr, "FAIL deferred FX wrote or latched while Alice owned LEDs\\n");
+        return 40;
+    }}
+    g_alice_state = 0;
+    g_led_alice_yield_until_ms = 25200;
+    led_visualizer_tick(25120);
+    if (g_led_writes != 0) {{
+        fprintf(stderr, "FAIL deferred FX started during Alice settle tail\\n");
+        return 41;
+    }}
+    led_visualizer_tick(25210);
+    if (g_led_fx_start_ms != 25210 || g_led_writes == 0) {{
+        fprintf(stderr, "FAIL deferred FX did not latch after Alice yield ended\\n");
+        return 42;
+    }}
+    led_visualizer_tick(25400);
+    if (g_zone_rgb[1][1] <= 140) {{
+        fprintf(stderr, "FAIL deferred NEXT FX lost sweep frame after latch: g=%d,%d,%d\\n",
+                g_zone_rgb[0][1], g_zone_rgb[1][1], g_zone_rgb[2][1]);
+        return 43;
+    }}
+    g_led_enabled = 0;
+    g_mock_now = 26000;
+    led_fx_trigger_impl(LED_FX_PLAY);
+    led_visualizer_tick(26000);
+    if (g_led_fx_type != LED_FX_NONE || g_zone_rgb[0][1] != 0 || g_zone_rgb[1][1] != 0) {{
+        fprintf(stderr, "FAIL g_led_enabled=0 did not suppress FX cleanly\\n");
+        return 44;
     }}
     return 0;
 }}

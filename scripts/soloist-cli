@@ -87,7 +87,7 @@ cmd_help() {
     printf "  ${CYAN}status${NC}       Статус плеера, моста, памяти, подсветки и текущего трека\n"
     printf "  ${CYAN}network${NC} [status|auto|off|check]  Управление SNI-прокси Spotify\n"
     printf "  ${CYAN}doctor${NC} [--offline]  Диагностика для отчёта об ошибке\n"
-    printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|status]  Управление эквалайзером подсветки\n"
+    printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|green|status]  Управление эквалайзером подсветки\n"
     printf "  ${CYAN}restart${NC}      Перезапустить службу Spotify и мост управления\n"
     printf "  ${CYAN}start${NC}        Запустить службу\n"
     printf "  ${CYAN}stop${NC}         Остановить службу\n"
@@ -416,6 +416,10 @@ cmd_led() {
             printf "c\n" > "$REQ_FILE"
             printf "${BOLD}${CYAN}Цвет эквалайзера: Бирюзовый (Cyan)${NC}\n"
             ;;
+        green|spotify|g)
+            printf "g\n" > "$REQ_FILE"
+            printf "${BOLD}${GREEN}Цвет эквалайзера: Зелёный (Spotify)${NC}\n"
+            ;;
         status|state)
             if [ -f "$STATE_FILE" ]; then
                 ST=$(cat "$STATE_FILE" 2>/dev/null || echo "off")
@@ -429,7 +433,7 @@ cmd_led() {
             fi
             ;;
         *)
-            printf "Использование: soloist led [on|off|white|rainbow|cyan|status]\n"
+            printf "Использование: soloist led [on|off|white|rainbow|cyan|green|status]\n"
             ;;
     esac
 }
