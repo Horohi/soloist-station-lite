@@ -1610,20 +1610,14 @@ static void handle_soloist_ws_json(const char *json) {
     }
 
     char status_str[32];
-    int prev_status = playback_status;
     if (json_find_str(json, "status", status_str, sizeof(status_str))) {
         if (str_equal(status_str, "playing")) {
             playback_status = 1;
             playback_speed = 1;
             spotify_is_active = spotify_device_is_active;
             if (spotify_device_is_active) yandex_music_active = 0;
-            if (spotify_device_is_active && prev_status != 1) {
-                int cur_fx = led_fx_active_type();
-                int64_t fnow = now_ms();
-                if (cur_fx != LED_FX_NEXT && cur_fx != LED_FX_PREV &&
-                    !led_fx_is_skip_recent(fnow) && !led_fx_is_play_recent(fnow)) {
-                    led_fx_trigger(LED_FX_PLAY);
-                }
+            if (spotify_device_is_active && led_fx_active_type() == LED_FX_SEARCH) {
+                led_fx_trigger(LED_FX_PLAY);
             }
         } else if (str_equal(status_str, "paused")) {
             playback_status = 2;
@@ -1687,7 +1681,6 @@ static void handle_soloist_ws_json(const char *json) {
             int is_track_uri = (str_len(uri_buf) >= 14 && mem_equal(uri_buf, "spotify:track:", 14));
             if (is_track_uri && !str_equal(current_track_uri, uri_buf)) {
                 int64_t cnow = now_ms();
-                int had_prev_track = (current_track_uri[0] != 0);
                 if (current_track_uri[0] != 0 && (cnow - last_cache_clean_ms >= 20000)) {
                     last_cache_clean_ms = cnow;
                     run_controller("clean-cache", 0);
@@ -1698,13 +1691,6 @@ static void handle_soloist_ws_json(const char *json) {
                 log_msg("[bridge] Current track: ");
                 log_msg(current_track_uri);
                 log_msg("\n");
-                if (had_prev_track && spotify_device_is_active && playback_status != 0 && playback_status != 2) {
-                    int cur_fx = led_fx_active_type();
-                    if (cur_fx != LED_FX_NEXT && cur_fx != LED_FX_PREV &&
-                        !led_fx_is_skip_recent(cnow) && !led_fx_is_play_recent(cnow)) {
-                        led_fx_trigger(LED_FX_PLAY);
-                    }
-                }
             } else if (!is_track_uri && current_track_uri[0] == 0) {
                 str_copy(current_track_uri, uri_buf, sizeof(current_track_uri));
                 publish_track(current_track_uri);
@@ -2765,15 +2751,44 @@ static int led_fx_active_type_impl(void) {
 }
 
 static void led_fx_spotify_rgb(uint32_t v, int *r, int *g, int *b) {
-    *r = (int)((v * 10) / 255);
+    *r = 0;
     *g = (int)v;
-    *b = (int)((v * 38) / 255);
+    *b = (int)((v * 28) / 255);
 }
 
 static void led_fx_error_rgb(uint32_t v, int *r, int *g, int *b) {
     *r = (int)v;
-    *g = (int)((v * 20) / 255);
+    *g = 0;
     *b = 0;
+}
+
+static uint32_t led_sin256(uint32_t a) {
+    uint32_t idx = (a >> 2) & 63;
+    uint32_t frac = a & 3;
+    uint32_t s0 = sin64[idx];
+    uint32_t s1 = sin64[(idx + 1) & 63];
+    return (s0 * (4 - frac) + s1 * frac) / 4;
+}
+
+static uint32_t led_gamma(uint32_t x) {
+    uint32_t sq = (x * x) / 255;
+    uint32_t cb = (sq * x) / 255;
+    return (sq + cb * 2) / 3;
+}
+
+static uint32_t led_comet_level(uint32_t dist_behind, uint32_t hw_trail, uint32_t hw_lead) {
+    if (dist_behind <= hw_trail) {
+        uint32_t u = (dist_behind * 128) / hw_trail;
+        uint32_t s = led_sin256(64 + u);
+        return led_gamma((s > 1) ? (s - 1) : 0);
+    }
+    uint32_t d_ahead = 256 - dist_behind;
+    if (d_ahead <= hw_lead) {
+        uint32_t u = (d_ahead * 128) / hw_lead;
+        uint32_t s = led_sin256(64 + u);
+        return led_gamma((s > 1) ? (s - 1) : 0);
+    }
+    return 0;
 }
 
 static int led_fx_render(int64_t now) {
@@ -2781,29 +2796,31 @@ static int led_fx_render(int64_t now) {
     if (n_zones <= 0 || n_zones > 24) return 0;
     int start = g_led_hw.is_zero_indexed ? 0 : 1;
 
-    uint32_t peak = (g_led_brightness <= 0) ? 0 : ((uint32_t)g_led_brightness + 40);
-    if (peak > 245) peak = 245;
+    uint32_t peak = (g_led_brightness <= 0) ? 0 : ((uint32_t)g_led_brightness + 75);
+    if (peak > 255) peak = 255;
+
+    uint32_t hw_trail = (n_zones <= 3) ? 94 : 76;
+    uint32_t hw_lead = (n_zones <= 3) ? 70 : 52;
 
     int64_t elapsed = now - g_led_fx_start_ms;
     if (elapsed < 0) elapsed = 0;
 
     if (g_led_fx_type == LED_FX_PLAY) {
-        if (elapsed >= 700) return 0;
+        if (elapsed >= 720) return 0;
         for (int i = 0; i < n_zones; i++) {
             int z = start + i;
-            int64_t ze = elapsed - (((int64_t)i * 50) / n_zones);
+            int64_t ze = elapsed - (((int64_t)((n_zones - i) % n_zones) * 45) / n_zones);
             uint32_t lvl = 0;
-            if (ze < 0) {
-                lvl = 24;
-            } else if (ze < 170) {
-                uint32_t u = (uint32_t)((ze * 32) / 170);
-                uint32_t s = (uint32_t)sin64[(u + 48) & 63] - 1;
-                lvl = 36 + (s * 219) / 254;
-            } else if (ze < 300) {
-                lvl = 255 - (uint32_t)(((ze - 170) * 25) / 130);
-            } else if (ze < 650) {
-                uint32_t u = (uint32_t)(350 - (ze - 300));
-                lvl = (230 * u * u) / (350 * 350);
+            if (ze <= 0) {
+                lvl = 0;
+            } else if (ze < 140) {
+                uint32_t s = led_sin256((192 + (uint32_t)((ze * 128) / 140)) & 255);
+                lvl = led_gamma((s > 1) ? (s - 1) : 0);
+            } else if (ze < 280) {
+                lvl = 255 - (uint32_t)(((ze - 140) * 15) / 140);
+            } else if (ze < 675) {
+                uint32_t lin = ((uint32_t)(675 - ze) * 255) / 395;
+                lvl = (240 * led_gamma(lin)) / 255;
             }
             uint32_t v = (peak * lvl) / 255;
             int r = 0, g = 0, b = 0;
@@ -2814,25 +2831,24 @@ static int led_fx_render(int64_t now) {
     }
 
     if (g_led_fx_type == LED_FX_NEXT || g_led_fx_type == LED_FX_PREV) {
-        if (elapsed >= 560) return 0;
-        uint32_t step = (uint32_t)((elapsed * 64) / 560);
-        uint32_t head = (g_led_fx_type == LED_FX_NEXT) ? (step & 63) : ((64 - (step & 63)) & 63);
+        if (elapsed >= 720) return 0;
+        uint32_t step = (uint32_t)((elapsed * 256) / 720);
+        uint32_t head = (g_led_fx_type == LED_FX_NEXT) ? ((256 - (step & 255)) & 255) : (step & 255);
         uint32_t env = 255;
-        if (elapsed < 70) {
-            env = 64 + (uint32_t)((elapsed * 191) / 70);
-        } else if (elapsed >= 410) {
-            env = (uint32_t)(((560 - elapsed) * 255) / 150);
+        if (elapsed == 0) {
+            env = 32;
+        } else if (elapsed < 90) {
+            env = 32 + (uint32_t)((elapsed * 223) / 90);
+        } else if (elapsed >= 540) {
+            env = led_gamma((uint32_t)(((720 - elapsed) * 255) / 180));
         }
         for (int i = 0; i < n_zones; i++) {
             int z = start + i;
-            uint32_t zpos = ((uint32_t)i * 64) / (uint32_t)n_zones;
-            uint32_t delta = (g_led_fx_type == LED_FX_NEXT)
-                             ? ((head - zpos + 64) & 63)
-                             : ((zpos - head + 64) & 63);
-            uint32_t w = sin64[(delta + 16) & 63];
-            uint32_t sq = (w * w) / 255;
-            uint32_t cb = (sq * w) / 255;
-            uint32_t shape = 18 + (cb * 237) / 255;
+            uint32_t zpos = ((uint32_t)i * 256) / (uint32_t)n_zones;
+            uint32_t dist_behind = (g_led_fx_type == LED_FX_NEXT)
+                                   ? ((zpos - head + 256) & 255)
+                                   : ((head - zpos + 256) & 255);
+            uint32_t shape = led_comet_level(dist_behind, hw_trail, hw_lead);
             uint32_t lvl = (shape * env) / 255;
             uint32_t v = (peak * lvl) / 255;
             int r = 0, g = 0, b = 0;
@@ -2844,20 +2860,22 @@ static int led_fx_render(int64_t now) {
 
     if (g_led_fx_type == LED_FX_SEARCH) {
         if (elapsed >= 10000) return 0;
-        int64_t period = 900;
-        uint32_t head = (uint32_t)(((elapsed % period) * 64) / period) & 63;
+        int64_t period = 960;
+        uint32_t step = (uint32_t)(((elapsed % period) * 256) / period) & 255;
+        uint32_t head = (256 - step) & 255;
         uint32_t env = 255;
-        if (elapsed < 150) {
-            env = 64 + (uint32_t)((elapsed * 191) / 150);
+        if (elapsed == 0) {
+            env = 32;
+        } else if (elapsed < 120) {
+            env = 32 + (uint32_t)((elapsed * 223) / 120);
         } else if (elapsed >= 9700) {
-            env = (uint32_t)(((10000 - elapsed) * 255) / 300);
+            env = led_gamma((uint32_t)(((10000 - elapsed) * 255) / 300));
         }
         for (int i = 0; i < n_zones; i++) {
             int z = start + i;
-            uint32_t zpos = ((uint32_t)i * 64) / (uint32_t)n_zones;
-            uint32_t delta = (head - zpos + 64) & 63;
-            uint32_t w = sin64[(delta + 16) & 63];
-            uint32_t shape = 26 + (229 * ((w * w) / 255)) / 255;
+            uint32_t zpos = ((uint32_t)i * 256) / (uint32_t)n_zones;
+            uint32_t dist_behind = (zpos - head + 256) & 255;
+            uint32_t shape = led_comet_level(dist_behind, hw_trail, hw_lead);
             uint32_t lvl = (shape * env) / 255;
             uint32_t v = (peak * lvl) / 255;
             int r = 0, g = 0, b = 0;
@@ -2868,20 +2886,22 @@ static int led_fx_render(int64_t now) {
     }
 
     if (g_led_fx_type == LED_FX_ERROR) {
-        if (elapsed >= 760) return 0;
+        if (elapsed >= 780) return 0;
         uint32_t lvl = 0;
-        if (elapsed < 300) {
+        if (elapsed < 320) {
             if (elapsed == 0) {
-                lvl = 48;
+                lvl = 40;
             } else {
-                uint32_t u = (uint32_t)((elapsed * 64) / 300);
-                lvl = (uint32_t)sin64[(u + 48) & 63] - 1;
+                uint32_t u = (uint32_t)((elapsed * 256) / 320);
+                uint32_t s = led_sin256((u + 192) & 255);
+                lvl = led_gamma((s > 1) ? (s - 1) : 0);
             }
-        } else if (elapsed < 400) {
+        } else if (elapsed < 440) {
             lvl = 0;
         } else {
-            uint32_t u = (uint32_t)(((elapsed - 400) * 64) / 360);
-            lvl = (uint32_t)sin64[(u + 48) & 63] - 1;
+            uint32_t u = (uint32_t)(((elapsed - 440) * 256) / 340);
+            uint32_t s = led_sin256((u + 192) & 255);
+            lvl = led_gamma((s > 1) ? (s - 1) : 0);
         }
         uint32_t v = (peak * lvl) / 255;
         int r = 0, g = 0, b = 0;
@@ -2933,7 +2953,7 @@ static void led_visualizer_tick(int64_t now) {
             }
         }
         if (g_led_fx_type != LED_FX_NONE) {
-            if (g_last_led_tick_ms != 0 && (now - g_last_led_tick_ms) < 30) {
+            if (g_last_led_tick_ms != 0 && (now - g_last_led_tick_ms) < 16) {
                 return;
             }
             g_last_led_tick_ms = now;
@@ -3396,9 +3416,17 @@ void _start(void) {
 
         struct timespec tmo;
         tmo.tv_sec = 0;
-        int led_running = (g_led_enabled && g_led_hw.detected && !alice_owns_leds(now) &&
-                           ((playback_status == 1 && spotify_device_is_active) || g_led_fx_type != LED_FX_NONE));
-        tmo.tv_nsec = led_running ? 33000000 : 50000000;
+        if (g_led_enabled && g_led_hw.detected && !alice_owns_leds(now)) {
+            if (g_led_fx_type != LED_FX_NONE) {
+                tmo.tv_nsec = 16000000;
+            } else if (playback_status == 1 && spotify_device_is_active) {
+                tmo.tv_nsec = 33000000;
+            } else {
+                tmo.tv_nsec = 50000000;
+            }
+        } else {
+            tmo.tv_nsec = 50000000;
+        }
 
         int ret = sys_ppoll(pfd, nfds, &tmo, 0, 0);
         if (ret > 0) {

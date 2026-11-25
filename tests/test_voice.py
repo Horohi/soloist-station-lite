@@ -145,6 +145,22 @@ static int sys_unlink(const char *p) { (void)p; censor_off_calls++; return 0; }
 static long sys_write(int fd, const void *b, unsigned long n) { (void)fd; (void)b; return n; }
 static int touch_down_start, touch_is_down;
 static int64_t touch_down_time, last_touch_release_time, cancel_alice_until_ms;
+#define LED_FX_NONE   0
+#define LED_FX_PLAY   1
+#define LED_FX_NEXT   2
+#define LED_FX_PREV   3
+#define LED_FX_SEARCH 4
+#define LED_FX_ERROR  5
+static int g_ws_fx_active = 0;
+static int g_ws_play_fx_calls = 0;
+static inline void led_fx_trigger(int fx_type) {
+    g_ws_fx_active = fx_type;
+    if (fx_type == LED_FX_PLAY) g_ws_play_fx_calls++;
+}
+static inline void led_fx_clear(void) { g_ws_fx_active = 0; }
+static inline int led_fx_is_skip_recent(int64_t now) { (void)now; return 0; }
+static inline int led_fx_is_play_recent(int64_t now) { (void)now; return 0; }
+static inline int led_fx_active_type(void) { return g_ws_fx_active; }
 '''
 media_production = section("static void to_lower_ru", "#ifdef __aarch64__\nstatic void set_led_visualizer_impl")
 media_production += section("static int is_web_or_culinary_intent", "/* =========================================================================")
@@ -317,6 +333,19 @@ int main(void) {
     clear_calls(); voice("дальше");
     check(command_calls == 1 && !strcmp(command, "next") && suppressed_calls == 1,
           "дальше controls Spotify again once Spotify resumes");
+
+    reset_media();
+    g_ws_fx_active = LED_FX_NONE; g_ws_play_fx_calls = 0;
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true,\"uri\":\"spotify:track:FIRST\"}");
+    handle_soloist_ws_json("{\"status\":\"buffering\",\"is_active\":true,\"uri\":\"spotify:track:FIRST\"}");
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true,\"uri\":\"spotify:track:SECOND\"}");
+    check(g_ws_play_fx_calls == 0,
+          "natural track switch without command does not trigger LED_FX_PLAY");
+
+    g_ws_fx_active = LED_FX_SEARCH; g_ws_play_fx_calls = 0;
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true,\"uri\":\"spotify:track:FOUND\"}");
+    check(g_ws_play_fx_calls == 1 && g_ws_fx_active == LED_FX_PLAY,
+          "search completion on playing WS transitions LED_FX_SEARCH into LED_FX_PLAY");
 
     return failures ? 1 : 0;
 }
