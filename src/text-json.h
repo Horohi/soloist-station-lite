@@ -322,6 +322,85 @@ static int is_named_playlist_request(const char *text) {
     return 0;
 }
 
+static unsigned long trim_voice_span_end(const char *s, unsigned long len) {
+    while (len > 0) {
+        char c = s[len - 1];
+        if (c == ' ' || c == '\t' || c == '.' || c == '!' ||
+            c == '?' || c == ',' || c == ';' || c == ':') {
+            len--;
+        } else {
+            break;
+        }
+    }
+    return len;
+}
+
+/* Standalone smart-home lighting color/mode requests (e.g. "включи красный",
+ * "поставь фиолетовый в спальне", "включи в спальне зелёный", "включи ночной режим")
+ * stay with Alice, while track titles containing color adjectives (e.g.
+ * "включи синий трактор", "включи белый снег") still route to Spotify search. */
+static int is_smart_color_command(const char *lower) {
+    static const char *const verbs[] = {
+        "включи", "поставь", "сделай", "запусти", "вруби"
+    };
+    static const char *const colors[] = {
+        "красный", "синий", "зелёный", "зеленый", "жёлтый", "желтый",
+        "белый", "оранжевый", "фиолетовый", "розовый", "голубой",
+        "бирюзовый", "пурпурный", "сиреневый", "салатовый", "малиновый",
+        "янтарный", "лиловый",
+        "тёплый", "теплый", "холодный", "дневной",
+        "тёплый белый", "теплый белый", "холодный белый",
+        "дневной белый", "нейтральный белый",
+        "ночной режим", "режим чтения", "режим сна"
+    };
+    static const char *const loc_preps[] = {" в ", " на ", " у "};
+    static const char *const preps[] = {"в", "на", "у"};
+
+    if (!lower) return 0;
+    const char *p = skip_voice_fillers(lower);
+    const char *after_verb = 0;
+    for (unsigned long i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
+        after_verb = after_voice_word(p, verbs[i]);
+        if (after_verb) break;
+    }
+    if (!after_verb) return 0;
+
+    p = skip_voice_fillers(after_verb);
+    unsigned long len = trim_voice_span_end(p, str_len(p));
+    const char *please = " пожалуйста";
+    unsigned long please_len = str_len(please);
+    if (len > please_len && mem_equal(p + len - please_len, please, please_len)) {
+        len = trim_voice_span_end(p, len - please_len);
+    }
+    if (len == 0) return 0;
+
+    for (unsigned long i = 0; i < sizeof(colors) / sizeof(colors[0]); i++) {
+        unsigned long clen = str_len(colors[i]);
+        if (len == clen && mem_equal(p, colors[i], clen)) return 1;
+        if (len > clen && mem_equal(p, colors[i], clen)) {
+            for (unsigned long j = 0; j < sizeof(loc_preps) / sizeof(loc_preps[0]); j++) {
+                unsigned long plen = str_len(loc_preps[j]);
+                if (len >= clen + plen && mem_equal(p + clen, loc_preps[j], plen)) {
+                    return 1;
+                }
+            }
+        }
+    }
+
+    for (unsigned long j = 0; j < sizeof(preps) / sizeof(preps[0]); j++) {
+        const char *q = after_voice_word(p, preps[j]);
+        if (!q || (unsigned long)(q - p) >= len) continue;
+        while ((unsigned long)(q - p) < len && *q != ' ' && *q != '\t') q++;
+        while ((unsigned long)(q - p) < len && (*q == ' ' || *q == '\t')) q++;
+        unsigned long rlen = (unsigned long)((p + len) - q);
+        for (unsigned long i = 0; i < sizeof(colors) / sizeof(colors[0]); i++) {
+            unsigned long clen = str_len(colors[i]);
+            if (rlen == clen && mem_equal(q, colors[i], clen)) return 1;
+        }
+    }
+    return 0;
+}
+
 /* "включи песню Назад в СССР" / "поставь группу Стоп" / "включи Кино" etc.: a play verb
  * means a catalog search, even if the title contains control words such as "назад",
  * "дальше", "стоп" or "пауза". */

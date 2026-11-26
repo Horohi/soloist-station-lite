@@ -474,7 +474,7 @@ int main(void) {{
     rc = subprocess.run([str(led_test_bin)]).returncode
     check(rc == 0, f"read_led_config migration & config override checks passed (rc={rc})")
 
-# 5. led_all_off() must hand the ring back to the trigger the kernel uses.
+# 6. led_all_off() must hand the ring back to the trigger the kernel uses.
 # On a Midi (cucumber, is_zero_indexed) the kernel trigger is ledfb-ring;
 # writing brightness detaches it and maind then animates into a framebuffer
 # nobody reads, so Alice's ring stays dark until a reboot. Upstream restored

@@ -492,6 +492,41 @@ int main(void) {
               "IOEvent AudioClientEvent STOPPED parses as 0");
     }
 
+    // Issue #34: smart-home color/LED/brightness commands stay with Alice while tracks still search Spotify.
+    const char *smart_color_alice[] = {
+        "включи красный цвет",
+        "поставь синий цвет на кухне",
+        "включи другой цвет",
+        "включи красный",
+        "поставь фиолетовый в спальне",
+        "включи в спальне зелёный",
+        "поставь на кухне тёплый белый",
+        "включи красный, пожалуйста",
+        "включи светодиодную ленту",
+        "поставь яркость на максимум",
+        "включи ночной режим",
+    };
+    for (unsigned i = 0; i < sizeof(smart_color_alice) / sizeof(smart_color_alice[0]); i++) {
+        reset_media();
+        voice(smart_color_alice[i]);
+        check(passed_to_alice(), smart_color_alice[i]);
+    }
+
+    const char *color_spotify_searches[] = {
+        "включи синий трактор",
+        "включи белый снег",
+        "включи розовый фламинго",
+        "включи цветы",
+        "включи песню Красный цвет",
+        "включи трек Цвет настроения синий",
+        "включи трек Синий",
+    };
+    for (unsigned i = 0; i < sizeof(color_spotify_searches) / sizeof(color_spotify_searches[0]); i++) {
+        reset_media();
+        voice(color_spotify_searches[i]);
+        check(search_calls == 1 && command_calls == 0, color_spotify_searches[i]);
+    }
+
     return failures ? 1 : 0;
 }
 '''

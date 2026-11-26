@@ -1161,12 +1161,21 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
              str_has_word(lower_buf, "свету") ||
              str_has_word(lower_buf, "светом") ||
              str_has_word(lower_buf, "свете") ||
+             str_has_word(lower_buf, "цвет") ||
+             str_has_word(lower_buf, "цвета") ||
+             str_has_word(lower_buf, "цвету") ||
+             str_has_word(lower_buf, "цветом") ||
+             str_has_word(lower_buf, "цвете") ||
              str_has_word_prefix(lower_buf, "светильник") ||
+             str_has_word_prefix(lower_buf, "светодиод") ||
+             str_has_word_prefix(lower_buf, "яркост") ||
              str_has_word(lower_buf, "лампа") ||
              str_has_word(lower_buf, "лампу") ||
              str_has_word(lower_buf, "лампы") ||
+             str_has_word(lower_buf, "лампе") ||
              str_has_word(lower_buf, "лампочку") ||
              str_has_word(lower_buf, "лампочки") ||
+             str_has_word(lower_buf, "лампочке") ||
              str_has_word(lower_buf, "лампочка") ||
              str_has_word_prefix(lower_buf, "люстр") ||
              str_has_word_prefix(lower_buf, "розетк") ||
@@ -1199,7 +1208,8 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
              str_has_word(lower_buf, "шторки") ||
              str_has_word(lower_buf, "шторка") ||
              str_has_word_prefix(lower_buf, "выключател") ||
-             str_has_word(lower_buf, "реле"))) {
+             str_has_word(lower_buf, "реле") ||
+             is_smart_color_command(lower_buf))) {
             log_msg("[bridge] Household smart command, ignoring\n");
             return;
         }
