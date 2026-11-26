@@ -351,7 +351,14 @@ static void led_all_off(void) {
         build_led_path(path, sizeof(path), "blue", z);
         write_sysfs_int(path, 0);
     }
-    if (g_led_hw.is_plum) {
+    /* Hand the ring back to the stock framebuffer trigger.
+     * Writing brightness directly detaches the kernel trigger, so after the
+     * equalizer lets go Alice's own animations never reach the LEDs again until
+     * reboot: on cucumber that trigger is ledfb-ring, and maind renders its
+     * animation into the framebuffer that only it reads. Upstream restored the
+     * trigger for plum only, so a Midi loses Alice's ring indication. */
+    if (g_led_hw.is_plum || g_led_hw.is_zero_indexed) {
+        const char *trig = g_led_hw.is_plum ? "led_ring_fb\n" : "ledfb-ring\n";
         for (int z = start; z < end; z++) {
             char tpath[80];
             build_led_path(tpath, sizeof(tpath), "red", z);
@@ -361,7 +368,7 @@ static void led_all_off(void) {
                     break;
                 }
             }
-            write_sysfs_str(tpath, "led_ring_fb\n");
+            write_sysfs_str(tpath, trig);
         }
     }
 }
@@ -372,10 +379,12 @@ static void set_led_visualizer_impl(int enable) {
     led_probe();
     g_led_enabled = enable ? 1 : 0;
     if (!g_led_enabled && g_led_fx_type == LED_FX_NONE) {
-        if (alice_owns_leds(now_ms())) {
-            led_reset_internal_state();
-        } else {
+        if (g_led_hw.is_zero_indexed || !alice_owns_leds(now_ms())) {
+            /* led_all_off() also reattaches the kernel trigger. On a Midi the
+             * reset alone leaves Alice's animation with no path to the LEDs. */
             led_all_off();
+        } else {
+            led_reset_internal_state();
         }
     }
     const char *state_path = get_led_state_path();
@@ -826,7 +835,16 @@ static void led_visualizer_tick(int64_t now) {
             g_led_fx_start_ms = 0;
             g_led_fx_queued_ms = 0;
         }
-        if (g_led_last_active || g_audio_shm_ptr) {
+        /* On a Midi the equalizer detaches ledfb-ring the first time it writes
+         * brightness, so handing the ring to Alice means clearing the frame and
+         * reattaching the trigger -- otherwise maind animates into a
+         * framebuffer nobody reads and the ring stays dark. Other models keep
+         * upstream's hands-off policy (their trigger handling differs). */
+        if (g_led_hw.is_zero_indexed) {
+            if (g_led_last_active || g_led_ring_dirty || g_audio_shm_ptr) {
+                led_all_off();
+            }
+        } else if (g_led_last_active || g_audio_shm_ptr) {
             led_reset_internal_state();
         }
         return;

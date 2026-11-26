@@ -407,6 +407,87 @@ int main(void) {{
     rc = subprocess.run([str(led_test_bin)]).returncode
     check(rc == 0, f"read_led_config migration & config override checks passed (rc={rc})")
 
+# 5. led_all_off() must hand the ring back to the trigger the kernel uses.
+# On a Midi (cucumber, is_zero_indexed) the kernel trigger is ledfb-ring;
+# writing brightness detaches it and maind then animates into a framebuffer
+# nobody reads, so Alice's ring stays dark until a reboot. Upstream restored
+# only plum's led_ring_fb, which left every Midi without an indication.
+# write_sysfs_str is called for the trigger only, so it is the observation point.
+with tempfile.TemporaryDirectory() as td:
+    td_p = pathlib.Path(td)
+    probe = td_p / "probe.c"
+    bin_p = td_p / "probe"
+    off_fn = slice_between(led_hdr_src, "static void led_all_off(void) {", "static void join_path(")
+    reset_fn = slice_between(led_hdr_src, "static void led_reset_internal_state(void) {", "static void led_all_off(void) {")
+    probe.write_text(f'''
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+struct led_hardware_info {{
+    int probed; int detected; int num_zones; int is_zero_indexed;
+    char prefix[32]; int is_plum;
+}};
+static struct led_hardware_info g_led_hw = {{0}};
+static int g_led_ring_dirty = 1;
+static int g_led_last_active = 1;
+static uint64_t g_led_frame = 0;
+static int g_led_last_rgb[24][3];
+static int g_prev_zone_val[24];
+static int g_band_floor[3], g_band_peak[3], g_band_init[3];
+static int g_shm_is_32bit = 0;
+static int g_led_rgb_cache_valid = 0;
+static int64_t g_last_led_tick_ms = 0;
+static void audio_shm_detach(void) {{}}
+static void audio_shm_ensure_attached(void) {{}}
+static int sys_close(int fd) {{ return fd; }}
+static int64_t now_ms(void) {{ return 0; }}
+static int alice_owns_leds(int64_t t) {{ (void)t; return 0; }}
+static void write_sysfs_int(const char *path, int val) {{ (void)path; (void)val; }}
+static void str_copy(char *dst, const char *src, unsigned long max) {{
+    unsigned long i = 0; for (; src[i] && i + 1 < max; i++) dst[i] = src[i]; dst[i] = 0;
+}}
+static void build_led_path(char *dst, unsigned long max, const char *color, int zone_idx) {{
+    (void)color; (void)zone_idx;
+    snprintf(dst, max, "/sys/class/leds/cucumber:red:ring0/brightness");
+}}
+static char g_trig[32];
+static int g_trig_writes = 0;
+static void write_sysfs_str(const char *path, const char *str) {{
+    (void)path;
+    snprintf(g_trig, sizeof(g_trig), "%s", str);
+    g_trig_writes++;
+}}
+
+{reset_fn}
+{off_fn}
+
+int main(void) {{
+    // Midi: zero-indexed ring, kernel trigger ledfb-ring.
+    g_led_hw.detected = 1; g_led_hw.is_zero_indexed = 1; g_led_hw.is_plum = 0;
+    g_led_hw.num_zones = 24; snprintf(g_led_hw.prefix, sizeof(g_led_hw.prefix), "cucumber:");
+    led_all_off();
+    if (g_trig_writes == 0) {{ fprintf(stderr, "MIDI: no trigger reattached"); return 21; }}
+    if (!strstr(g_trig, "ledfb-ring")) {{ fprintf(stderr, "MIDI: wrong trigger [%s]", g_trig); return 22; }}
+
+    // Plum keeps its own trigger name, as upstream has it.
+    g_trig_writes = 0; g_trig[0] = 0;
+    g_led_hw.is_zero_indexed = 0; g_led_hw.is_plum = 1;
+    led_all_off();
+    if (!strstr(g_trig, "led_ring_fb")) {{ fprintf(stderr, "PLUM: wrong trigger [%s]", g_trig); return 23; }}
+
+    // A 1-indexed device that is not plum must stay untouched, as upstream has it.
+    g_trig_writes = 0; g_trig[0] = 0;
+    g_led_hw.is_zero_indexed = 0; g_led_hw.is_plum = 0;
+    led_all_off();
+    if (g_trig_writes != 0) {{ fprintf(stderr, "OTHER: wrote trigger [%s]", g_trig); return 24; }}
+    return 0;
+}}
+''', encoding="utf-8")
+    subprocess.check_call(["cc", "-O2", "-Wall", "-Wextra", str(probe), "-o", str(bin_p)])
+    rc = subprocess.run([str(bin_p)]).returncode
+    check(rc == 0, f"led_all_off reattaches the right trigger per hardware (rc={rc})")
+
 if failures == 0:
     print("ALL LED & CACHE TESTS PASSED!", flush=True)
     sys.exit(0)
