@@ -833,6 +833,17 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     log_msg(lower_buf);
     log_msg("\"\n");
 
+    /* "Алиса, включи эйрплей" belongs to Quasar Bridge's built-in AirPlay
+     * receiver, which answers with should_listen=false and starts nothing.
+     * Without this hand-off the "включи ..." search branch below treats the
+     * phrase as a catalog query for "включи airplay", cancels Alice's reply and
+     * starts an unrelated track. An explicit media word keeps a real search:
+     * "включи песню Airplay" still goes to Spotify. */
+    if (is_airplay_command(lower_buf)) {
+        log_msg("[bridge] AirPlay command, leaving for Quasar Bridge\n");
+        return;
+    }
+
     // The words after an explicit playlist command belong to its title.
     if (is_named_playlist_request(lower_buf)) {
         if (str_contains(lower_buf, "в яндекс") || str_contains(lower_buf, "на яндекс") ||
