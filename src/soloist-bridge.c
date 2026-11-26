@@ -561,6 +561,33 @@ static void handle_soloist_ws_json(const char *json) {
     char msg_type[32] = {0};
     json_find_str(json, "type", msg_type, sizeof(msg_type));
 
+    // Parse the device's activity BEFORE the volume branch. Spotify reports the account's
+    // volume on every device: a phone or laptop changing its own slider emits
+    // volume_changed here too, and with the field parsed afterwards the decision would be
+    // made before we know whether the event belongs to this speaker. A frame without the
+    // field keeps the last confirmed state of this connection.
+    int active_bool = 0;
+    if (json_find_bool(json, "is_active", &active_bool)) {
+        int was_active = spotify_device_is_active;
+        spotify_device_is_active = active_bool;
+        if (!active_bool) {
+            spotify_is_active = 0;
+            yandex_music_handoff_ms = 0;
+            // Drop a target queued for this speaker: the main loop would otherwise still
+            // deliver it up to 60 ms later, after the device changed hands.
+            pending_quasar_vol = -1;
+        }
+        if (active_bool && !was_active) {
+            // Becoming the active device again: take this speaker's own volume, never a
+            // value that was queued while the account was playing on somebody else.
+            pending_quasar_vol = -1;
+            need_soloist_vol_sync = 0;
+            if (quasar_vol_known && current_soloist_vol >= 0 && quasar_vol != current_soloist_vol) {
+                need_soloist_vol_sync = 1;
+            }
+        }
+    }
+
     int vol = -1;
     if (json_find_int(json, "volume", &vol) && vol >= 0 && vol <= 100) {
         current_soloist_vol = vol;
@@ -578,22 +605,18 @@ static void handle_soloist_ws_json(const char *json) {
                                vol == last_sent_to_soloist_vol &&
                                last_sent_to_soloist_ms > 0 &&
                                (now_vol - last_sent_to_soloist_ms) < 1200);
-            if (!is_our_echo) {
+            // Only the active Connect device may drive this speaker's hardware volume.
+            if (is_our_echo) {
+                // our own set_volume coming back: neither a user change nor a new target
+            } else if (spotify_device_is_active) {
                 last_user_ws_vol_ms = now_vol;
                 pending_quasar_vol = vol;
                 pending_quasar_vol_due_ms = (last_sent_to_quasar_ms == 0 || now_vol - last_sent_to_quasar_ms >= 60)
                                             ? now_vol
                                             : (last_sent_to_quasar_ms + 60);
             }
-        }
-    }
-
-    int active_bool = 0;
-    if (json_find_bool(json, "is_active", &active_bool)) {
-        spotify_device_is_active = active_bool;
-        if (!active_bool) {
-            spotify_is_active = 0;
-            yandex_music_handoff_ms = 0;
+            // Otherwise another device of the account moved its own slider. Ignoring it also
+            // means leaving last_user_ws_vol_ms alone, so the initial-sync rules are unaffected.
         }
     }
 
@@ -2059,29 +2082,34 @@ void _start(void) {
         if (pending_quasar_vol >= 0 && now_sync >= pending_quasar_vol_due_ms) {
             int target = pending_quasar_vol;
             pending_quasar_vol = -1;
-            last_sent_to_quasar_vol = target;
-            last_sent_to_quasar_ms = now_sync;
-            int sent_quasar = 0;
-            if (quasar_io_fd >= 0 && !quasar_vol_fallback_amixer) {
-                if (send_quasar_volume(quasar_io_fd, target) < 0) {
-                    sys_close(quasar_io_fd);
-                    quasar_io_fd = -1;
-                    quasar_io_buf_pos = 0;
-                } else {
-                    sent_quasar = 1;
-                    if (!quasar_vol_known || abs_diff_int(target, quasar_vol) >= 10) {
-                        vol_verify_target = target;
-                        vol_verify_prev_qvol = quasar_vol_known ? quasar_vol : -1;
-                        vol_verify_sent_ms = now_sync;
+            // Re-check at delivery time, not only when the target was queued: the speaker can
+            // stop being the active device inside the 60 ms debounce window, and the queued
+            // value belongs to whoever was active when it was set.
+            if (spotify_device_is_active) {
+                last_sent_to_quasar_vol = target;
+                last_sent_to_quasar_ms = now_sync;
+                int sent_quasar = 0;
+                if (quasar_io_fd >= 0 && !quasar_vol_fallback_amixer) {
+                    if (send_quasar_volume(quasar_io_fd, target) < 0) {
+                        sys_close(quasar_io_fd);
+                        quasar_io_fd = -1;
+                        quasar_io_buf_pos = 0;
+                    } else {
+                        sent_quasar = 1;
+                        if (!quasar_vol_known || abs_diff_int(target, quasar_vol) >= 10) {
+                            vol_verify_target = target;
+                            vol_verify_prev_qvol = quasar_vol_known ? quasar_vol : -1;
+                            vol_verify_sent_ms = now_sync;
+                        }
                     }
                 }
-            }
-            if (!sent_quasar) {
-                vol_verify_target = -1;
-                vol_verify_sent_ms = 0;
-                char vol_str[12];
-                format_uint_ascii(vol_str, target);
-                run_controller("volume", vol_str);
+                if (!sent_quasar) {
+                    vol_verify_target = -1;
+                    vol_verify_sent_ms = 0;
+                    char vol_str[12];
+                    format_uint_ascii(vol_str, target);
+                    run_controller("volume", vol_str);
+                }
             }
         }
         int fallback_target = -1;
