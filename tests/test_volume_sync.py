@@ -120,6 +120,8 @@ static void reset_vol_state(void) {
     vol_verify_prev_qvol = -1;
     vol_verify_sent_ms = 0;
     quasar_vol_fallback_amixer = 0;
+    spotify_device_is_active = 0;
+    spotify_is_active = 0;
 }
 
 int main(void) {
@@ -252,6 +254,8 @@ int main(void) {
     current_soloist_vol = 20;
     ws_initial_vol_synced = 1;
     need_soloist_vol_sync = 0;
+    // A slider drag on this speaker only applies while it is the active Connect device.
+    spotify_device_is_active = 1;
 
     // Simulate main loop after first change (sent at t=20000)
     last_sent_to_quasar_vol = 25;
@@ -316,6 +320,94 @@ int main(void) {
     CHECK(vol_verify_target == -1 && quasar_vol_fallback_amixer == 0 &&
           check_quasar_vol_fallback(34000, &fb_target) == 0,
           "Confirmed 9921 update clears verification timer and amixer fallback");
+
+    // 10. Another device of the account moves ITS slider while this speaker is not the
+    // active Connect device: the speaker's hardware volume must not follow.
+    reset_vol_state();
+    mock_now = 40000;
+    on_quasar_volume_state(40, 0, mock_now);
+    current_soloist_vol = 30;
+    ws_initial_vol_synced = 1;
+    need_soloist_vol_sync = 0;
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":80,\"is_active\":false}");
+    CHECK(pending_quasar_vol == -1 && quasar_vol == 40,
+          "Foreign volume while inactive never becomes a Quasar target");
+
+    // 10b. A burst of foreign events stays ignored.
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":85,\"is_active\":false}");
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":20,\"is_active\":false}");
+    CHECK(pending_quasar_vol == -1, "Repeated foreign volume while inactive stays ignored");
+
+    // 11. The same event from the active device must still be applied.
+    spotify_device_is_active = 1;
+    mock_now = 41000;
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":55,\"is_active\":true}");
+    CHECK(pending_quasar_vol == 55, "Volume from the active device still reaches Quasar");
+
+    // 12. Deactivation drops a target queued inside the 60 ms debounce window.
+    reset_vol_state();
+    mock_now = 42000;
+    on_quasar_volume_state(40, 0, mock_now);
+    current_soloist_vol = 30;
+    ws_initial_vol_synced = 1;
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":90,\"is_active\":true}");
+    CHECK(pending_quasar_vol == 90, "Setup: the active device queues 90");
+    handle_soloist_ws_json("{\"type\":\"is_active_changed\",\"is_active\":false}");
+    CHECK(pending_quasar_vol == -1, "Deactivation drops the queued target");
+
+    // 13. Before any is_active confirmation (fresh connection) nothing is applied.
+    reset_vol_state();
+    mock_now = 43000;
+    on_quasar_volume_state(45, 0, mock_now);
+    ws_initial_vol_synced = 1;
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":70}");
+    CHECK(pending_quasar_vol == -1,
+          "Volume before any is_active confirmation is not applied");
+
+    // 14. A frame without is_active reuses the last confirmed active state.
+    reset_vol_state();
+    mock_now = 44000;
+    on_quasar_volume_state(35, 0, mock_now);
+    ws_initial_vol_synced = 1;
+    handle_soloist_ws_json("{\"type\":\"playback_state\",\"status\":\"playing\",\"volume\":35,\"is_active\":true}");
+    CHECK(spotify_device_is_active == 1, "Setup: confirmed active");
+    mock_now = 44500;
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":48}");
+    CHECK(pending_quasar_vol == 48,
+          "A frame without is_active reuses the confirmed active state");
+
+    // 15. Re-activation takes this speaker's own volume, not the foreign queued one.
+    reset_vol_state();
+    mock_now = 45000;
+    on_quasar_volume_state(42, 0, mock_now);
+    current_soloist_vol = 30;
+    ws_initial_vol_synced = 1;
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":99,\"is_active\":false}");
+    handle_soloist_ws_json("{\"type\":\"is_active_changed\",\"is_active\":true}");
+    CHECK(pending_quasar_vol == -1 && need_soloist_vol_sync == 1,
+          "Re-activation ignores the foreign 99 and syncs this speaker's 42 to Spotify");
+
+    // 16. Our own set_volume echo is still suppressed (no ping-pong).
+    reset_vol_state();
+    mock_now = 46000;
+    on_quasar_volume_state(50, 0, mock_now);
+    spotify_device_is_active = 1;
+    ws_initial_vol_synced = 1;
+    last_sent_to_soloist_vol = 50;
+    last_sent_to_soloist_ms = 46000;
+    mock_now = 46400;
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":50,\"is_active\":true}");
+    CHECK(pending_quasar_vol == -1, "Own set_volume echo does not bounce back to Quasar");
+
+    // 17. PAUSE keeps the device active; volume control keeps working.
+    reset_vol_state();
+    mock_now = 47000;
+    on_quasar_volume_state(33, 0, mock_now);
+    ws_initial_vol_synced = 1;
+    handle_soloist_ws_json("{\"type\":\"playback_state\",\"status\":\"paused\",\"volume\":33,\"is_active\":true}");
+    handle_soloist_ws_json("{\"type\":\"volume_changed\",\"volume\":44,\"is_active\":true}");
+    CHECK(pending_quasar_vol == 44 && spotify_device_is_active == 1,
+          "Paused but active device still follows volume changes");
 
     return fails ? 1 : 0;
 }
