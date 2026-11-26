@@ -295,6 +295,23 @@ static const char *skip_voice_fillers(const char *text) {
     return text;
 }
 
+/* AirPlay receiver commands are owned by Quasar Bridge (see its sendAlExtDirective
+ * handling), not by this bridge: Soloist only plays Spotify. Recognised by the
+ * receiver's aliases, because Alice's ASR may spell "эйрплей" differently. An
+ * explicit media word keeps the phrase a real Spotify search. */
+static int is_airplay_command(const char *lower) {
+    if (str_contains(lower, "песн") || str_contains(lower, "трек") ||
+        str_contains(lower, "музык") || str_contains(lower, "альбом") ||
+        str_contains(lower, "плейлист") || str_contains(lower, "исполнител") ||
+        str_contains(lower, "групп")) {
+        return 0;
+    }
+    return str_contains(lower, "airplay") || str_contains(lower, "эйрплей") ||
+           str_contains(lower, "эирплей") || str_contains(lower, "аирплей") ||
+           str_contains(lower, "эйр плей") || str_contains(lower, "эир плей") ||
+           str_contains(lower, "аир плей") || str_contains(lower, "air play");
+}
+
 static int is_named_playlist_request(const char *text) {
     static const char *const verbs[] = {"включи", "поставь", "сыграй", "запусти", "найди", "вруби", "слушать"};
     text = skip_voice_fillers(text);
