@@ -303,7 +303,74 @@ def slice_between(txt: str, start: str, end: str) -> str:
     assert e != -1, f"End marker {end} not found"
     return txt[s:e]
 
-# 4. Bridge read_led_config() default-white migration & config override test
+# 4. "Алиса, включи эйрплей" must be left to Quasar Bridge.
+# The AirPlay receiver lives there and answers should_listen=false, starting
+# nothing. Without this hand-off the "включи ..." branch below treats the phrase
+# as a Spotify catalog query, cancels Alice's answer and plays a random track.
+# An explicit media word keeps a real search ("включи песню Airplay").
+predicate = slice_between(
+    text_json_src,
+    "static int is_airplay_command(const char *lower) {",
+    "static int is_named_playlist_request(const char *text) {",
+)
+with tempfile.TemporaryDirectory() as td:
+    probe = pathlib.Path(td) / "air.c"
+    probe.write_text(r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static int str_contains(const char *h, const char *n) {
+    if (!h || !n) return 0;
+    unsigned long hl = strlen(h), nl = strlen(n);
+    if (!nl) return 1;
+    if (hl < nl) return 0;
+    for (unsigned long i = 0; i <= hl - nl; i++) {
+        unsigned long j = 0;
+        while (j < nl && h[i + j] == n[j]) j++;
+        if (j == nl) return 1;
+    }
+    return 0;
+}
+
+__PREDICATE__
+
+struct case_t { const char *text; int want; };
+
+int main(void) {
+    static const struct case_t cases[] = {
+        {"включи эйрплей", 1},
+        {"включи airplay", 1},
+        {"вруби эйр плей", 1},
+        {"поставь эирплей", 1},
+        {"включи песню airplay", 0},
+        {"включи трек эйрплей", 0},
+        {"включи музыку", 0},
+        {"включи кино", 0},
+        {"поставь плейлист airplay mix", 0},
+        {"включи группу аэрплай", 0},
+        {"airplay", 1},
+    };
+    int bad = 0;
+    for (unsigned long i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+        int got = is_airplay_command(cases[i].text);
+        if (got != cases[i].want) {
+            fprintf(stderr, "case %lu [%s]: got %d want %d\n", i, cases[i].text, got, cases[i].want);
+            bad++;
+        }
+    }
+    return bad ? 1 : 0;
+}
+""".replace("__PREDICATE__", predicate), encoding="utf-8")
+    bin_p = probe.with_suffix("")
+    rc = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", str(probe), "-o", str(bin_p)]).returncode
+    if rc != 0:
+        check(False, "airplay predicate probe compiles")
+    else:
+        rc = subprocess.run([str(bin_p)]).returncode
+        check(rc == 0, f"is_airplay_command hands AirPlay to the receiver and spares real searches (rc={rc})")
+
+# 5. Bridge read_led_config() default-white migration & config override test
 with tempfile.TemporaryDirectory() as td:
     td_p = pathlib.Path(td)
     req_dir = td_p / "requests"
@@ -406,73 +473,6 @@ int main(void) {{
     subprocess.check_call(["cc", "-O2", "-Wall", "-Wextra", str(led_test_c), "-o", str(led_test_bin)])
     rc = subprocess.run([str(led_test_bin)]).returncode
     check(rc == 0, f"read_led_config migration & config override checks passed (rc={rc})")
-
-# 6. "Алиса, включи эйрплей" must be left to Quasar Bridge.
-# The AirPlay receiver lives there and answers should_listen=false, starting
-# nothing. Without this hand-off the "включи ..." branch below treats the phrase
-# as a Spotify catalog query, cancels Alice's answer and plays a random track.
-# An explicit media word keeps a real search ("включи песню Airplay").
-predicate = slice_between(
-    text_json_src,
-    "static int is_airplay_command(const char *lower) {",
-    "static int is_named_playlist_request(const char *text) {",
-)
-with tempfile.TemporaryDirectory() as td:
-    probe = pathlib.Path(td) / "air.c"
-    probe.write_text(r"""
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-
-static int str_contains(const char *h, const char *n) {
-    if (!h || !n) return 0;
-    unsigned long hl = strlen(h), nl = strlen(n);
-    if (!nl) return 1;
-    if (hl < nl) return 0;
-    for (unsigned long i = 0; i <= hl - nl; i++) {
-        unsigned long j = 0;
-        while (j < nl && h[i + j] == n[j]) j++;
-        if (j == nl) return 1;
-    }
-    return 0;
-}
-
-__PREDICATE__
-
-struct case_t { const char *text; int want; };
-
-int main(void) {
-    static const struct case_t cases[] = {
-        {"включи эйрплей", 1},
-        {"включи airplay", 1},
-        {"вруби эйр плей", 1},
-        {"поставь эирплей", 1},
-        {"включи песню airplay", 0},
-        {"включи трек эйрплей", 0},
-        {"включи музыку", 0},
-        {"включи кино", 0},
-        {"поставь плейлист airplay mix", 0},
-        {"включи группу аэрплай", 0},
-        {"airplay", 1},
-    };
-    int bad = 0;
-    for (unsigned long i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
-        int got = is_airplay_command(cases[i].text);
-        if (got != cases[i].want) {
-            fprintf(stderr, "case %lu [%s]: got %d want %d\n", i, cases[i].text, got, cases[i].want);
-            bad++;
-        }
-    }
-    return bad ? 1 : 0;
-}
-""".replace("__PREDICATE__", predicate), encoding="utf-8")
-    bin_p = probe.with_suffix("")
-    rc = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", str(probe), "-o", str(bin_p)]).returncode
-    if rc != 0:
-        check(False, "airplay predicate probe compiles")
-    else:
-        rc = subprocess.run([str(bin_p)]).returncode
-        check(rc == 0, f"is_airplay_command hands AirPlay to the receiver and spares real searches (rc={rc})")
 
 if failures == 0:
     print("ALL LED & CACHE TESTS PASSED!", flush=True)
