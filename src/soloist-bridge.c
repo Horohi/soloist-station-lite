@@ -309,6 +309,11 @@ static int spotify_is_active = 0;
 static int spotify_device_is_active = 0; // 1 = this speaker is active Spotify Connect device
 static int yandex_music_active = 0;      // 1 = user handed playback to Yandex Music / Radio
 static int64_t yandex_music_handoff_ms = 0; // timestamp of explicit handoff to Yandex Music
+#define VOICE_MODE_SPOTIFY 0
+#define VOICE_MODE_YANDEX  1
+#define VOICE_MODE_REMOTE  2
+#define VOICE_MODE_QUERY   3
+static int voice_mode = VOICE_MODE_SPOTIFY;
 static int repeat_mode = 0; // 0=off, 1=context, 2=track
 static char current_track_uri[128] = {0};
 static char current_track_name[128] = {0};
@@ -726,8 +731,11 @@ static void handle_soloist_ws_json(const char *json) {
 #ifdef __aarch64__
 static void set_led_visualizer_impl(int enable);
 static inline void set_led_visualizer(int enable) { set_led_visualizer_impl(enable); }
+static void persist_voice_mode_impl(int mode);
+static inline void persist_voice_mode(int mode) { persist_voice_mode_impl(mode); }
 #else
 static inline void set_led_visualizer(int enable) { (void)enable; }
+static inline void persist_voice_mode(int mode) { (void)mode; }
 #endif
 
 static int is_web_or_culinary_intent(const char *lower) {
@@ -820,6 +828,30 @@ static int is_yandex_music_preference(const char *lower) {
     return 0;
 }
 
+static void apply_voice_mode(int new_mode) {
+    if (new_mode < VOICE_MODE_SPOTIFY || new_mode > VOICE_MODE_REMOTE) return;
+    voice_mode = new_mode;
+    persist_voice_mode(new_mode);
+    if (new_mode == VOICE_MODE_YANDEX) {
+        int was_local = (spotify_device_is_active || spotify_is_active);
+        yandex_music_active = 1;
+        yandex_music_handoff_ms = now_ms();
+        spotify_is_active = 0;
+        led_fx_clear();
+        log_msg("[bridge] Voice mode -> yandex\n");
+        if (was_local) run_soloist_cmd("deactivate");
+    } else if (new_mode == VOICE_MODE_REMOTE) {
+        yandex_music_active = 0;
+        yandex_music_handoff_ms = 0;
+        spotify_is_active = 0;
+        log_msg("[bridge] Voice mode -> remote\n");
+    } else {
+        yandex_music_active = 0;
+        yandex_music_handoff_ms = 0;
+        log_msg("[bridge] Voice mode -> spotify\n");
+    }
+}
+
 static void handle_voice_recognition(int quasar_fd, const char *text, unsigned long text_len) {
     char lower_buf[512];
     char raw_buf[512];
@@ -844,15 +876,51 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         return;
     }
 
+    int mode_cmd = parse_voice_mode_command(lower_buf);
+    if (mode_cmd == VOICE_MODE_QUERY) {
+        const char *phrase = (voice_mode == VOICE_MODE_YANDEX) ? "Сейчас режим Яндекс"
+                           : (voice_mode == VOICE_MODE_REMOTE) ? "Сейчас режим пульта"
+                                                               : "Сейчас режим Спотифай";
+        log_msg("[bridge] Action: QUERY VOICE MODE\n");
+        send_alice_tts(quasar_fd, phrase);
+        return;
+    }
+    if (mode_cmd >= 0) {
+        apply_voice_mode(mode_cmd);
+        const char *phrase = (mode_cmd == VOICE_MODE_YANDEX) ? "Режим Яндекс"
+                           : (mode_cmd == VOICE_MODE_REMOTE) ? "Режим пульта"
+                                                             : "Режим Спотифай";
+        send_alice_tts(quasar_fd, phrase);
+        return;
+    }
+
+    if (voice_mode == VOICE_MODE_YANDEX) {
+        log_msg("[bridge] Yandex mode active, leaving voice command to Alice\n");
+        return;
+    }
+
+    if ((voice_mode == VOICE_MODE_REMOTE || !spotify_device_is_active) &&
+        is_claim_speaker_command(lower_buf)) {
+        log_msg("[bridge] Action: CLAIM SPEAKER (activate)\n");
+        trigger_alice_suppression(quasar_fd, 3000);
+        yandex_music_active = 0;
+        yandex_music_handoff_ms = 0;
+        spotify_is_active = 1;
+        led_fx_trigger(LED_FX_PLAY);
+        run_soloist_cmd("activate");
+        return;
+    }
+
     // The words after an explicit playlist command belong to its title.
     if (is_named_playlist_request(lower_buf)) {
         if (str_contains(lower_buf, "в яндекс") || str_contains(lower_buf, "на яндекс") ||
             str_contains(lower_buf, "из яндекс") || str_contains(lower_buf, "в я.музык")) {
+            int was_local = (spotify_device_is_active || spotify_is_active);
             yandex_music_active = 1;
             yandex_music_handoff_ms = now_ms();
             spotify_is_active = 0;
             led_fx_clear();
-            if (spotify_device_is_active || playback_status == 1 || playback_status == 3) {
+            if (was_local) {
                 run_soloist_cmd("deactivate");
             }
             return;
@@ -861,9 +929,10 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         trigger_alice_suppression(quasar_fd, 5000);
         yandex_music_active = 0;
         yandex_music_handoff_ms = 0;
-        spotify_is_active = 1;
+        if (voice_mode != VOICE_MODE_REMOTE) spotify_is_active = 1;
         led_fx_trigger(LED_FX_SEARCH);
-        run_search_and_play(lower_buf);
+        if (voice_mode == VOICE_MODE_REMOTE) run_controller("search-remote", lower_buf);
+        else run_search_and_play(lower_buf);
         return;
     }
 
@@ -873,12 +942,13 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
     }
 
     if (is_yandex_music_preference(lower_buf)) {
+        int was_local = (spotify_device_is_active || spotify_is_active);
         log_msg("[bridge] Yandex Music/Radio preference requested, leaving to native Alice\n");
         yandex_music_active = 1;
         yandex_music_handoff_ms = now_ms();
         spotify_is_active = 0;
         led_fx_clear();
-        if (spotify_device_is_active || playback_status == 1 || playback_status == 3) {
+        if (was_local) {
             run_soloist_cmd("deactivate");
         }
         return;
@@ -936,19 +1006,26 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         trigger_alice_suppression(quasar_fd, 4000);
         yandex_music_active = 0;
         yandex_music_handoff_ms = 0;
-        spotify_is_active = 1;
+        if (voice_mode != VOICE_MODE_REMOTE) spotify_is_active = 1;
         led_fx_trigger(LED_FX_SEARCH);
         run_controller("enqueue", queue_query);
         return;
     }
 
+    int can_control_spotify = !yandex_music_active &&
+        (spotify_is_active || spotify_device_is_active ||
+         (voice_mode == VOICE_MODE_REMOTE && playback_status != 0));
+    int can_pause_spotify =
+        (spotify_device_is_active && (playback_status == 1 || playback_status == 3)) ||
+        spotify_is_active ||
+        (voice_mode == VOICE_MODE_REMOTE && (playback_status == 1 || playback_status == 3));
+
     // Track restart commands ("включи сначала", "начни сначала") run before
     // is_explicit_search() while preserving explicit song title searches.
-    if (!yandex_music_active && (spotify_is_active || spotify_device_is_active) &&
-        is_restart_track_request(lower_buf)) {
+    if (can_control_spotify && is_restart_track_request(lower_buf)) {
         log_msg("[bridge] Action: RESTART TRACK (seek 0)\n");
         trigger_alice_suppression(quasar_fd, 2500);
-        spotify_is_active = 1;
+        if (voice_mode != VOICE_MODE_REMOTE) spotify_is_active = 1;
         led_fx_trigger(LED_FX_PREV);
         run_soloist_cmd2("seek", "0");
         return;
@@ -991,14 +1068,9 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
 
         // Check PAUSE / STOP keywords (Instant Action)
         // Media words belong to Spotify only while this speaker is the active
-        // Spotify Connect device. Without this guard an ordinary "Алиса, стоп"
-        // aimed at a timer or alarm is consumed here, Alice's cloud reply is
-        // suppressed, and her dialog is cancelled; "дальше" during a Yandex
-        // Music playlist likewise skips a Spotify track instead. Events from
-        // another device of the same account arrive with is_active=false, so
-        // this also stops a phone or car from steering the speaker.
-        if (!yandex_music_active && (spotify_is_active || spotify_device_is_active)) {
-            if (((spotify_device_is_active && (playback_status == 1 || playback_status == 3)) || spotify_is_active) &&
+        // Spotify Connect device (or while remote-control mode sees active playback).
+        if (can_control_spotify) {
+            if (can_pause_spotify &&
                 (str_contains(lower_buf, "пауз") ||
                  str_contains(lower_buf, "стоп") ||
                  str_contains(lower_buf, "хватит") ||
@@ -1021,7 +1093,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
                 str_contains(lower_buf, "пропусти")) {
                 log_msg("[bridge] Action: NEXT TRACK\n");
                 trigger_alice_suppression(quasar_fd, 3000);
-                spotify_is_active = 1;
+                if (voice_mode != VOICE_MODE_REMOTE) spotify_is_active = 1;
                 led_fx_trigger(LED_FX_NEXT);
                 run_soloist_cmd("next");
                 return;
@@ -1033,7 +1105,7 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
                 str_contains(lower_buf, "прошл")) {
                 log_msg("[bridge] Action: PREVIOUS TRACK\n");
                 trigger_alice_suppression(quasar_fd, 3000);
-                spotify_is_active = 1;
+                if (voice_mode != VOICE_MODE_REMOTE) spotify_is_active = 1;
                 led_fx_trigger(LED_FX_PREV);
                 run_soloist_cmd("prev");
                 return;
@@ -1100,9 +1172,10 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
             trigger_alice_suppression(quasar_fd, 2500);
             yandex_music_active = 0;
             yandex_music_handoff_ms = 0;
-            spotify_is_active = 1;
+            if (voice_mode != VOICE_MODE_REMOTE) spotify_is_active = 1;
             led_fx_trigger(LED_FX_PLAY);
-            run_search_and_play("включи музыку");
+            if (voice_mode == VOICE_MODE_REMOTE) run_controller("search-remote", "включи музыку");
+            else run_search_and_play("включи музыку");
             return;
         }
     }
@@ -1217,13 +1290,14 @@ static void handle_voice_recognition(int quasar_fd, const char *text, unsigned l
         trigger_alice_suppression(quasar_fd, 5000);
         yandex_music_active = 0;
         yandex_music_handoff_ms = 0;
-        spotify_is_active = 1;
+        if (voice_mode != VOICE_MODE_REMOTE) spotify_is_active = 1;
         led_fx_trigger(LED_FX_SEARCH);
 
         log_msg("[bridge] Action: SEARCH & PLAY query='");
         log_msg(lower_buf);
         log_msg("'\n");
-        run_search_and_play(lower_buf);
+        if (voice_mode == VOICE_MODE_REMOTE) run_controller("search-remote", lower_buf);
+        else run_search_and_play(lower_buf);
         return;
     }
 }
@@ -1261,6 +1335,7 @@ static void check_tts_request(int quasar_fd) {
     else if (str_equal(code, "net")) phrase = "Нет связи со Спотифай";
     else if (str_equal(code, "limit")) phrase = "Спотифай просит подождать";
     else if (str_equal(code, "auth")) phrase = "Нужно заново войти в Спотифай";
+    else if (str_equal(code, "nodev")) phrase = "Нет активного устройства Спотифай";
     if (!phrase) return;
 
     int64_t tnow = now_ms();
@@ -1281,6 +1356,124 @@ static unsigned long quasar_vol_buf_pos = 0;
 static uint8_t ws_buf[8192];
 static unsigned long ws_buf_pos = 0;
 static struct voice_request_state voice_requests;
+
+static void join_path(char *dst, unsigned long max, const char *a, const char *b);
+
+static int parse_voice_mode_value(const char *val) {
+    if (!val) return -1;
+    while (*val == ' ' || *val == '\t' || *val == '"' || *val == '\'') val++;
+    char buf[16];
+    unsigned long n = 0;
+    while (val[n] && n + 1 < sizeof(buf)) {
+        char c = val[n];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+            c == '"' || c == '\'' || c == '#') {
+            break;
+        }
+        if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+        buf[n++] = c;
+    }
+    buf[n] = 0;
+    if (str_equal(buf, "spotify") || str_equal(buf, "local") || str_equal(buf, "speaker")) {
+        return VOICE_MODE_SPOTIFY;
+    }
+    if (str_equal(buf, "yandex") || str_equal(buf, "alice") ||
+        str_equal(buf, "off") || str_equal(buf, "passive")) {
+        return VOICE_MODE_YANDEX;
+    }
+    if (str_equal(buf, "remote") || str_equal(buf, "pult") || str_equal(buf, "control")) {
+        return VOICE_MODE_REMOTE;
+    }
+    return -1;
+}
+
+static void parse_voice_mode_conf_buf(const char *buf) {
+    unsigned long i = 0;
+    while (buf[i]) {
+        while (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' || buf[i] == '\n') i++;
+        if (!buf[i]) break;
+        if (buf[i] == '#') {
+            while (buf[i] && buf[i] != '\n') i++;
+            continue;
+        }
+        if (mem_equal(buf + i, "VOICE_MODE=", 11)) {
+            int parsed = parse_voice_mode_value(buf + i + 11);
+            if (parsed >= 0) voice_mode = parsed;
+        }
+        while (buf[i] && buf[i] != '\n') i++;
+    }
+}
+
+static void persist_voice_mode_impl(int mode) {
+    const char *req_dir = get_requests_dir();
+    char state_path[360];
+    join_path(state_path, sizeof(state_path), req_dir, "mode_state");
+    sys_mkdir(req_dir, 0700);
+    int fd = sys_open(state_path, 0100 | 01 | 01000 /* O_CREAT|O_WRONLY|O_TRUNC */, 0644);
+    if (fd >= 0) {
+        if (mode == VOICE_MODE_YANDEX) sys_write(fd, "yandex\n", 7);
+        else if (mode == VOICE_MODE_REMOTE) sys_write(fd, "remote\n", 7);
+        else sys_write(fd, "spotify\n", 8);
+        sys_close(fd);
+    }
+}
+
+static void read_voice_mode_config(void) {
+    const char *req_dir = get_requests_dir();
+    char state_path[360];
+    join_path(state_path, sizeof(state_path), req_dir, "mode_state");
+    sys_mkdir(req_dir, 0700);
+
+    voice_mode = VOICE_MODE_SPOTIFY;
+
+    const char *conf_path = get_conf_path();
+    int fd = sys_open(conf_path, 0, 0);
+    if (fd >= 0) {
+        char buf[2048];
+        long n = sys_read(fd, buf, sizeof(buf) - 1);
+        sys_close(fd);
+        if (n > 0) {
+            buf[n] = 0;
+            parse_voice_mode_conf_buf(buf);
+        }
+    }
+
+    int sfd = sys_open(state_path, 0, 0);
+    if (sfd >= 0) {
+        char sbuf[32];
+        long sn = sys_read(sfd, sbuf, sizeof(sbuf) - 1);
+        sys_close(sfd);
+        if (sn > 0) {
+            sbuf[sn] = 0;
+            int parsed = parse_voice_mode_value(sbuf);
+            if (parsed >= 0) voice_mode = parsed;
+        }
+    }
+
+    if (voice_mode == VOICE_MODE_YANDEX) {
+        yandex_music_active = 1;
+        yandex_music_handoff_ms = 0;
+    }
+}
+
+static void check_mode_request(void) {
+    char req_path[360];
+    join_path(req_path, sizeof(req_path), get_requests_dir(), "mode");
+    int fd = sys_open(req_path, 0 /* O_RDONLY */, 0);
+    if (fd < 0) return;
+
+    char buf[32];
+    long n = sys_read(fd, buf, sizeof(buf) - 1);
+    sys_close(fd);
+    sys_unlink(req_path);
+    if (n <= 0) return;
+    buf[n] = 0;
+
+    int parsed = parse_voice_mode_value(buf);
+    if (parsed >= 0) {
+        apply_voice_mode(parsed);
+    }
+}
 
 static void handle_quasar_io_stream(int *fd_ptr, int revents, int64_t now) {
     if (!fd_ptr || *fd_ptr < 0) return;
@@ -1306,12 +1499,13 @@ static void handle_quasar_io_stream(int *fd_ptr, int revents, int64_t now) {
             int media_state = 0;
             if (parse_quasar_io_media_state(quasar_io_buf + 4, fl, &media_state) &&
                 media_state == 2 && !yandex_music_active) {
+                int was_local = (spotify_device_is_active || spotify_is_active);
                 log_msg("[bridge] Native Quasar media playback detected, yielding Spotify\n");
                 yandex_music_active = 1;
                 yandex_music_handoff_ms = now;
                 spotify_is_active = 0;
                 led_fx_clear();
-                if (spotify_device_is_active || playback_status == 1 || playback_status == 3) {
+                if (was_local) {
                     run_soloist_cmd("deactivate");
                 }
             }
@@ -1518,6 +1712,7 @@ void _start(void) {
     init_runtime_paths();
 
     read_led_config();
+    read_voice_mode_config();
     led_probe();
     duck_shm_init();
 
@@ -1940,6 +2135,9 @@ void _start(void) {
                                                ev.code == 168 /* KEY_REWIND */);
 
                             if (ev.type == 1 /* EV_KEY */) {
+                                if (voice_mode == VOICE_MODE_YANDEX && !spotify_device_is_active) {
+                                    continue;
+                                }
                                 if (is_next_key && ev.value == 1) {
                                     log_msg("[bridge] Hardware key NEXT pressed\n");
                                     trigger_alice_suppression(quasar_fd, 3000);
@@ -1985,9 +2183,13 @@ void _start(void) {
                                                     } else if (playback_status == 2) {
                                                         log_msg("[bridge] Instant action: PLAY\n");
                                                         led_fx_trigger(LED_FX_PLAY);
-                                                        run_soloist_cmd("play");
+                                                        run_soloist_cmd(voice_mode == VOICE_MODE_REMOTE ? "play-remote" : "play");
                                                     } else {
-                                                        run_toggle();
+                                                        if (voice_mode == VOICE_MODE_REMOTE) {
+                                                            run_controller("toggle-remote", 0);
+                                                        } else {
+                                                            run_toggle();
+                                                        }
                                                     }
                                                 }
                                             } else {
@@ -2214,7 +2416,8 @@ void _start(void) {
             run_controller("clean-cache", 0);
         }
 
-        // 6. Error TTS + LED Visualizer / Equalizer update & request processing
+        // 6. Mode switching + Error TTS + LED Visualizer / Equalizer update & request processing
+        check_mode_request();
         check_tts_request(quasar_fd);
         check_led_request();
         led_visualizer_tick(now_ms());

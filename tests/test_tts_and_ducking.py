@@ -94,6 +94,12 @@ static int spotify_is_active = 0;
 static int spotify_device_is_active = 0;
 static int yandex_music_active = 0;
 static int64_t yandex_music_handoff_ms = 0;
+#define VOICE_MODE_SPOTIFY 0
+#define VOICE_MODE_YANDEX  1
+#define VOICE_MODE_REMOTE  2
+#define VOICE_MODE_QUERY   3
+static int voice_mode = VOICE_MODE_SPOTIFY;
+static void persist_voice_mode(int mode) {{ (void)mode; }}
 static int playback_status = 0;
 static char current_track_name[128] = {{0}};
 static char current_artist_name[128] = {{0}};
@@ -260,9 +266,9 @@ int main(void) {{
     CHECK(written_len == 0 && access(g_mock_tts_path, F_OK) != 0,
           "unknown tts error code is unlinked without speaking");
 
-    const char *codes[] = {{"cfg", "limit", "auth"}};
-    const char *phrases[] = {{"Нет настроек Спотифай", "Спотифай просит подождать", "Нужно заново войти в Спотифай"}};
-    for (int ci = 0; ci < 3; ci++) {{
+    const char *codes[] = {{"cfg", "limit", "auth", "nodev"}};
+    const char *phrases[] = {{"Нет настроек Спотифай", "Спотифай просит подождать", "Нужно заново войти в Спотифай", "Нет активного устройства Спотифай"}};
+    for (int ci = 0; ci < 4; ci++) {{
         mock_now += 20000;
         tf = fopen(g_mock_tts_path, "w"); CHECK(tf != NULL, "create tts req code");
         fprintf(tf, "%s\\n", codes[ci]); fclose(tf);

@@ -3,12 +3,16 @@ export PATH="/bin:/usr/bin:/sbin:/usr/sbin:$PATH"
 unset LD_LIBRARY_PATH LD_PRELOAD
 
 QUEUE=0
-if [ "${1:-}" = "--queue" ]; then
-    QUEUE=1
-    shift
-fi
+REMOTE=0
+while [ $# -gt 0 ]; do
+    case "${1:-}" in
+        --queue) QUEUE=1; shift ;;
+        --remote) REMOTE=1; shift ;;
+        *) break ;;
+    esac
+done
 
-QUERY="$1"
+QUERY="${1:-}"
 if [ -z "$QUERY" ]; then
     exit 0
 fi
@@ -71,21 +75,33 @@ signal_error_tts() {
 check_auth_error_tts() {
     _st=$(request_cli status 2>/dev/null || true)
     case "$_st" in
-        *'logged in: no'*) signal_error_tts auth ;;
+        *'logged in: no'*)
+            signal_error_tts auth
+            return 0
+            ;;
     esac
+    return 1
 }
 
 dispatch_play_fx() {
     _rc=0
     if [ "$QUEUE" = 1 ]; then
         request_dispatch add-to-queue "$@" || _rc=$?
+    elif [ "$REMOTE" = 1 ]; then
+        request_dispatch play-remote "$@" || _rc=$?
     else
         request_dispatch play "$@" || _rc=$?
     fi
     if [ "$_rc" -eq 0 ]; then
         signal_led_fx play
     else
-        check_auth_error_tts
+        if [ "$REMOTE" = 1 ]; then
+            if ! check_auth_error_tts; then
+                signal_error_tts nodev
+            fi
+        else
+            check_auth_error_tts || true
+        fi
         signal_led_fx err
     fi
     return "$_rc"
@@ -199,6 +215,11 @@ echo "[search] Cleaned search term: '$TERM' (preferred type: $TYPE)" >> "$LOG"
 # If search term is empty or generic 'музыку' -> resume or play default
 if [ "$QUEUE" = 0 ] && [ "$RADIO" = 0 ] && [ "$EXPLICIT_TYPE" = 0 ] &&
    { [ -z "$TERM" ] || [ "$TERM" = "музыку" ] || [ "$TERM" = "что-нибудь" ]; }; then
+    if [ "$REMOTE" = 1 ]; then
+        echo "[search] Generic remote resume request..." >> "$LOG"
+        dispatch_play_fx
+        exit $?
+    fi
     echo "[search] Generic play request, resuming..." >> "$LOG"
     request_dispatch play || { check_auth_error_tts; signal_led_fx err; exit 1; }
     _resume_tries=0

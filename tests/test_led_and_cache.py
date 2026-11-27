@@ -39,6 +39,12 @@ static int spotify_is_active = 0;
 static int spotify_device_is_active = 0;
 static int yandex_music_active = 0;
 static int64_t yandex_music_handoff_ms = 0;
+#define VOICE_MODE_SPOTIFY 0
+#define VOICE_MODE_YANDEX  1
+#define VOICE_MODE_REMOTE  2
+#define VOICE_MODE_QUERY   3
+static int voice_mode = VOICE_MODE_SPOTIFY;
+static void persist_voice_mode(int mode) { (void)mode; }
 static int64_t now_ms(void) { return 10000; }
 static void trigger_alice_suppression(int fd, int64_t ms) { (void)fd; (void)ms; g_suppressed++; }
 #define set_led_visualizer(enable) do { g_led_state = (enable); } while(0)
@@ -68,7 +74,7 @@ helpers = (
     + "\n"
     + text_json_src[text_json_src.index("static void trim_trailing_voice_punct"):text_json_src.index("static void append_artist_name")]
 )
-voice_func = source[source.index("static void handle_voice_recognition"):source.index("/* =========================================================================")]
+voice_func = source[source.index("static void apply_voice_mode"):source.index("/* =========================================================================")]
 
 test_c = prefix + helpers + voice_func + '''
 int main(void) {
@@ -554,6 +560,96 @@ int main(void) {{
     subprocess.check_call(["cc", "-O2", "-Wall", "-Wextra", str(probe), "-o", str(bin_p)])
     rc = subprocess.run([str(bin_p)]).returncode
     check(rc == 0, f"led_all_off reattaches the right trigger per hardware (rc={rc})")
+
+# 7. Voice mode config parsing, runtime state persistence, and request polling
+with tempfile.TemporaryDirectory() as td:
+    td_p = pathlib.Path(td)
+    req_dir = td_p / "requests"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    conf_p = td_p / "spotify_api.conf"
+    conf_p.write_text('# VOICE_MODE="yandex"\nVOICE_MODE="REMOTE"\n', encoding="utf-8")
+
+    mode_fns = slice_between(
+        source,
+        "static int parse_voice_mode_value(const char *val) {",
+        "static void handle_quasar_io_stream(",
+    )
+    join_fn = slice_between(
+        source,
+        "static void join_path(char *dst, unsigned long max, const char *a, const char *b) {",
+        "static void lookup_proc_env(",
+    )
+    mode_c = td_p / "mode_cfg_test.c"
+    mode_bin = td_p / "mode_cfg_test"
+    mode_c.write_text(f'''
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define VOICE_MODE_SPOTIFY 0
+#define VOICE_MODE_YANDEX  1
+#define VOICE_MODE_REMOTE  2
+static int voice_mode = VOICE_MODE_SPOTIFY;
+static int yandex_music_active = 0;
+static long long yandex_music_handoff_ms = 0;
+static const char *g_test_req_dir = "{req_dir}";
+static const char *g_test_conf = "{conf_p}";
+static const char *get_requests_dir(void) {{ return g_test_req_dir; }}
+static const char *get_conf_path(void) {{ return g_test_conf; }}
+static int sys_mkdir(const char *p, int m) {{ return mkdir(p, m); }}
+static int sys_open(const char *p, int f, int m) {{ return open(p, f, m); }}
+static long sys_read(int fd, void *b, unsigned long c) {{ return read(fd, b, c); }}
+static long sys_write(int fd, const void *b, unsigned long c) {{ return write(fd, b, c); }}
+static int sys_close(int fd) {{ return close(fd); }}
+static int sys_unlink(const char *p) {{ return unlink(p); }}
+static int mem_equal(const void *a, const void *b, unsigned long n) {{ return memcmp(a, b, n) == 0; }}
+static int str_equal(const char *a, const char *b) {{ return strcmp(a, b) == 0; }}
+static void apply_voice_mode(int mode);
+
+{join_fn}
+{mode_fns}
+
+static void apply_voice_mode(int mode) {{
+    if (mode < VOICE_MODE_SPOTIFY || mode > VOICE_MODE_REMOTE) return;
+    voice_mode = mode;
+    yandex_music_active = (mode == VOICE_MODE_YANDEX);
+    persist_voice_mode_impl(mode);
+}}
+
+int main(void) {{
+    // 1. Conf sets VOICE_MODE="REMOTE", ignoring commented line
+    read_voice_mode_config();
+    if (voice_mode != VOICE_MODE_REMOTE || yandex_music_active != 0) return 1;
+
+    // 2. Runtime mode_state overrides conf across restarts and initializes yandex_music_active
+    FILE *f = fopen("{req_dir}/mode_state", "w");
+    fprintf(f, "yandex\\n");
+    fclose(f);
+    read_voice_mode_config();
+    if (voice_mode != VOICE_MODE_YANDEX || yandex_music_active != 1) return 2;
+
+    // 3. check_mode_request reads requests/mode, unlinks it, and updates mode_state
+    f = fopen("{req_dir}/mode", "w");
+    fprintf(f, "spotify\\n");
+    fclose(f);
+    check_mode_request();
+    if (voice_mode != VOICE_MODE_SPOTIFY || yandex_music_active != 0) return 3;
+    if (access("{req_dir}/mode", F_OK) == 0) return 4;
+
+    char buf[32] = {{0}};
+    f = fopen("{req_dir}/mode_state", "r");
+    if (!f) return 5;
+    fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (strcmp(buf, "spotify\\n") != 0) return 6;
+    return 0;
+}}
+''', encoding="utf-8")
+    subprocess.check_call(["cc", "-O2", "-Wall", "-Wextra", str(mode_c), "-o", str(mode_bin)])
+    rc = subprocess.run([str(mode_bin)]).returncode
+    check(rc == 0, f"voice mode config, state override, and request polling checks passed (rc={rc})")
 
 if failures == 0:
     print("ALL LED & CACHE TESTS PASSED!", flush=True)

@@ -25,8 +25,8 @@ else
 fi
 
 case "$1" in
-    search|enqueue) request_begin || exit 1;;
-    play|pause|next|prev|toggle|deactivate) request_begin hold || exit 1;;
+    search|search-remote|enqueue) request_begin || exit 1;;
+    play|play-remote|pause|next|prev|toggle|toggle-remote|activate|deactivate) request_begin hold || exit 1;;
     seek)
         case "${2:-}" in ''|*[!0-9]*) exit 2;; esac
         request_begin hold || exit 1;;
@@ -80,7 +80,7 @@ elif [ "$1" = what-is-playing ]; then
     (request_exec_soloist ctl -w 127.0.0.1:9090 now 2>/dev/null) || echo "Nothing is playing"
     exit 0
 fi
-if [ "$1" = search ] || [ "$1" = enqueue ]; then
+if [ "$1" = search ] || [ "$1" = search-remote ] || [ "$1" = enqueue ]; then
     exec 8>&-
     if [ -f "$BASE_DIR/scripts/search_and_play.sh" ]; then
         _sap="$BASE_DIR/scripts/search_and_play.sh"
@@ -91,6 +91,8 @@ if [ "$1" = search ] || [ "$1" = enqueue ]; then
     fi
     if [ "$1" = enqueue ]; then
         exec sh "$_sap" --queue "$2" "$GENERATION"
+    elif [ "$1" = search-remote ]; then
+        exec sh "$_sap" --remote "$2" "$GENERATION"
     else
         exec sh "$_sap" "$2" "$GENERATION"
     fi

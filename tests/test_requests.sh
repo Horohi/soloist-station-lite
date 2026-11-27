@@ -643,4 +643,58 @@ control prev
 label='prev when first skip already switches URI never double-skips'
 check sh -c '[ "$(grep -c " prev\$" "$TEST/controls")" -eq 1 ]'
 
+# Remote-control mode helpers: play-remote / toggle-remote / search-remote / activate
+reset
+printf 'playing spotify:track:REMOTE1\n' > "$TEST/now_state"
+control activate
+label='control.sh activate invokes soloist ctl activate cleanly'
+check grep -q ' activate$' "$TEST/controls"
+
+reset
+printf 'paused spotify:track:REMOTE1\n' > "$TEST/now_state"
+control play-remote spotify:track:REMOTE2
+label='control.sh play-remote plays URI without calling activate'
+check sh -c 'grep -q "play spotify:track:REMOTE2$" "$TEST/controls" && ! grep -q " activate" "$TEST/controls"'
+
+reset
+printf 'paused spotify:track:REMOTE1\n' > "$TEST/now_state"
+control toggle-remote
+label='control.sh toggle-remote resumes playback without calling activate'
+check sh -c 'grep -q " play$" "$TEST/controls" && ! grep -q " activate" "$TEST/controls"'
+
+reset
+sh "$TEST/app/scripts/control.sh" search-remote 'включи песню Test'
+_sr_tries=0
+while ! grep -q ' play spotify:track:TEST123$' "$TEST/controls" 2>/dev/null && [ "$_sr_tries" -lt 100 ]; do
+    sleep 0.05
+    _sr_tries=$((_sr_tries + 1))
+done
+label='search-remote resolves track and plays without activating speaker'
+check sh -c 'grep -q " play spotify:track:TEST123$" "$TEST/controls" && ! grep -q " activate" "$TEST/controls" && [ "$(cat "$TEST/app/data/requests/led_fx" 2>/dev/null || true)" = "play" ]'
+
+reset
+sh "$TEST/app/scripts/control.sh" search-remote 'включи музыку'
+_rm_tries=0
+while ! grep -q ' play$' "$TEST/controls" 2>/dev/null && [ "$_rm_tries" -lt 100 ]; do
+    sleep 0.05
+    _rm_tries=$((_rm_tries + 1))
+done
+label='search-remote generic resume runs play-remote without activate or top-hits search'
+check sh -c 'grep -q " play$" "$TEST/controls" && ! grep -q " activate" "$TEST/controls" && [ ! -s "$TEST/calls" ]'
+
+cat > "$TEST/app/bin/soloist" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$TEST/controls"
+case "$*" in
+    *' status') printf 'logged in: yes\n'; exit 0 ;;
+    *' play'*)  exit 1 ;;
+esac
+EOF
+chmod +x "$TEST/app/bin/soloist"
+reset
+rc=0
+sh "$SEARCH" --remote 'включи песню Test' || rc=$?
+label='search-remote signals nodev TTS when no active remote Connect device exists'
+check sh -c '[ "$1" != 0 ] && [ "$(cat "$TEST/app/data/requests/tts" 2>/dev/null || true)" = "nodev" ] && [ "$(cat "$TEST/app/data/requests/led_fx" 2>/dev/null || true)" = "err" ]' -- "$rc"
+
 exit "$failures"

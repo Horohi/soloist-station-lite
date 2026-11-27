@@ -123,9 +123,10 @@ media_prefix = r'''
 #include <string.h>
 #include "voice-request.h"
 static unsigned long str_len(const char *s) { return s ? strlen(s) : 0; }
-static int failures, command_calls, search_calls, resume_calls, suppressed_calls, cache_calls;
+static int failures, command_calls, search_calls, resume_calls, suppressed_calls, cache_calls, tts_calls;
 static char command[32];
 static char command_arg[512];
+static char last_tts[256];
 static int64_t mock_now = 10000;
 static int64_t now_ms(void) { return mock_now; }
 static void log_msg(const char *s) { (void)s; }
@@ -148,7 +149,13 @@ static void run_controller(const char *s, const char *a) {
 static void publish_track(const char *s) { (void)s; }
 static int selection_needs_observation(void) { return 0; }
 static void set_led_visualizer(int enable) { (void)enable; }
-static int send_alice_tts(int fd, const char *s) { (void)fd; (void)s; return 0; }
+static void persist_voice_mode(int mode) { (void)mode; }
+static int send_alice_tts(int fd, const char *s) {
+    (void)fd;
+    tts_calls++;
+    snprintf(last_tts, sizeof(last_tts), "%s", s ? s : "");
+    return 0;
+}
 static const char *get_censor_path(void) { return "/tmp/unused"; }
 static int censor_on_calls, censor_off_calls;
 static int sys_open(const char *p, int f, int m) { (void)p; (void)f; (void)m; censor_on_calls++; return -1; }
@@ -201,11 +208,13 @@ static void check(int good, const char *name) {
     printf("%s %s\n", good ? "PASS" : "FAIL", name); if (!good) failures++;
 }
 static void clear_calls(void) {
-    command_calls = search_calls = resume_calls = suppressed_calls = 0; command[0] = 0; command_arg[0] = 0;
+    command_calls = search_calls = resume_calls = suppressed_calls = tts_calls = 0;
+    command[0] = 0; command_arg[0] = 0; last_tts[0] = 0;
 }
 static void reset_media(void) {
     spotify_is_active = spotify_device_is_active = yandex_music_active = playback_status = 0;
     yandex_music_handoff_ms = 0;
+    voice_mode = VOICE_MODE_SPOTIFY;
     touch_down_start = touch_is_down = 0; last_touch_release_time = 0;
     censor_on_calls = censor_off_calls = 0;
     clear_calls();
@@ -526,6 +535,124 @@ int main(void) {
         voice(color_spotify_searches[i]);
         check(search_calls == 1 && command_calls == 0, color_spotify_searches[i]);
     }
+
+    // 3-mode voice switching (spotify / yandex / remote) & query TTS
+    reset_media();
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":true}");
+    voice("алиса, включи режим яндекс");
+    check(voice_mode == VOICE_MODE_YANDEX && yandex_music_active == 1 && spotify_is_active == 0 &&
+          command_calls == 1 && !strcmp(command, "deactivate") &&
+          tts_calls == 1 && !strcmp(last_tts, "Режим Яндекс"),
+          "switching active local speaker to Yandex mode deactivates and announces mode");
+
+    clear_calls();
+    voice("какой сейчас режим?");
+    check(tts_calls == 1 && !strcmp(last_tts, "Сейчас режим Яндекс") && command_calls == 0,
+          "query mode speaks Yandex mode");
+
+    const char *yandex_ignored_voice[] = {
+        "включи Кино", "включи музыку", "дальше", "назад", "пауза", "что играет", "добавь в очередь Кино"
+    };
+    for (unsigned i = 0; i < sizeof(yandex_ignored_voice) / sizeof(yandex_ignored_voice[0]); i++) {
+        clear_calls();
+        voice(yandex_ignored_voice[i]);
+        check(passed_to_alice() && tts_calls == 0, yandex_ignored_voice[i]);
+    }
+    handle_soloist_ws_json("{\"status\":\"stopped\",\"is_active\":false}");
+    clear_calls();
+    input(163, 1); input(164, 1); input(164, 0);
+    check(passed_to_alice(), "hardware keys pass to Alice in Yandex mode when speaker not locally active");
+    mock_now += 1000;
+    spotify_device_is_active = 1; playback_status = 1;
+    clear_calls();
+    input(164, 1); input(164, 0);
+    check(command_calls == 1 && !strcmp(command, "pause"),
+          "manual Spotify Connect cast on speaker keeps hardware pause working in Yandex mode");
+
+    // Switching to remote mode while inactive does not call deactivate
+    reset_media();
+    voice("переключись на пульт");
+    check(voice_mode == VOICE_MODE_REMOTE && yandex_music_active == 0 && spotify_is_active == 0 &&
+          command_calls == 0 && tts_calls == 1 && !strcmp(last_tts, "Режим пульта"),
+          "switching to remote mode preserves active Connect session without deactivate");
+
+    clear_calls();
+    voice("какой режим");
+    check(tts_calls == 1 && !strcmp(last_tts, "Сейчас режим пульта"),
+          "query mode speaks remote mode");
+
+    // In remote mode with another device (is_active:false) playing, commands steer remote player without claiming local speaker
+    reset_media();
+    voice_mode = VOICE_MODE_REMOTE;
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":false}");
+    const char *remote_ctrl[] = {"дальше", "назад", "пауза", "начни сначала", "перемешай", "повторяй"};
+    const char *remote_exp[]  = {"next",   "prev",  "pause", "seek",          "shuffle",   "repeat"};
+    for (unsigned i = 0; i < sizeof(remote_ctrl) / sizeof(remote_ctrl[0]); i++) {
+        clear_calls();
+        voice(remote_ctrl[i]);
+        check(command_calls == 1 && !strcmp(command, remote_exp[i]) && suppressed_calls == 1 && spotify_is_active == 0,
+              remote_ctrl[i]);
+    }
+
+    handle_soloist_ws_json("{\"status\":\"paused\",\"is_active\":false}");
+    clear_calls(); voice("стоп");
+    check(passed_to_alice(), "paused remote device leaves STOP to Alice");
+
+    handle_soloist_ws_json("{\"status\":\"stopped\",\"is_active\":false}");
+    clear_calls(); voice("пауза");
+    check(passed_to_alice(), "stopped remote device leaves PAUSE to Alice");
+
+    const char *remote_searches[] = {"включи Queen", "включи музыку", "включи плейлист Рок", "включи песню Играй здесь"};
+    for (unsigned i = 0; i < sizeof(remote_searches) / sizeof(remote_searches[0]); i++) {
+        clear_calls();
+        voice(remote_searches[i]);
+        check(command_calls == 1 && !strcmp(command, "search-remote") && suppressed_calls == 1 &&
+              search_calls == 0 && resume_calls == 0 && spotify_is_active == 0,
+              remote_searches[i]);
+    }
+
+    clear_calls(); playback_status = 2; mock_now += 1000;
+    input(164, 1); input(164, 0);
+    check(command_calls == 1 && !strcmp(command, "play-remote") && spotify_is_active == 0,
+          "hardware tap when paused in remote mode dispatches play-remote");
+
+    clear_calls(); playback_status = 0; mock_now += 1000;
+    input(164, 1); input(164, 0);
+    check(command_calls == 1 && !strcmp(command, "toggle-remote") && spotify_is_active == 0,
+          "hardware tap when stopped in remote mode dispatches toggle-remote");
+
+    const char *claim_phrases[] = {"играй здесь", "переключи на колонку", "перенеси музыку сюда"};
+    for (unsigned i = 0; i < sizeof(claim_phrases) / sizeof(claim_phrases[0]); i++) {
+        clear_calls(); spotify_is_active = 0; spotify_device_is_active = 0;
+        voice(claim_phrases[i]);
+        check(command_calls == 1 && !strcmp(command, "activate") && suppressed_calls == 1 && spotify_is_active == 1,
+              claim_phrases[i]);
+    }
+
+    // Yandex handoff while remote PC is playing must not pause/deactivate the PC
+    reset_media();
+    handle_soloist_ws_json("{\"status\":\"playing\",\"is_active\":false}");
+    voice("включи яндекс музыку");
+    check(yandex_music_active == 1 && command_calls == 0 && voice_mode == VOICE_MODE_SPOTIFY,
+          "temporary Yandex handoff never deactivates remote Connect device or flips persistent mode");
+
+    // Switching back to spotify mode & non-mode phrases staying untouched
+    reset_media(); voice_mode = VOICE_MODE_REMOTE;
+    voice("алиса, включи режим спотифай");
+    check(voice_mode == VOICE_MODE_SPOTIFY && tts_calls == 1 && !strcmp(last_tts, "Режим Спотифай"),
+          "switching back to Spotify mode announces mode");
+
+    const char *non_mode_phrases[] = {"детский режим", "алиса, включи ночной режим", "включи режим дискотеки"};
+    for (unsigned i = 0; i < sizeof(non_mode_phrases) / sizeof(non_mode_phrases[0]); i++) {
+        reset_media(); voice_mode = VOICE_MODE_REMOTE;
+        voice(non_mode_phrases[i]);
+        check(voice_mode == VOICE_MODE_REMOTE, non_mode_phrases[i]);
+    }
+
+    reset_media();
+    voice("включи песню Режим");
+    check(voice_mode == VOICE_MODE_SPOTIFY && search_calls == 1 && tts_calls == 0,
+          "explicit song Режим triggers catalog search rather than mode switch");
 
     return failures ? 1 : 0;
 }

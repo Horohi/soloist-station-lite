@@ -307,7 +307,7 @@ def test_soloist_setup():
         assert "5.175.161.40 accounts.spotify.com" in hosts_txt, hosts_txt
 
         # 3. Re-run keeping existing secrets and the market, and disabling SNI proxy
-        api_cfg += "SPOTIFY_MARKET='DE'\n"
+        api_cfg += "SPOTIFY_MARKET='DE'\nVOICE_MODE='remote'\n"
         (yam_root / "etc/horohi.soloist/spotify_api.conf").write_text(api_cfg)
         rerun_input = "\n".join(["", "", "", "", "n", ""])
         subprocess.run(
@@ -838,6 +838,7 @@ def test_doctor_report():
             assert "Hardware tier:" in result.stdout, result.stdout
             assert "Audio rate shim: missing" in result.stdout, result.stdout
             assert "LED config: visualizer=white fx=on" in result.stdout, result.stdout
+            assert "Voice mode: spotify" in result.stdout, result.stdout
             assert "Input devices:" in result.stdout, result.stdout
             assert "Quasar IPC: not observed" in result.stdout, result.stdout
 
@@ -858,6 +859,34 @@ def test_doctor_report():
         print("PASS doctor reports ALSA and Spotify diagnostics without exposing secrets or running configuration")
 
 
+def test_cli_voice_mode():
+    with tempfile.TemporaryDirectory(prefix="soloist-mode-cli-") as temporary:
+        root = pathlib.Path(temporary)
+        (root / "bin").mkdir()
+        (root / "data/requests").mkdir(parents=True)
+        cli = root / "soloist-cli"
+        cli.write_text((ROOT / "scripts/soloist-cli").read_text())
+        cli.chmod(0o755)
+        env = {**os.environ, "INSTALL_DIR": str(root)}
+
+        st0 = subprocess.run(["sh", str(cli), "mode"], env=env, capture_output=True, text=True, check=True)
+        assert "spotify" in st0.stdout, st0.stdout
+
+        for target_mode in ("yandex", "remote", "spotify"):
+            subprocess.run(["sh", str(cli), "mode", target_mode], env=env,
+                           capture_output=True, text=True, check=True)
+            assert (root / "data/requests/mode").read_text() == f"{target_mode}\n"
+            assert (root / "data/requests/mode_state").read_text() == f"{target_mode}\n"
+            st = subprocess.run(["sh", str(cli), "mode", "status"], env=env,
+                                capture_output=True, text=True, check=True)
+            assert target_mode in st.stdout, st.stdout
+
+        bad = subprocess.run(["sh", str(cli), "mode", "invalid"], env=env,
+                             capture_output=True, text=True)
+        assert bad.returncode == 2
+        print("PASS soloist mode CLI status, transitions, and request files")
+
+
 if __name__ == "__main__":
     test_c_yam_paths()
     test_shell_yam_layout()
@@ -870,4 +899,5 @@ if __name__ == "__main__":
     test_plum_external_volume()
     test_standalone_start_migration()
     test_doctor_report()
+    test_cli_voice_mode()
     print("ALL YAM V2 MODE TESTS PASSED!")

@@ -401,6 +401,93 @@ static int is_smart_color_command(const char *lower) {
     return 0;
 }
 
+static int has_explicit_media_marker(const char *lower) {
+    return str_has_word_prefix(lower, "песн") ||
+           str_has_word_prefix(lower, "трек") ||
+           str_has_word_prefix(lower, "альбом") ||
+           str_has_word_prefix(lower, "групп") ||
+           str_has_word_prefix(lower, "исполнител") ||
+           str_has_word_prefix(lower, "артист") ||
+           str_has_word_prefix(lower, "плейлист");
+}
+
+/* Explicit persistent mode commands ("режим яндекс", "режим пульта", "режим спотифай",
+ * "какой сейчас режим"). Returns -1 when unrelated, 0=spotify, 1=yandex, 2=remote, 3=query. */
+static int parse_voice_mode_command(const char *lower) {
+    static const char *const query_phrases[] = {
+        "какой режим",
+        "какой сейчас режим",
+        "текущий режим",
+        "какой режим музыки",
+        "какой музыкальный режим",
+        "какой режим спотифай",
+        "какой режим spotify"
+    };
+    static const char *const exact_spotify[] = {
+        "верни спотифай",
+        "включи спотифай",
+        "включи spotify"
+    };
+    if (!lower || has_explicit_media_marker(lower)) return -1;
+
+    const char *p = skip_voice_fillers(lower);
+    unsigned long len = trim_voice_span_end(p, str_len(p));
+
+    for (unsigned long i = 0; i < sizeof(query_phrases) / sizeof(query_phrases[0]); i++) {
+        unsigned long qlen = str_len(query_phrases[i]);
+        if (len == qlen && mem_equal(p, query_phrases[i], qlen)) return 3;
+    }
+
+    if ((str_has_word_prefix(p, "режим") &&
+         (str_contains(p, "яндекс") || str_contains(p, "я.музык") || str_has_word_prefix(p, "алис"))) ||
+        ((str_contains(p, "переключ") || str_contains(p, "перейд") || str_contains(p, "верн")) &&
+         (str_contains(p, "на яндекс") || str_contains(p, "на я.музык") || str_contains(p, "на алис")))) {
+        return 1;
+    }
+
+    if ((str_has_word_prefix(p, "режим") &&
+         (str_has_word_prefix(p, "пульт") || str_contains(p, "удалён") ||
+          str_contains(p, "удален") || str_contains(p, "ремоут") || str_has_word(p, "remote"))) ||
+        ((str_contains(p, "переключ") || str_contains(p, "перейд") || str_contains(p, "включ")) &&
+         (str_contains(p, "на пульт") || str_contains(p, "пульт спотифай") || str_contains(p, "пульт spotify")))) {
+        return 2;
+    }
+
+    if ((str_has_word_prefix(p, "режим") &&
+         (str_contains(p, "спотифай") || str_contains(p, "spotify") || str_has_word_prefix(p, "колонк"))) ||
+        ((str_contains(p, "переключ") || str_contains(p, "перейд") || str_contains(p, "верн")) &&
+         (str_contains(p, "на спотифай") || str_contains(p, "на spotify")))) {
+        return 0;
+    }
+
+    for (unsigned long i = 0; i < sizeof(exact_spotify) / sizeof(exact_spotify[0]); i++) {
+        unsigned long slen = str_len(exact_spotify[i]);
+        if (len == slen && mem_equal(p, exact_spotify[i], slen)) return 0;
+    }
+    return -1;
+}
+
+/* Explicit requests to transfer Spotify Connect playback to this speaker ("играй здесь",
+ * "переключи на колонку", "перенеси сюда"). Track/playlist words keep catalog searches intact. */
+static int is_claim_speaker_command(const char *lower) {
+    static const char *const phrases[] = {
+        "играй здесь", "играй тут", "играй на колонке",
+        "включи здесь", "включи тут", "включи на колонке",
+        "переключи на колонку", "переведи на колонку", "перенеси на колонку",
+        "передай на колонку", "перекинь на колонку",
+        "звук на колонку", "музыку на колонку",
+        "переключи сюда", "переведи сюда", "перенеси сюда",
+        "переключи звук сюда", "переведи звук сюда", "перенеси звук сюда",
+        "переключи музыку сюда", "переведи музыку сюда", "перенеси музыку сюда"
+    };
+    if (!lower || has_explicit_media_marker(lower)) return 0;
+    const char *p = skip_voice_fillers(lower);
+    for (unsigned long i = 0; i < sizeof(phrases) / sizeof(phrases[0]); i++) {
+        if (str_contains(p, phrases[i])) return 1;
+    }
+    return 0;
+}
+
 /* "включи песню Назад в СССР" / "поставь группу Стоп" / "включи Кино" etc.: a play verb
  * means a catalog search, even if the title contains control words such as "назад",
  * "дальше", "стоп" or "пауза". */

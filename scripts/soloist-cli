@@ -87,6 +87,7 @@ cmd_help() {
     printf "  ${CYAN}status${NC}       Статус плеера, моста, памяти, подсветки и текущего трека\n"
     printf "  ${CYAN}network${NC} [status|auto|off|check]  Управление SNI-прокси Spotify\n"
     printf "  ${CYAN}doctor${NC} [--offline]  Диагностика для отчёта об ошибке\n"
+    printf "  ${CYAN}mode${NC} [spotify|yandex|remote|status]  Режим голосового управления и пульта\n"
     printf "  ${CYAN}led${NC} [on|off|white|rainbow|cyan|green|fx on|fx off|status]  Управление подсветкой и анимациями\n"
     printf "  ${CYAN}restart${NC}      Перезапустить службу Spotify и мост управления\n"
     printf "  ${CYAN}start${NC}        Запустить службу\n"
@@ -194,6 +195,11 @@ cmd_status() {
     else
         printf "  Анимации LED:   ${YELLOW}ВЫКЛЮЧЕНЫ${NC}\n"
     fi
+    case "$(read_voice_mode_state)" in
+        yandex) printf "  Режим голоса:   ${YELLOW}Яндекс (перехват на паузе)${NC}\n" ;;
+        remote) printf "  Режим голоса:   ${CYAN}Пульт (управление активным устройством)${NC}\n" ;;
+        *)      printf "  Режим голоса:   ${GREEN}Спотифай (на колонке)${NC}\n" ;;
+    esac
 
     # Soloist API status
     if [ -x "$INSTALL_DIR/bin/soloist" ]; then
@@ -448,6 +454,7 @@ cmd_doctor() {
     fi
     led_fx=$(read_led_fx_state)
     printf 'LED config: visualizer=%s fx=%s\n' "${led_vis:-white}" "${led_fx:-on}"
+    printf 'Voice mode: %s\n' "$(read_voice_mode_state)"
 
     input_cnt=0
     for _ev in /dev/input/event*; do
@@ -463,6 +470,65 @@ cmd_doctor() {
 
     events=$(doctor_events)
     printf 'Recent diagnostic events:\n%s\n' "${events:-none}"
+}
+
+read_voice_mode_state() {
+    _mode_state_f="$DATA_ROOT/requests/mode_state"
+    _raw_mode=""
+    if [ -f "$_mode_state_f" ]; then
+        _raw_mode=$(LC_ALL=C tr -cd 'A-Za-z' < "$_mode_state_f" 2>/dev/null || true)
+    fi
+    if [ -z "$_raw_mode" ] && [ -r "$CONF_DIR/spotify_api.conf" ]; then
+        _raw_mode=$(LC_ALL=C awk -F= '/^[ \t]*VOICE_MODE=/{
+            v=$2; sub(/[ \t]*#.*/, "", v); gsub(/["'\'' \t\r]/, "", v); val=v
+        } END { print val }' "$CONF_DIR/spotify_api.conf" 2>/dev/null || true)
+    fi
+    _raw_mode=$(printf '%s' "$_raw_mode" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    case "$_raw_mode" in
+        yandex|alice|off|passive) printf 'yandex\n' ;;
+        remote|pult|control)      printf 'remote\n' ;;
+        *)                        printf 'spotify\n' ;;
+    esac
+}
+
+cmd_mode() {
+    ACTION="${1:-status}"
+    REQ_DIR="$DATA_ROOT/requests"
+    REQ_FILE="$REQ_DIR/mode"
+    STATE_FILE="$REQ_DIR/mode_state"
+    ACTION_LC=$(printf '%s' "$ACTION" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+
+    case "$ACTION_LC" in
+        spotify|local|speaker)
+            mkdir -p "$REQ_DIR"
+            printf 'spotify\n' > "$STATE_FILE"
+            printf 'spotify\n' > "$REQ_FILE"
+            printf "${GREEN}Режим Спотифай: поиск и управление воспроизводятся на колонке.${NC}\n"
+            ;;
+        yandex|alice|off|passive)
+            mkdir -p "$REQ_DIR"
+            printf 'yandex\n' > "$STATE_FILE"
+            printf 'yandex\n' > "$REQ_FILE"
+            printf "${YELLOW}Режим Яндекс: голосовой перехват и кнопки отключены (всё идёт Алисе).${NC}\n"
+            ;;
+        remote|pult|control)
+            mkdir -p "$REQ_DIR"
+            printf 'remote\n' > "$STATE_FILE"
+            printf 'remote\n' > "$REQ_FILE"
+            printf "${CYAN}Режим пульта: команды управляют активным устройством Spotify без перехвата на колонку.${NC}\n"
+            ;;
+        status|state)
+            case "$(read_voice_mode_state)" in
+                yandex) printf "Текущий режим: ${BOLD}${YELLOW}yandex${NC} (Яндекс / перехват на паузе)\n" ;;
+                remote) printf "Текущий режим: ${BOLD}${CYAN}remote${NC} (пульт для активного устройства Spotify)\n" ;;
+                *)      printf "Текущий режим: ${BOLD}${GREEN}spotify${NC} (обычное воспроизведение на колонке)\n" ;;
+            esac
+            ;;
+        *)
+            printf "Использование: soloist mode [spotify|yandex|remote|status]\n" >&2
+            return 2
+            ;;
+    esac
 }
 
 read_led_fx_state() {
@@ -925,6 +991,7 @@ cmd_setup() {
     CURR_MARKET=""
     CURR_LED_VIS=""
     CURR_LED_ANIM=""
+    CURR_VOICE_MODE=""
     if [ -f "$CONF_DIR/spotify_api.conf" ]; then
         . "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
         CURR_CID="${SPOTIFY_CLIENT_ID:-}"
@@ -933,6 +1000,7 @@ cmd_setup() {
         case "${LED_VISUALIZER:-}" in ''|*[!A-Za-z0-9_-]*) ;; *) CURR_LED_VIS=$LED_VISUALIZER ;; esac
         _raw_anim="${LED_ANIMATIONS:-${LED_FX:-}}"
         case "$_raw_anim" in ''|*[!A-Za-z0-9_-]*) ;; *) CURR_LED_ANIM=$_raw_anim ;; esac
+        case "${VOICE_MODE:-}" in ''|*[!A-Za-z0-9_-]*) ;; *) CURR_VOICE_MODE=$VOICE_MODE ;; esac
     fi
 
     CURR_FAV=""
@@ -1156,6 +1224,9 @@ EOF
             if [ -n "$CURR_LED_ANIM" ]; then
                 printf "LED_ANIMATIONS='%s'\n" "$CURR_LED_ANIM" >> "$CONF_DIR/spotify_api.conf"
             fi
+            if [ -n "$CURR_VOICE_MODE" ]; then
+                printf "VOICE_MODE='%s'\n" "$CURR_VOICE_MODE" >> "$CONF_DIR/spotify_api.conf"
+            fi
             chmod 600 "$CONF_DIR/spotify_api.conf" 2>/dev/null || true
         )
     elif [ "$_in_cid" = "clear" ] || [ "$_in_cid" = "-" ]; then
@@ -1238,6 +1309,10 @@ case "${1:-}" in
     doctor)
         shift
         cmd_doctor "$@"
+        ;;
+    mode|m)
+        shift
+        cmd_mode "$@"
         ;;
     led)
         shift

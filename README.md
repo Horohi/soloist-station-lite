@@ -75,7 +75,7 @@ adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 Основную конфигурацию выполняет мастер `soloist setup`:
 
 - **Ключ Soloist и имя устройства:** сохраняются в `/data/yam/etc/horohi.soloist/config.env` (YAM v2) или `/data/opt/soloist/start.sh` (Standalone).
-- **Spotify Web API (`spotify_api.conf`):** `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, опционально рынок `SPOTIFY_MARKET="DE"`, цвет эквалайзера `LED_VISUALIZER` и переключатель анимаций `LED_ANIMATIONS="on"|"off"` (пример — `spotify_api.conf.example`).
+- **Spotify Web API (`spotify_api.conf`):** `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, опционально рынок `SPOTIFY_MARKET="DE"`, цвет эквалайзера `LED_VISUALIZER`, переключатель анимаций `LED_ANIMATIONS="on"|"off"` и стартовый режим `VOICE_MODE="spotify"|"yandex"|"remote"` (пример — `spotify_api.conf.example`).
 - **Избранное (`favorites.uri`):** Spotify не даёт внешней ссылки для запуска системного раздела «Любимые треки» с нуля. Внутренний URI коллекции умеет только возобновлять уже загруженную очередь, поэтому для команды *«включи любимые треки»* создайте отдельный обычный плейлист и укажите его ссылку в `soloist setup`.
 - **Параметры звука (`config.env`):** для Лайт 2 (`plum`) по умолчанию выставляется `APULSE_PLAYBACK_DEVICE=sysdefault:CARD=<CARD>` и `APULSE_EXTERNAL_VOLUME=0`; переопределения в `config.env` сохраняются при запуске службы.
 
@@ -101,6 +101,18 @@ adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 | *«Громче»* / *«Тише»* / *«Громкость N»* | Регулировка громкости колонки |
 
 При переключении на Яндекс Музыку (*«включи Яндекс Музыку»*, *«мою волну в Яндексе»*) активный Spotify ставится на паузу без подавления Алисы, а команды *«дальше»*, *«назад»* и *«что играет»* передаются Алисе до возврата в Spotify.
+
+### Режимы управления (Spotify / Яндекс / Пульт)
+
+Кроме автоматического перехода на Яндекс, можно явно фиксировать режим голосом или через `soloist mode`:
+
+| Фраза Алисе | Режим / действие |
+| --- | --- |
+| *«Режим Спотифай»* / *«Переключись на Спотифай»* | **`spotify`** — обычный режим: поиск и управление запускаются на самой колонке |
+| *«Режим Яндекс»* / *«Переключись на Яндекс»* | **`yandex`** — голосовой перехват и кнопки отключены (всё идёт Алисе); ручной каст из приложения Spotify продолжает работать |
+| *«Режим пульта»* / *«Режим удалённого управления»* | **`remote`** — команды *«дальше»*, *«назад»*, *«пауза»*, *«перемешай»*, *«повторяй»* и поиск треков управляются на текущем активном устройстве Spotify (ПК/телефон) без перехвата сессии на колонку |
+| *«Играй здесь»* / *«Переключи на колонку»* / *«Перенеси сюда»* | Переводит активную сессию Spotify с ПК/телефона на саму колонку (`activate`) |
+| *«Какой режим»* / *«Какой сейчас режим»* | Алиса озвучивает текущий активный режим |
 
 ### Цензура и LED-подсветка
 
@@ -129,6 +141,7 @@ adb shell "cd /data/local/tmp/soloist-station-lite && sh ./install.sh"
 | `soloist status` | Статус плеера, моста, сессии Spotify, памяти и текущего трека |
 | `soloist network [status\|auto\|off\|check]` | Статус и управление встроенным SNI-прокси для Spotify |
 | `soloist doctor [--offline]` | Сводка для баг-репорта без утечки ключей, токенов и запросов |
+| `soloist mode [spotify\|yandex\|remote\|status]` | Переключение или проверка режима (`spotify`, `yandex`, `remote`) |
 | `soloist led [on\|off\|white\|rainbow\|cyan\|green\|fx on\|fx off\|status]` | Управление LED-эквалайзером, его цветом и анимациями событий |
 | `soloist start` / `stop` / `restart` | Управление фоновыми службами плеера и моста |
 | `soloist logs [bridge\|search]` | Просмотр логов (`soloist`, `bridge` или `search`) |

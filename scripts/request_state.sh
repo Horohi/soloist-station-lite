@@ -185,7 +185,9 @@ request_dispatch() {
             set -- next
         fi
     fi
-    if [ "$1" = toggle ]; then
+    if [ "$1" = toggle ] || [ "$1" = toggle-remote ]; then
+        _toggle_remote=0
+        [ "$1" != toggle-remote ] || _toggle_remote=1
         request_cli now > "$STATE_DIR/now.$$"
         result=$?
         if [ "$result" != 0 ]; then
@@ -195,11 +197,22 @@ request_dispatch() {
             return "$result"
         fi
         if grep -q paused "$STATE_DIR/now.$$"; then
-            set -- play
+            if [ "$_toggle_remote" = 1 ]; then
+                set -- play-remote
+            else
+                set -- play
+            fi
         else
             set -- pause
         fi
         rm -f "$STATE_DIR/now.$$"
+    fi
+    if [ "$1" = activate ]; then
+        request_cli activate >/dev/null
+        result=$?
+        [ "$result" = 0 ] || request_report "$action" dispatch "$result"
+        flock -u 8
+        return "$result"
     fi
     if [ "$1" = deactivate ]; then
         request_cli pause >/dev/null 2>&1 || true
@@ -263,7 +276,13 @@ EOF
         flock -u 8
         return "$result"
     fi
-    if [ "$1" = play ]; then
+    _remote_play=0
+    if [ "$1" = play-remote ]; then
+        _remote_play=1
+        shift
+        set -- play "$@"
+    fi
+    if [ "$1" = play ] && [ "$_remote_play" = 0 ]; then
         request_cli activate >/dev/null
         result=$?
         if [ "$result" != 0 ]; then
